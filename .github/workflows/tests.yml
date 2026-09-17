@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Inspect sandbox configuration
+        run: docker compose -f docker/compose.yaml --profile test config
+      - name: Unit and syntax tests
+        run: |
+          docker compose -f docker/compose.yaml run --rm --no-deps python-tests
+          docker compose -f docker/compose.yaml run --rm --no-deps php-tests
+          docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec 'find src examples tests/php -name "*.php" -print0 | xargs -0 -n1 php -l'
+      - name: HTTP and FrankenPHP integration
+        run: |
+          docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hostile
+          docker compose -f docker/compose.yaml run --rm --no-deps php-integration
+          docker compose -f docker/compose.yaml run --rm --no-deps integration
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose -f docker/compose.yaml logs --tail 100
+      - name: Stop test containers
+        if: always()
+        run: docker compose -f docker/compose.yaml --profile test down
