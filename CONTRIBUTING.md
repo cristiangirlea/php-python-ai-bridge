@@ -6,6 +6,8 @@ Keep pull requests focused. Use strict types and four-space indentation in PHP; 
 
 Run the deterministic unit, HTTP failure and FrankenPHP integration commands in [README.md](README.md). All project builds, tests and dependency acquisition should run in the supplied Docker environments. Do not run downloaded model code or mount credentials into test containers.
 
+Support the PHP branches still receiving upstream active or security maintenance. Run the deterministic suite on every version listed in `.github/workflows/tests.yml`; use its pinned `BRIDGE_PHP_IMAGE` values to reproduce a matrix job locally. PHP warnings/deprecations fail the PHP tests. Keep the Composer PHP range, image matrix, default runtime and [support policy](docs/testing.md) consistent. Review new stable branches before admitting them and retire EOL branches in a documented release; do not create a separate package per PHP version.
+
 Every new behavior needs a successful case, invalid-input cases, and an observable integration test where the PHP/Python boundary is involved. Model-specific changes also need the optional model smoke tests. Record which tests you actually ran in the PR description.
 
 For bug fixes, use a red-green regression workflow: add a test that fails on the current code, observe that failure, implement the smallest fix, then rerun the focused test and relevant integration tests. The initial prototype was not developed entirely test-first; do not describe test coverage as proof of a TDD history.

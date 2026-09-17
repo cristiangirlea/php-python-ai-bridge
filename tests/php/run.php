@@ -2,6 +2,15 @@
 
 declare(strict_types=1);
 
+// New PHP deprecations must fail compatibility tests, not hide in their output.
+error_reporting(E_ALL);
+set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
+    if (!(error_reporting() & $severity)) {
+        return false;
+    }
+    throw new ErrorException($message, 0, $severity, $file, $line);
+});
+
 require dirname(__DIR__, 2) . '/examples/bootstrap.php';
 
 use PhpAiBridge\BridgeException;
