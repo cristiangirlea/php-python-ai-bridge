@@ -1,5 +1,6 @@
 import time
 import unittest
+from unittest.mock import Mock, patch
 
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
 from ai_bridge.tasks import InvalidInput, validate
@@ -119,6 +120,62 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(self.wait(job["id"])["error"]["code"], "worker_crashed")
         next_job = self.store.submit("test.delay", {"seconds": 0, "value": "recovered"})
         self.assertEqual(self.wait(next_job["id"])["result"]["value"], "recovered")
+
+    def test_pipe_allocation_failure_does_not_stop_coordination(self):
+        real_pipe = self.store._context.Pipe
+        calls = 0
+
+        def transient_failure(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError(24, "Too many open files")
+            return real_pipe(*args, **kwargs)
+
+        with patch.object(self.store._context, "Pipe", side_effect=transient_failure):
+            job = self.store.submit("test.delay", {"seconds": 0})
+            done = self.wait(job["id"], timeout=1)
+            self.assertEqual(done["error"]["code"], "worker_start_failed")
+            recovery = self.store.submit("test.delay", {"seconds": 0, "value": "recovered"})
+            self.assertEqual(self.wait(recovery["id"])["result"]["value"], "recovered")
+            self.assertTrue(self.store._thread.is_alive())
+
+    def test_result_arriving_between_poll_and_exit_check_is_drained(self):
+        receive, send, process = Mock(), Mock(), Mock()
+        # The first poll misses the result; the child exits before is_alive().
+        receive.poll.side_effect = [False, True, False]
+        receive.recv.return_value = ("result", {"value": "completed-before-exit"})
+        process.is_alive.return_value = False
+        with patch.object(self.store._context, "Pipe", return_value=(receive, send)), \
+                patch.object(self.store._context, "Process", return_value=process):
+            job = self.store.submit("test.delay", {"seconds": 0})
+            done = self.wait(job["id"])
+            self.assertEqual(done["status"], "succeeded")
+            self.assertEqual(done["result"]["value"], "completed-before-exit")
+            receive.recv.assert_called_once()
+            receive.close.assert_called_once()
+
+    def test_process_initialization_failures_close_allocated_resources(self):
+        for stage in ["constructor", "start"]:
+            with self.subTest(stage=stage):
+                receive, send, process = Mock(), Mock(), Mock()
+                factory = Mock(return_value=process)
+                if stage == "constructor":
+                    factory.side_effect = OSError("process allocation failed")
+                else:
+                    process.start.side_effect = OSError("process startup failed")
+                # A failed cleanup must not prevent cleanup of the other handles.
+                send.close.side_effect = OSError("close failed")
+                with patch.object(self.store._context, "Pipe", return_value=(receive, send)), \
+                        patch.object(self.store._context, "Process", factory):
+                    job = self.store.submit("test.delay", {"seconds": 0})
+                    self.assertEqual(self.wait(job["id"])["error"]["code"], "worker_start_failed")
+                    send.close.assert_called_once()
+                    receive.close.assert_called_once()
+                    if stage == "start":
+                        process.close.assert_called_once()
+                recovery = self.store.submit("test.delay", {"seconds": 0})
+                self.assertEqual(self.wait(recovery["id"])["status"], "succeeded")
 
     def test_exception_detail_is_not_exposed(self):
         job = self.store.submit("test.error", {})

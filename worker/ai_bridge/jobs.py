@@ -133,18 +133,22 @@ class JobStore:
                         self._finish(job, "timed_out", code="deadline_exceeded")
                         continue
                     if job["status"] == "queued" and len(self._active) < self.settings.concurrency:
-                        receive, send = self._context.Pipe(duplex=False)
-                        process = self._context.Process(
-                            target=_run_child,
-                            args=(send, job["task"], job["_input"], self.settings.backend, self.settings.model_dir),
-                            daemon=True,
-                        )
+                        receive = send = process = None
                         try:
+                            receive, send = self._context.Pipe(duplex=False)
+                            process = self._context.Process(
+                                target=_run_child,
+                                args=(send, job["task"], job["_input"], self.settings.backend, self.settings.model_dir),
+                                daemon=True,
+                            )
                             process.start()
                         except Exception:
-                            send.close()
-                            receive.close()
-                            process.close()
+                            for resource in (send, receive, process):
+                                if resource is not None:
+                                    try:
+                                        resource.close()
+                                    except (OSError, ValueError):
+                                        pass
                             self._finish(job, "failed", code="worker_start_failed")
                             continue
                         send.close()
@@ -154,23 +158,29 @@ class JobStore:
                     if not active:
                         continue
                     process, connection = active
-                    try:
-                        # Each registered task has a bounded number of progress events.
-                        while connection.poll():
-                            kind, value = connection.recv()
-                            if kind == "progress":
-                                job["progress"] = value
-                            elif kind == "result":
-                                self._finish(job, "succeeded", result=value)
-                                break
-                            else:
-                                self._finish(job, "failed", code="task_failed")
-                                break
-                    except (EOFError, OSError):
+                    self._drain(job, connection)
+                    if job["status"] not in TERMINAL and not process.is_alive():
+                        # A result can arrive after the first poll, just before exit.
+                        self._drain(job, connection)
                         if job["status"] not in TERMINAL:
                             self._finish(job, "failed", code="worker_crashed")
-                    if job["status"] not in TERMINAL and not process.is_alive():
-                        self._finish(job, "failed", code="worker_crashed")
+
+    def _drain(self, job, connection):
+        try:
+            # Each registered task has a bounded number of progress events.
+            while connection.poll():
+                kind, value = connection.recv()
+                if kind == "progress":
+                    job["progress"] = value
+                elif kind == "result":
+                    self._finish(job, "succeeded", result=value)
+                    break
+                else:
+                    self._finish(job, "failed", code="task_failed")
+                    break
+        except (EOFError, OSError):
+            if job["status"] not in TERMINAL:
+                self._finish(job, "failed", code="worker_crashed")
 
     def close(self):
         self._stopping.set()
