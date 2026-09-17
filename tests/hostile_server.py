@@ -1,6 +1,7 @@
 """Test-only peers returning malformed responses. Never used by the task service."""
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -9,6 +10,8 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == "/v1/jobs/" + "c" * 32:
+            time.sleep(0.25)
         self.respond("wrong_id")
 
     def do_POST(self):

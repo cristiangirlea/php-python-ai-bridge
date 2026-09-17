@@ -63,6 +63,19 @@ foreach (['malformed', 'oversized', 'content_type', 'upstream_error', 'redirect'
     }
 }
 rejects(fn () => $hostile->get(str_repeat('a', 32)), BridgeException::class);
+try {
+    $hostile->wait(str_repeat('c', 32), 50, 1);
+    throw new RuntimeException('Expected delayed polling timeout');
+} catch (BridgeException $error) {
+    check($error->errorCode === 'wait_timeout', 'Deadline during polling is a local wait timeout');
+}
+$shortRequest = new Client('http://hostile:8090', $token, 50);
+try {
+    $shortRequest->wait(str_repeat('c', 32), 2000, 1);
+    throw new RuntimeException('Expected independent request timeout');
+} catch (BridgeException $error) {
+    check($error->errorCode === 'transport_error', 'Shorter request timeout remains a transport error');
+}
 $client = new Client('http://fault-worker:8090', $token);
 $recovery = $client->submit('test.delay', ['seconds' => 0, 'value' => 'still-healthy']);
 check($client->wait($recovery->id)->result['value'] === 'still-healthy', 'Service recovers after crash and timeout');

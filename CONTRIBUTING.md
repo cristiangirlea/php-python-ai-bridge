@@ -8,6 +8,8 @@ Run the deterministic unit, HTTP failure and FrankenPHP integration commands in 
 
 Every new behavior needs a successful case, invalid-input cases, and an observable integration test where the PHP/Python boundary is involved. Model-specific changes also need the optional model smoke tests. Record which tests you actually ran in the PR description.
 
+For bug fixes, use a red-green regression workflow: add a test that fails on the current code, observe that failure, implement the smallest fix, then rerun the focused test and relevant integration tests. The initial prototype was not developed entirely test-first; do not describe test coverage as proof of a TDD history.
+
 Never commit `.env`, model weights, caches, private application documents, generated credentials or local environment reports. Update public documentation when the contract changes.
 
 Use descriptive commits such as `feat: add ...`, `fix: reject ...`, or `test: cover ...`. Open changes as pull requests against `main`.

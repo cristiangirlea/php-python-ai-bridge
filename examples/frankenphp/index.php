@@ -55,7 +55,7 @@ $handler = static function () use ($client, &$handled): void {
         http_response_code(400);
         echo json_encode(['error' => 'invalid_request']);
     } catch (BridgeException $error) {
-        http_response_code($error->httpStatus === 404 ? 404 : 502);
+        http_response_code(in_array($error->httpStatus, [400, 404, 413, 429], true) ? $error->httpStatus : 502);
         echo json_encode(['error' => $error->errorCode]);
     }
 };

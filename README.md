@@ -19,6 +19,8 @@ The default backend is **`lexical-demo-not-a-model`**: deterministic word overla
 
 Requirements: Docker Engine/Desktop with Linux containers and Docker Compose. The provided images and model wheel lock target **Linux x86_64 / Python 3.12**; other architectures are not verified. No local PHP or Python installation is needed.
 
+The PHP client targets PHP 8.2+, but the supplied test environment currently exercises PHP 8.4 only.
+
 Set a random, disposable service token in your shell:
 
 ```sh

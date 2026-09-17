@@ -69,6 +69,17 @@ def main():
         assert error.code == 404
     else:
         raise AssertionError("An unknown job returned another request's result")
+    for field in ["query", "documents"]:
+        body = {"query": "x", "documents": ["x"]}
+        body[field] = "x" * 8193 if field == "query" else ["x" * 8193]
+        try:
+            request("/rerank", body)
+        except HTTPError as error:
+            assert error.code == 400, (field, error.code)
+        else:
+            raise AssertionError("Oversized input was accepted")
+        body[field] = "é" * 8192 if field == "query" else ["é" * 8192]
+        assert request("/rerank", body)[0] == 202, "Character boundary must allow multibyte text"
     print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; invalid and missing-job cases")
 
 

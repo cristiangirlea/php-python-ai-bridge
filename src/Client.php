@@ -82,7 +82,7 @@ final class Client
             if ($remaining < 1) {
                 throw new BridgeException('Local wait deadline exceeded; remote job may still be running', 'wait_timeout');
             }
-            $job = $this->jobResponse('GET', '/v1/jobs/' . $id, $id, null, min($remaining, $this->requestTimeoutMs));
+            $job = $this->jobResponse('GET', '/v1/jobs/' . $id, $id, null, min($remaining, $this->requestTimeoutMs), $deadline);
             if ($job->isTerminal()) {
                 return $job;
             }
@@ -98,16 +98,16 @@ final class Client
         }
     }
 
-    private function jobResponse(string $method, string $path, string $id, ?array $body = null, ?int $timeoutMs = null): Job
+    private function jobResponse(string $method, string $path, string $id, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): Job
     {
-        $job = Job::fromArray($this->request($method, $path, $body, $timeoutMs));
+        $job = Job::fromArray($this->request($method, $path, $body, $timeoutMs, $waitDeadline));
         if ($job->id !== $id) {
             throw new BridgeException('Job ID does not match the request', 'invalid_response');
         }
         return $job;
     }
 
-    private function request(string $method, string $path, ?array $body = null, ?int $timeoutMs = null): array
+    private function request(string $method, string $path, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): array
     {
         $json = $body === null ? null : json_encode((object) $body, JSON_THROW_ON_ERROR);
         if ($json !== null && strlen($json) > 262144) {
@@ -146,6 +146,11 @@ final class Client
                 throw new BridgeException('Response exceeds 262144 bytes', 'invalid_response');
             }
             if ($ok === false) {
+                // cURL accepts whole milliseconds; allow only that rounding margin.
+                if (curl_errno($handle) === CURLE_OPERATION_TIMEDOUT && $waitDeadline !== null
+                    && hrtime(true) >= $waitDeadline - 1_000_000) {
+                    throw new BridgeException('Local wait deadline exceeded; remote job may still be running', 'wait_timeout');
+                }
                 throw new BridgeException('Bridge transport failed; submission outcome may be unknown', 'transport_error');
             }
             if ($status < 200 || $status >= 300) {
