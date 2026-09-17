@@ -1,0 +1,178 @@
+name: php-python-ai-bridge
+
+x-limits: &limits
+  platform: linux/amd64
+  user: "65532:65532"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  mem_limit: 512m
+  cpus: 1
+  working_dir: /work
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+  volumes:
+    - ..:/work:ro
+
+x-python: &python
+  <<: *limits
+  image: python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970
+  environment: &python-env
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONPATH: /work/worker
+    BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN to a random service token of at least 32 characters}
+
+x-php: &php
+  <<: *limits
+  image: dunglas/frankenphp:1.12.7-php8.4-bookworm@sha256:069ddad6dd0f7d10e170d80038e247dfce1b74b36e8a2c60e4b18fe280dd2052
+  entrypoint: []
+  environment: &php-env
+    BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN}
+    BRIDGE_URL: http://worker:8090
+    XDG_CONFIG_HOME: /tmp/config
+    XDG_DATA_HOME: /tmp/data
+
+services:
+  worker:
+    <<: *python
+    networks: [isolated]
+    command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
+
+  frankenphp:
+    <<: *php
+    entrypoint: [sh, /work/scripts/run_frankenphp.sh]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /runtime:rw,exec,nosuid,size=256m,uid=65532,gid=65532
+    networks: [isolated]
+    depends_on: [worker]
+    command: [run, --config, /work/examples/frankenphp/Caddyfile, --adapter, caddyfile]
+
+  python-tests:
+    <<: *python
+    profiles: [test]
+    network_mode: none
+    command: [python, -m, unittest, discover, -s, tests/python, -v]
+
+  php-tests:
+    <<: *php
+    profiles: [test]
+    network_mode: none
+    command: [php, tests/php/run.php]
+
+  integration:
+    <<: *python
+    profiles: [test]
+    networks: [isolated]
+    environment:
+      <<: *python-env
+      FRANKENPHP_URL: http://frankenphp:8080
+      WORKER_URL: http://worker:8090
+    command: [python, tests/integration.py]
+
+  php-example:
+    <<: *php
+    profiles: [example]
+    networks: [isolated]
+    command: [php, examples/rerank.php]
+
+  fault-worker:
+    <<: *python
+    profiles: [test]
+    networks: [isolated]
+    environment:
+      <<: *python-env
+      BRIDGE_TEST_TASKS: "1"
+      BRIDGE_CONCURRENCY: "1"
+    command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
+
+  hostile:
+    <<: *python
+    profiles: [test]
+    networks: [isolated]
+    command: [python, tests/hostile_server.py]
+
+  php-integration:
+    <<: *php
+    profiles: [test]
+    networks: [isolated]
+    command: [php, tests/php/integration.php]
+
+  fetcher:
+    <<: *python
+    profiles: [model-fetch]
+    network_mode: bridge
+    mem_limit: 512m
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "1"
+    command:
+      - sh
+      - -ec
+      - 'python -m pip download --require-hashes --only-binary=:all: --dest /cache/wheels -r requirements-model.lock && python scripts/fetch_model.py'
+
+  model-worker:
+    <<: *python
+    profiles: [model]
+    mem_limit: 1536m
+    networks: [isolated]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m,uid=65532,gid=65532
+      - /deps:rw,exec,nosuid,size=512m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache:ro
+    environment:
+      <<: *python-env
+      PYTHONPATH: /work/worker:/deps
+      BRIDGE_BACKEND: onnx
+      BRIDGE_MODEL_DIR: /cache/models
+      BRIDGE_CONCURRENCY: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "1"
+    command:
+      - sh
+      - -ec
+      - 'python -m pip install --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-model.lock && exec python -m ai_bridge.server --host 0.0.0.0'
+
+  model-test:
+    <<: *php
+    profiles: [model]
+    networks: [isolated]
+    environment:
+      <<: *php-env
+      BRIDGE_URL: http://model-worker:8090
+    command: [php, tests/php/model.php]
+
+  model-frankenphp:
+    <<: *php
+    profiles: [model]
+    entrypoint: [sh, /work/scripts/run_frankenphp.sh]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /runtime:rw,exec,nosuid,size=256m,uid=65532,gid=65532
+    networks: [isolated]
+    depends_on: [model-worker]
+    environment:
+      <<: *php-env
+      BRIDGE_URL: http://model-worker:8090
+    command: [run, --config, /work/examples/frankenphp/Caddyfile, --adapter, caddyfile]
+
+  model-integration:
+    <<: *python
+    profiles: [model]
+    networks: [isolated]
+    environment:
+      <<: *python-env
+      FRANKENPHP_URL: http://model-frankenphp:8080
+    command: [python, tests/model_integration.py]
+
+networks:
+  isolated:
+    internal: true

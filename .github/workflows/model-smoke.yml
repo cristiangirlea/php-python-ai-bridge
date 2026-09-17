@@ -1,0 +1,35 @@
+name: Real model smoke tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare disposable cache
+        run: mkdir -p .cache && chmod 777 .cache
+      - name: Inspect acquisition and execution limits
+        run: docker compose -f docker/compose.yaml --profile model-fetch --profile model config
+      - name: Acquire hash-pinned wheels and model files
+        run: docker compose -f docker/compose.yaml run --rm --no-deps fetcher
+      - name: Offline model tests
+        run: |
+          docker compose -f docker/compose.yaml up -d model-worker model-frankenphp
+          docker compose -f docker/compose.yaml run --rm --no-deps model-test
+          docker compose -f docker/compose.yaml run --rm --no-deps model-integration
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose -f docker/compose.yaml --profile model logs --tail 100
+      - name: Stop test containers
+        if: always()
+        run: docker compose -f docker/compose.yaml --profile model down
