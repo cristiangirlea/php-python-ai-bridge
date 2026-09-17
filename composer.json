@@ -3,7 +3,7 @@
   "description": "A typed PHP client for bounded Python AI tasks, with a FrankenPHP example",
   "type": "library",
   "license": "MIT",
-  "require": {"php": "^8.2", "ext-curl": "*", "ext-json": "*"},
+  "require": {"php": ">=8.2 <8.6", "ext-curl": "*", "ext-json": "*"},
   "autoload": {"psr-4": {"PhpAiBridge\\": "src/"}},
   "scripts": {"test": "php tests/php/run.php"}
 }

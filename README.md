@@ -6,7 +6,7 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 
 ## What is implemented
 
-- PHP 8.2+ client using cURL, with validated job and reranking result objects.
+- PHP 8.2–8.5 client using cURL, with validated job and reranking result objects.
 - Python 3.12 service with an explicit task allowlist and a separate process per task.
 - Bounded concurrency, queue/result capacity, retention, request sizes and execution deadlines.
 - Cancellation, progress polling, crash detection and generic errors that omit internal exception text.
@@ -19,7 +19,7 @@ The default backend is **`lexical-demo-not-a-model`**: deterministic word overla
 
 Requirements: Docker Engine/Desktop with Linux containers and Docker Compose. The provided images and model wheel lock target **Linux x86_64 / Python 3.12**; other architectures are not verified. No local PHP or Python installation is needed.
 
-The PHP client targets PHP 8.2+, but the supplied test environment currently exercises PHP 8.4 only.
+One Composer package supports PHP 8.2, 8.3, 8.4 and 8.5: the upstream-supported PHP branches as of September 2026. The default demo uses PHP 8.5; CI exercises all four branches. See [support policy and verification limits](docs/testing.md).
 
 Set a random, disposable service token in your shell:
 
@@ -76,6 +76,8 @@ The downloaded cache remains for reuse; it is not included in Git.
 
 ## Use from PHP
 
+See the [integration guide](docs/integration.md) for Composer evaluation setup, manual Symfony/Laravel configuration, application job ownership and failure handling. Dedicated framework adapters are not implemented yet.
+
 This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. There is no tagged release or Packagist publication yet; use a Composer path/VCS repository during evaluation. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
 
 ```php
@@ -116,7 +118,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
 
 Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only in the test service with `BRIDGE_TEST_TASKS=1`.
 
-CI runs deterministic tests for pushes and pull requests. A separate, manually dispatched workflow performs model acquisition and the real-model smoke tests; it does not use paid APIs or GPUs.
+CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. The stable `deterministic` check succeeds only if every PHP matrix job succeeds. A separate, manually dispatched workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image; it does not use paid APIs or GPUs.
 
 ## Important limits
 
@@ -128,7 +130,7 @@ CI runs deterministic tests for pushes and pull requests. A separate, manually d
 - **Cancellation cannot undo effects:** registered future tasks must manage their own external side effects. A transport failure during POST has an uncertain submission outcome; the client never retries POST automatically.
 - **No token streaming:** progress is polled by job ID. There is no SSE, MCP server, framework plugin or chat SDK.
 
-See [the protocol](docs/protocol.md), [security boundaries](docs/security.md), and [contributing](CONTRIBUTING.md).
+See [the integration guide](docs/integration.md), [test evidence and limits](docs/testing.md), [the protocol](docs/protocol.md), [security boundaries](docs/security.md), and [contributing](CONTRIBUTING.md).
 
 ## License
 

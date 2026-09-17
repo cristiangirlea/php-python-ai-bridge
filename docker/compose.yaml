@@ -26,7 +26,7 @@ x-python: &python
 
 x-php: &php
   <<: *limits
-  image: dunglas/frankenphp:1.12.7-php8.4-bookworm@sha256:069ddad6dd0f7d10e170d80038e247dfce1b74b36e8a2c60e4b18fe280dd2052
+  image: ${BRIDGE_PHP_IMAGE:-dunglas/frankenphp:1.12.7-php8.5-bookworm@sha256:7380f2c24ef9d86ad496dbc285ba66e212365c864db2797f3e7269afad100dbb}
   entrypoint: []
   environment: &php-env
     BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN}
