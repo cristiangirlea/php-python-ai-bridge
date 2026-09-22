@@ -22,7 +22,7 @@ $handler = static function () use ($client, &$handled): void {
             echo json_encode(['status' => 'ok']);
             return;
         }
-        if ($method === 'POST' && $path === '/rerank') {
+        if ($method === 'POST' && ($path === '/rerank' || $path === '/embed')) {
             $raw = file_get_contents('php://input', false, null, 0, 262145);
             if ($raw === false || strlen($raw) > 262144) {
                 http_response_code(413);
@@ -30,14 +30,24 @@ $handler = static function () use ($client, &$handled): void {
                 return;
             }
             $body = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
-            if (!is_array($body) || !is_string($body['query'] ?? null) || !is_array($body['documents'] ?? null)) {
-                throw new InvalidArgumentException('Invalid rerank input');
+            if (!is_array($body)) {
+                throw new InvalidArgumentException('Invalid input');
             }
-            // An explicit null is present, not absent, and must fail like the worker would fail it.
-            if (array_key_exists('top_k', $body) && !is_int($body['top_k'])) {
-                throw new InvalidArgumentException('top_k must be an integer');
+            if ($path === '/embed') {
+                if (!is_array($body['texts'] ?? null)) {
+                    throw new InvalidArgumentException('Invalid embed input');
+                }
+                $job = $client->submitEmbed($body['texts']);
+            } else {
+                if (!is_string($body['query'] ?? null) || !is_array($body['documents'] ?? null)) {
+                    throw new InvalidArgumentException('Invalid rerank input');
+                }
+                // An explicit null is present, not absent, and must fail like the worker would fail it.
+                if (array_key_exists('top_k', $body) && !is_int($body['top_k'])) {
+                    throw new InvalidArgumentException('top_k must be an integer');
+                }
+                $job = $client->submitRerank($body['query'], $body['documents'], topK: $body['top_k'] ?? null);
             }
-            $job = $client->submitRerank($body['query'], $body['documents'], topK: $body['top_k'] ?? null);
             http_response_code(202);
         } elseif (preg_match('#\A/jobs/([a-f0-9]{32})(/cancel)?\z#', $path ?? '', $matches)) {
             if ($method === 'GET' && !isset($matches[2])) {

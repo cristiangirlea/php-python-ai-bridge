@@ -8,6 +8,7 @@ final class Client
 {
     /** Request limits shared with the worker; RerankResult checks responses against the same cap. */
     public const MAX_DOCUMENTS = 512;
+    public const MAX_TEXTS = 32;
     public const MAX_TOTAL_BYTES = 200000;
 
     private readonly string $baseUrl;
@@ -54,16 +55,7 @@ final class Client
         if (trim($query) === '' || !array_is_list($documents) || count($documents) < 1 || count($documents) > self::MAX_DOCUMENTS) {
             throw new \InvalidArgumentException('Expected a query and 1-' . self::MAX_DOCUMENTS . ' documents');
         }
-        // Counted in bytes as sent; the worker counts characters. Escaped quotes and backslashes
-        // can still push an accepted request over the transport limit checked in submit().
-        $total = strlen($query);
-        foreach ($documents as $document) {
-            if (!is_string($document) || trim($document) === '') {
-                throw new \InvalidArgumentException('Documents must be nonempty strings');
-            }
-            $total += strlen($document);
-        }
-        if ($total > self::MAX_TOTAL_BYTES) {
+        if (strlen($query) + self::textBytes($documents, 'Documents') > self::MAX_TOTAL_BYTES) {
             throw new \InvalidArgumentException('Query and documents must total at most ' . self::MAX_TOTAL_BYTES . ' bytes');
         }
         if ($topK !== null && ($topK < 1 || $topK > count($documents))) {
@@ -74,6 +66,18 @@ final class Client
             $input['top_k'] = $topK;
         }
         return $this->submit('rerank', $input, $timeoutMs);
+    }
+
+    /** Returns one unit-length vector per text; the caller owns any index built from them. */
+    public function submitEmbed(array $texts, int $timeoutMs = 30000): Job
+    {
+        if (!array_is_list($texts) || count($texts) < 1 || count($texts) > self::MAX_TEXTS) {
+            throw new \InvalidArgumentException('Expected 1-' . self::MAX_TEXTS . ' texts');
+        }
+        if (self::textBytes($texts, 'Texts') > self::MAX_TOTAL_BYTES) {
+            throw new \InvalidArgumentException('Texts must total at most ' . self::MAX_TOTAL_BYTES . ' bytes');
+        }
+        return $this->submit('embed', ['texts' => $texts], $timeoutMs);
     }
 
     public function get(string $id): Job
@@ -108,6 +112,22 @@ final class Client
             $sleepMs = min($pollIntervalMs, max(0, (int) floor(($deadline - hrtime(true)) / 1_000_000)));
             usleep($sleepMs * 1000);
         }
+    }
+
+    /**
+     * Counted in bytes as sent; the worker counts characters. Escaped quotes and backslashes
+     * can still push an accepted request over the transport limit checked in submit().
+     */
+    private static function textBytes(array $strings, string $noun): int
+    {
+        $total = 0;
+        foreach ($strings as $string) {
+            if (!is_string($string) || trim($string) === '') {
+                throw new \InvalidArgumentException($noun . ' must be nonempty strings');
+            }
+            $total += strlen($string);
+        }
+        return $total;
     }
 
     private function validateId(string $id): void
