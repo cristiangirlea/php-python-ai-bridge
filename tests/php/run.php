@@ -60,11 +60,19 @@ rejects(fn () => $client->submitRerank('x', ['key' => 'x']), InvalidArgumentExce
 rejects(fn () => $client->submitRerank('x', [1]), InvalidArgumentException::class);
 rejects(fn () => $client->submitRerank('x', array_fill(0, 513, 'doc')), InvalidArgumentException::class);
 rejects(fn () => $client->submitRerank('x', array_fill(0, 25, str_repeat('y', 8000))), InvalidArgumentException::class);
-rejects(fn () => $client->submitRerank('x', ['a', 'b'], 30000, 0), InvalidArgumentException::class);
-rejects(fn () => $client->submitRerank('x', ['a', 'b'], 30000, 3), InvalidArgumentException::class);
-// Accepted input reaches the transport, which has no worker to answer it here.
-rejects(fn () => $client->submitRerank('x', array_fill(0, 512, 'doc')), BridgeException::class);
-rejects(fn () => $client->submitRerank('x', ['a', 'b'], 30000, 2), BridgeException::class);
+rejects(fn () => $client->submitRerank('x', ['a', 'b'], topK: 0), InvalidArgumentException::class);
+rejects(fn () => $client->submitRerank('x', ['a', 'b'], topK: 3), InvalidArgumentException::class);
+// Accepted input reaches the transport; port 1 refuses instantly so the failure mode is explicit.
+$unreachable = new Client('http://127.0.0.1:1', $token, 1);
+foreach ([fn () => $unreachable->submitRerank('x', array_fill(0, 512, 'doc')),
+          fn () => $unreachable->submitRerank('x', ['a', 'b'], topK: 2)] as $accepted) {
+    try {
+        $accepted();
+        throw new RuntimeException('Expected transport failure');
+    } catch (BridgeException $error) {
+        check($error->errorCode === 'transport_error', 'Accepted rerank input reaches the transport');
+    }
+}
 rejects(fn () => $client->wait(str_repeat('a', 32), 0), InvalidArgumentException::class);
 $job = Job::fromArray(sample());
 check(!$job->isTerminal(), 'queued is not terminal');
@@ -90,13 +98,15 @@ foreach ([['index' => 1, 'score' => 0], ['index' => -1, 'score' => 0], ['index' 
     $data['result']['rankings'][1] = $bad;
     rejects(fn () => RerankResult::fromJob(Job::fromArray($data), 2), BridgeException::class);
 }
-// A top_k response carries fewer rankings than documents, but never more.
+// A narrowed response must match the requested top_k exactly, and every document when none was requested.
 $narrowed = sample();
 $narrowed['status'] = 'succeeded';
 $narrowed['result'] = ['model' => 'test', 'rankings' => [['index' => 2, 'score' => 5.0]]];
-check(RerankResult::fromJob(Job::fromArray($narrowed), 3)->rankings[0]['index'] === 2, 'top_k rerank result');
-rejects(fn () => RerankResult::fromJob(Job::fromArray($narrowed), 2), BridgeException::class);
+check(RerankResult::fromJob(Job::fromArray($narrowed), 3, 1)->rankings[0]['index'] === 2, 'top_k rerank result');
+foreach ([[3, null], [3, 2], [2, 1], [3, 4], [3, 0]] as [$documentCount, $topK]) {
+    rejects(fn () => RerankResult::fromJob(Job::fromArray($narrowed), $documentCount, $topK), BridgeException::class);
+}
 $narrowed['result']['rankings'] = [];
-rejects(fn () => RerankResult::fromJob(Job::fromArray($narrowed), 3), BridgeException::class);
+rejects(fn () => RerankResult::fromJob(Job::fromArray($narrowed), 3, 1), BridgeException::class);
 
 echo "PASS: $count PHP contract checks\n";

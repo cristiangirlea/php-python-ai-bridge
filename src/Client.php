@@ -6,6 +6,10 @@ namespace PhpAiBridge;
 
 final class Client
 {
+    /** Request limits shared with the worker; RerankResult checks responses against the same cap. */
+    public const MAX_DOCUMENTS = 512;
+    public const MAX_TOTAL_BYTES = 200000;
+
     private readonly string $baseUrl;
 
     public function __construct(
@@ -47,10 +51,11 @@ final class Client
     /** A null top_k returns every document ranked; the worker enforces the same limits. */
     public function submitRerank(string $query, array $documents, int $timeoutMs = 30000, ?int $topK = null): Job
     {
-        if (trim($query) === '' || !array_is_list($documents) || count($documents) < 1 || count($documents) > 512) {
-            throw new \InvalidArgumentException('Expected a query and 1-512 documents');
+        if (trim($query) === '' || !array_is_list($documents) || count($documents) < 1 || count($documents) > self::MAX_DOCUMENTS) {
+            throw new \InvalidArgumentException('Expected a query and 1-' . self::MAX_DOCUMENTS . ' documents');
         }
-        // Bytes are counted here, characters in the worker; bytes reach the request limit first.
+        // Counted in bytes as sent; the worker counts characters. Escaped quotes and backslashes
+        // can still push an accepted request over the transport limit checked in submit().
         $total = strlen($query);
         foreach ($documents as $document) {
             if (!is_string($document) || trim($document) === '') {
@@ -58,8 +63,8 @@ final class Client
             }
             $total += strlen($document);
         }
-        if ($total > 200000) {
-            throw new \InvalidArgumentException('Query and documents must total at most 200000 bytes');
+        if ($total > self::MAX_TOTAL_BYTES) {
+            throw new \InvalidArgumentException('Query and documents must total at most ' . self::MAX_TOTAL_BYTES . ' bytes');
         }
         if ($topK !== null && ($topK < 1 || $topK > count($documents))) {
             throw new \InvalidArgumentException('top_k must be between 1 and the document count');
@@ -123,7 +128,8 @@ final class Client
 
     private function request(string $method, string $path, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): array
     {
-        $json = $body === null ? null : json_encode((object) $body, JSON_THROW_ON_ERROR);
+        // Raw UTF-8 keeps the encoded size close to the byte budget; the worker decodes UTF-8 directly.
+        $json = $body === null ? null : json_encode((object) $body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         if ($json !== null && strlen($json) > 262144) {
             throw new \InvalidArgumentException('Request exceeds 262144 bytes');
         }
