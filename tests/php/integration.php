@@ -7,6 +7,7 @@ require __DIR__ . '/run.php';
 use PhpAiBridge\BridgeException;
 use PhpAiBridge\Client;
 use PhpAiBridge\EmbedResult;
+use PhpAiBridge\RedactResult;
 use PhpAiBridge\RerankResult;
 
 function ready(Client $client): void
@@ -96,4 +97,8 @@ check(count($result->rankings) === 2 && $result->rankings[0]['index'] === 7, 'to
 $job = $real->submitEmbed(['red apple', 'apple red', 'blue sky']);
 $vectors = EmbedResult::fromJob($real->wait($job->id), 3)->vectors;
 check($vectors[0] === $vectors[1] && $vectors[0] !== $vectors[2], 'embedding round trip through the PHP client');
+$text = 'Mail me at a@b.co or on +44 20 7946 0958 today';
+$job = $real->submitRedact($text);
+$redaction = RedactResult::fromJob($real->wait($job->id), $text);
+check($redaction->text === 'Mail me at [EMAIL] or on [PHONE] today' && count($redaction->spans) === 2, 'redaction round trip through the PHP client');
 echo "PASS: $count total PHP checks including real HTTP failure cases\n";

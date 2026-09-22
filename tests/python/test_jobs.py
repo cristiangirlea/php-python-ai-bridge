@@ -65,6 +65,24 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(payload=str(payload)[:60]), self.assertRaises(InvalidInput):
                 validate("embed", payload)
 
+    def test_valid_redact(self):
+        for payload in [{"text": "hello"}, {"text": "hello", "entities": []},
+                        {"text": "hello", "entities": ["PER", "ORG", "LOC"], "min_score": 0.5},
+                        {"text": "hello", "min_score": 1}]:
+            with self.subTest(payload=payload):
+                self.assertEqual(validate("redact", payload), payload)
+
+    def test_redact_invalid_contracts(self):
+        for payload in [None, [], {}, {"text": ""}, {"text": "x" * 8193}, {"text": "\ud800"},
+                        {"text": "x", "extra": 1}, {"text": "x", "entities": "PER"},
+                        {"text": "x", "entities": ["MISC"]}, {"text": "x", "entities": ["PER", "PER"]},
+                        {"text": "x", "entities": [1]}, {"text": "x", "entities": [["PER"]]},
+                        {"text": "x", "min_score": -0.1}, {"text": "x", "min_score": 1.5},
+                        {"text": "x", "min_score": True}, {"text": "x", "min_score": "0.9"},
+                        {"text": "x", "min_score": float("nan")}]:
+            with self.subTest(payload=str(payload)[:60]), self.assertRaises(InvalidInput):
+                validate("redact", payload)
+
     def test_tests_are_disabled_by_default(self):
         with self.assertRaises(InvalidInput):
             validate("test.crash", {})
@@ -115,6 +133,52 @@ class EmbedBackendTests(unittest.TestCase):
             self.fail("no cancelling pair found")
         vector = self.embed([f"{seen[(bucket, 1 - sign)]} {word}"])[0]
         self.assertAlmostEqual(math.sqrt(sum(x * x for x in vector)), 1.0, places=4)
+
+
+class RedactRulesTests(unittest.TestCase):
+    @staticmethod
+    def redact(text, **options):
+        return execute("redact", {"text": text, **options}, "lexical", "", lambda *_: None)
+
+    def test_rules_only_backend_is_explicit_and_leaves_clean_text_alone(self):
+        result = self.redact("The weather is nice today.")
+        self.assertEqual(result, {"model": "rules-only-not-a-model", "text": "The weather is nice today.", "spans": []})
+
+    def test_identifiers_are_masked_with_sources_and_scores(self):
+        text = ("Mail a.b+c@example.co.uk, card 4111 1111 1111 1111, IBAN GB82 WEST 1234 5698 7654 32, "
+                "ip 10.0.0.1, tel +44 20 7946 0958.")
+        result = self.redact(text)
+        self.assertEqual(result["text"], "Mail [EMAIL], card [CARD], IBAN [IBAN], ip [IPV4], tel [PHONE].")
+        self.assertEqual([(span["label"], span["source"], span["score"]) for span in result["spans"]],
+                         [("EMAIL", "rule:email", 1.0), ("CARD", "rule:card", 1.0), ("IBAN", "rule:iban", 1.0),
+                          ("IPV4", "rule:ipv4", 1.0), ("PHONE", "rule:phone", 0.8)])
+        self.assertEqual([text[span["start"]:span["end"]] for span in result["spans"]],
+                         ["a.b+c@example.co.uk", "4111 1111 1111 1111", "GB82 WEST 1234 5698 7654 32",
+                          "10.0.0.1", "+44 20 7946 0958"])
+
+    def test_failed_checksums_are_not_masked_as_identifiers(self):
+        # 4111 1111 1111 1112 fails Luhn, and sixteen digits is too long for a phone.
+        self.assertEqual(self.redact("card 4111 1111 1111 1112 today")["spans"], [])
+        # GB82 ... 33 fails mod 97; whatever the pattern rules make of its digits, it is no IBAN or card.
+        labels = {span["label"] for span in self.redact("iban GB82 WEST 1234 5698 7654 33 today")["spans"]}
+        self.assertFalse(labels & {"IBAN", "CARD"}, labels)
+
+    def test_offsets_count_code_points(self):
+        result = self.redact("café: x@y.io")
+        self.assertEqual((result["spans"][0]["start"], result["spans"][0]["end"]), (6, 12))
+        self.assertEqual(result["text"], "café: [EMAIL]")
+
+    def test_overlaps_keep_the_leftmost_longest_then_strongest_candidate(self):
+        # An IPv4 address is also a plausible phone pattern; the exact rule wins the tie.
+        result = self.redact("host 192.168.100.200 ok")
+        self.assertEqual([span["label"] for span in result["spans"]], ["IPV4"])
+        # A card number embedded in a longer digit run is neither a card nor a phone.
+        self.assertEqual(self.redact("ref 94111111111111111 ok")["spans"], [])
+
+    def test_model_options_are_accepted_without_a_model(self):
+        result = self.redact("x@y.io", entities=["PER", "ORG"], min_score=0.5)
+        self.assertEqual(result["model"], "rules-only-not-a-model")
+        self.assertEqual(result["text"], "[EMAIL]")
 
 
 class ProgressTests(unittest.TestCase):
@@ -194,6 +258,12 @@ class JobsTests(unittest.TestCase):
         first = self.wait(self.store.submit("embed", {"texts": ["red apple"]})["id"])
         second = self.wait(self.store.submit("embed", {"texts": ["red apple"]})["id"])
         self.assertEqual(first["result"]["vectors"], second["result"]["vectors"])
+
+    def test_redact_through_the_store_reports_progress(self):
+        done = self.wait(self.store.submit("redact", {"text": "call 555 123 4567"})["id"])
+        self.assertEqual(done["status"], "succeeded")
+        self.assertEqual(done["result"]["text"], "call [PHONE]")
+        self.assertEqual(done["progress"], {"completed": 1, "total": 1})
 
     def test_input_and_snapshot_are_copied(self):
         payload = {"seconds": 0, "value": {"name": "before"}}

@@ -22,7 +22,17 @@ def main():
     assert result["model"] == "sentence-transformers/all-MiniLM-L6-v2" and result["dimensions"] == 384
     dot = lambda a, b: sum(x * y for x, y in zip(a, b))
     assert dot(result["vectors"][0], result["vectors"][1]) > dot(result["vectors"][0], result["vectors"][2])
-    print("PASS: 2 real ONNX ranking cases and 1 embedding case through HTTP -> FrankenPHP worker -> PHP client -> Python model")
+    status, job, _ = request("/redact", {"text": "Contact John Smith at john@example.com about Berlin.", "entities": ["PER", "LOC"]})
+    assert status == 202
+    result = finished(job["id"])["result"]
+    assert result["model"] == "Xenova/bert-base-NER:int8", result["model"]
+    assert result["text"] == "Contact [PER] at [EMAIL] about [LOC].", result["text"]
+    assert [s["source"] for s in result["spans"]] == ["model:PER", "rule:email", "model:LOC"], result["spans"]
+    assert all(0 < s["score"] <= 1 for s in result["spans"])
+    # Precision guard: ordinary text must not grow spans.
+    status, job, _ = request("/redact", {"text": "The weather is nice today and the meeting starts at noon."})
+    assert finished(job["id"])["result"]["spans"] == []
+    print("PASS: 2 real ONNX ranking cases, 1 embedding case and 2 redaction cases through HTTP -> FrankenPHP worker -> PHP client -> Python model")
 
 
 if __name__ == "__main__":
