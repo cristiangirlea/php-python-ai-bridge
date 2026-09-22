@@ -22,13 +22,21 @@ class InvalidInput(ValueError):
     pass
 
 
+def _text(value: object, name: str) -> int:
+    if not isinstance(value, str) or not value.strip() or len(value) > MAX_FIELD_CHARACTERS:
+        raise InvalidInput(f"{name} must contain 1-{MAX_FIELD_CHARACTERS} characters")
+    try:
+        # JSON escapes can produce lone surrogates that no tokenizer or encoder accepts.
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidInput(f"{name} must be valid Unicode text") from None
+    return len(value)
+
+
 def _strings(values: object, plural: str, singular: str, limit: int, extra: int = 0) -> None:
     if not isinstance(values, list) or not 1 <= len(values) <= limit:
         raise InvalidInput(f"{plural} must contain 1-{limit} strings")
-    if any(not isinstance(value, str) or not value.strip() or len(value) > MAX_FIELD_CHARACTERS
-           for value in values):
-        raise InvalidInput(f"each {singular} must contain 1-{MAX_FIELD_CHARACTERS} characters")
-    if extra + sum(len(value) for value in values) > MAX_TOTAL_CHARACTERS:
+    if extra + sum(_text(value, f"each {singular}") for value in values) > MAX_TOTAL_CHARACTERS:
         raise InvalidInput(f"{plural} must total at most {MAX_TOTAL_CHARACTERS} characters")
 
 
@@ -52,9 +60,7 @@ def validate(task: str, payload: object, test_tasks: bool = False) -> dict:
     if not {"query", "documents"} <= set(payload) or set(payload) - {"query", "documents", "top_k"}:
         raise InvalidInput("rerank requires query and documents, with an optional top_k")
     query, documents = payload["query"], payload["documents"]
-    if not isinstance(query, str) or not query.strip() or len(query) > MAX_FIELD_CHARACTERS:
-        raise InvalidInput(f"query must contain 1-{MAX_FIELD_CHARACTERS} characters")
-    _strings(documents, "documents", "document", MAX_DOCUMENTS, extra=len(query))
+    _strings(documents, "documents", "document", MAX_DOCUMENTS, extra=_text(query, "query"))
     top_k = payload.get("top_k", len(documents))
     # type() rejects bool, which int subclasses and would otherwise pass a range check.
     if type(top_k) is not int or not 1 <= top_k <= len(documents):
@@ -87,23 +93,10 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
 
     report(0)
     if backend == "onnx":
-        # Optional dependencies are installed separately; no runtime downloads.
         import numpy as np
-        import onnxruntime as ort
-        from tokenizers import Tokenizer
 
-        directory = Path(model_dir) / "rerank"
-        tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
-        tokenizer.enable_truncation(max_length=512)
-        tokenizer.enable_padding()
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 1
-        options.inter_op_num_threads = 1
-        session = ort.InferenceSession(
-            str(directory / "model.onnx"), options, providers=["CPUExecutionProvider"]
-        )
+        tokenizer, session, names = _onnx(Path(model_dir) / "rerank", 512)
         scores = []
-        names = {item.name for item in session.get_inputs()}
         for i, document in enumerate(documents):
             encoded = tokenizer.encode(query, document)
             inputs = {
@@ -131,13 +124,37 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
     return {"rankings": rankings[:payload.get("top_k", total)], "model": model}
 
 
-def _hashing_vector(text: str) -> list:
+def _onnx(directory: Path, max_length: int):
+    # Optional dependencies are installed separately; no runtime downloads.
+    import onnxruntime as ort
+    from tokenizers import Tokenizer
+
+    tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
+    tokenizer.enable_truncation(max_length=max_length)
+    tokenizer.enable_padding()
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(
+        str(directory / "model.onnx"), options, providers=["CPUExecutionProvider"]
+    )
+    return tokenizer, session, {item.name for item in session.get_inputs()}
+
+
+def _signed_counts(words: list) -> list:
     # sha256 keeps the demo stable across processes; hash() is salted per process.
-    words = re.findall(r"\w+", text.casefold()) or [text.strip()]
     vector = [0.0] * EMBED_DIMENSIONS
     for word in words:
         digest = hashlib.sha256(word.encode()).digest()
         vector[int.from_bytes(digest[:4], "big") % EMBED_DIMENSIONS] += 1.0 if digest[4] & 1 else -1.0
+    return vector
+
+
+def _hashing_vector(text: str) -> list:
+    vector = _signed_counts(re.findall(r"\w+", text.casefold()) or [text.strip()])
+    if not any(vector):
+        # Opposite signs in a shared bucket can cancel exactly; a single token never does.
+        vector = _signed_counts([text.strip()])
     norm = math.sqrt(sum(value * value for value in vector))
     return [value / norm for value in vector]
 
@@ -146,30 +163,20 @@ def _embed(texts: list, backend: str, model_dir: str, progress) -> dict:
     total = len(texts)
     progress(0, total)
     if backend == "onnx":
-        # Optional dependencies are installed separately; no runtime downloads.
         import numpy as np
-        import onnxruntime as ort
-        from tokenizers import Tokenizer
 
-        directory = Path(model_dir) / "embed"
-        tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
         # The model was trained on 256 word pieces; longer input is truncated, not rejected.
-        tokenizer.enable_truncation(max_length=256)
-        tokenizer.enable_padding()
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 1
-        options.inter_op_num_threads = 1
-        session = ort.InferenceSession(
-            str(directory / "model.onnx"), options, providers=["CPUExecutionProvider"]
-        )
-        names = {item.name for item in session.get_inputs()}
+        tokenizer, session, names = _onnx(Path(model_dir) / "embed", 256)
         encoded = tokenizer.encode_batch(texts)
         inputs = {
             "input_ids": np.array([item.ids for item in encoded], dtype=np.int64),
             "attention_mask": np.array([item.attention_mask for item in encoded], dtype=np.int64),
             "token_type_ids": np.array([item.type_ids for item in encoded], dtype=np.int64),
         }
-        hidden = session.run(None, {key: value for key, value in inputs.items() if key in names})[0]
+        outputs = session.run(None, {key: value for key, value in inputs.items() if key in names})
+        # Take the token states by name; position is only a fallback for unnamed exports.
+        output_names = [item.name for item in session.get_outputs()]
+        hidden = outputs[output_names.index("last_hidden_state")] if "last_hidden_state" in output_names else outputs[0]
         # Mean pooling over attended tokens, then unit length, as sentence-transformers does.
         mask = inputs["attention_mask"][:, :, None].astype(hidden.dtype)
         pooled = (hidden * mask).sum(axis=1) / np.clip(mask.sum(axis=1), 1e-9, None)

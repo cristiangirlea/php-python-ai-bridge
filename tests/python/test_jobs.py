@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import time
@@ -5,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
-from ai_bridge.tasks import InvalidInput, execute, validate
+from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, execute, validate
 
 
 class ValidationTests(unittest.TestCase):
@@ -29,7 +30,8 @@ class ValidationTests(unittest.TestCase):
                         {"query": "x", "documents": []}, {"query": "x", "documents": [1]},
                         {"query": "x", "documents": [""]}, {"query": "x", "documents": ["x"] * 513},
                         {"query": "x", "documents": ["x"], "code": "ignored?"},
-                        {"query": "x" * 8193, "documents": ["x"]}]:
+                        {"query": "x" * 8193, "documents": ["x"]},
+                        {"query": "\ud800", "documents": ["x"]}, {"query": "x", "documents": ["\ud800"]}]:
             with self.subTest(payload=str(payload)[:60]), self.assertRaises(InvalidInput):
                 validate("rerank", payload)
 
@@ -59,7 +61,7 @@ class ValidationTests(unittest.TestCase):
     def test_embed_invalid_contracts(self):
         for payload in [None, [], {}, {"texts": []}, {"texts": "Paris"}, {"texts": [1]}, {"texts": [""]},
                         {"texts": ["x"] * 33}, {"texts": ["x" * 8193]}, {"texts": ["x"], "extra": 1},
-                        {"texts": ["y" * 8000] * 26}]:
+                        {"texts": ["y" * 8000] * 26}, {"texts": ["\ud800"]}]:
             with self.subTest(payload=str(payload)[:60]), self.assertRaises(InvalidInput):
                 validate("embed", payload)
 
@@ -78,16 +80,41 @@ class ValidationTests(unittest.TestCase):
                 validate("test.delay", {"seconds": value}, True)
 
 
-class EmbedResultTests(unittest.TestCase):
+class EmbedBackendTests(unittest.TestCase):
+    @staticmethod
+    def embed(texts):
+        return execute("embed", {"texts": texts}, "lexical", "", lambda *_: None)["vectors"]
+
     def test_largest_result_fits_the_php_response_limit(self):
-        texts = [("word%d " % i) * 1000 for i in range(32)]
-        result = execute("embed", {"texts": texts}, "lexical", "", lambda *_: None)
-        for vector in result["vectors"]:
+        # Eleven bytes per component ("-0.123456,") for every component, plus the job envelope.
+        self.assertLessEqual(MAX_TEXTS * EMBED_DIMENSIONS * 11 + 4096, 262144)
+        # Hundreds of distinct words per text populate most buckets with fractional components.
+        texts = [" ".join(f"w{i}x{j}" for j in range(700)) for i in range(MAX_TEXTS)]
+        vectors = self.embed(texts)
+        nonzero = sum(1 for vector in vectors for value in vector if value != 0)
+        # About 16% of buckets stay empty and some cancel; well above the one-word case's 0.3%.
+        self.assertGreater(nonzero, MAX_TEXTS * EMBED_DIMENSIONS * 0.6)
+        for vector in vectors:
             for value in vector:
                 self.assertEqual(round(value, 6), value)
                 self.assertLessEqual(abs(value), 1.0)
-        # Worst case 32 x 384 components of "-0.123456," stays under the client's 262144 byte cap.
+        result = {"model": "hashing-bow-not-a-model", "dimensions": EMBED_DIMENSIONS, "vectors": vectors}
         self.assertLessEqual(len(json.dumps(result, separators=(",", ":"))), 262144 - 4096)
+
+    def test_cancelling_buckets_still_give_a_unit_vector(self):
+        # Find two words sharing a bucket with opposite signs; sha256 makes the search deterministic.
+        seen = {}
+        for i in range(10000):
+            word = f"w{i}"
+            digest = hashlib.sha256(word.encode()).digest()
+            bucket, sign = int.from_bytes(digest[:4], "big") % EMBED_DIMENSIONS, digest[4] & 1
+            if (bucket, 1 - sign) in seen:
+                break
+            seen[(bucket, sign)] = word
+        else:
+            self.fail("no cancelling pair found")
+        vector = self.embed([f"{seen[(bucket, 1 - sign)]} {word}"])[0]
+        self.assertAlmostEqual(math.sqrt(sum(x * x for x in vector)), 1.0, places=4)
 
 
 class ProgressTests(unittest.TestCase):
