@@ -8,16 +8,18 @@ final readonly class RerankResult
 {
     private function __construct(public array $rankings, public string $model) {}
 
-    public static function fromJob(Job $job, int $documentCount): self
+    /** Pass the top_k that was requested so the response is checked against it; null expects every document. */
+    public static function fromJob(Job $job, int $documentCount, ?int $topK = null): self
     {
         if ($job->task !== 'rerank' || $job->status !== 'succeeded') {
             throw new BridgeException('Reranking has not succeeded', 'task_not_succeeded');
         }
         $result = $job->result;
-        if ($documentCount < 1 || $documentCount > 32
+        $expected = $topK ?? $documentCount;
+        if ($documentCount < 1 || $documentCount > Client::MAX_DOCUMENTS || $expected < 1 || $expected > $documentCount
             || !is_string($result['model'] ?? null) || $result['model'] === ''
             || !is_array($result['rankings'] ?? null) || !array_is_list($result['rankings'])
-            || count($result['rankings']) !== $documentCount
+            || count($result['rankings']) !== $expected
         ) {
             throw new BridgeException('Invalid reranking response', 'invalid_response');
         }

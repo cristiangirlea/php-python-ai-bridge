@@ -6,23 +6,29 @@ require __DIR__ . '/run.php';
 
 use PhpAiBridge\BridgeException;
 use PhpAiBridge\Client;
+use PhpAiBridge\RerankResult;
+
+function ready(Client $client): void
+{
+    $deadline = microtime(true) + 15;
+    while (true) {
+        try {
+            $client->get(str_repeat('0', 32));
+        } catch (BridgeException $error) {
+            if ($error->httpStatus === 404) {
+                return;
+            }
+            if (microtime(true) > $deadline) {
+                throw $error;
+            }
+            usleep(50000);
+        }
+    }
+}
 
 $token = getenv('BRIDGE_TOKEN') ?: throw new RuntimeException('Set BRIDGE_TOKEN');
 $client = new Client('http://fault-worker:8090', $token);
-$deadline = microtime(true) + 15;
-while (true) {
-    try {
-        $client->get(str_repeat('0', 32));
-    } catch (BridgeException $error) {
-        if ($error->httpStatus === 404) {
-            break;
-        }
-        if (microtime(true) > $deadline) {
-            throw $error;
-        }
-        usleep(50000);
-    }
-}
+ready($client);
 $job = $client->submit('test.delay', ['seconds' => 0.02, 'value' => ['marker' => 'request-one']]);
 $done = $client->wait($job->id);
 check($done->status === 'succeeded', 'PHP client observes successful task');
@@ -79,4 +85,11 @@ try {
 $client = new Client('http://fault-worker:8090', $token);
 $recovery = $client->submit('test.delay', ['seconds' => 0, 'value' => 'still-healthy']);
 check($client->wait($recovery->id)->result['value'] === 'still-healthy', 'Service recovers after crash and timeout');
+$real = new Client('http://worker:8090', $token);
+ready($real);
+$documents = array_fill(0, 512, 'no matching words');
+$documents[7] = 'needle token';
+$job = $real->submitRerank('needle token', $documents, topK: 2);
+$result = RerankResult::fromJob($real->wait($job->id), count($documents), 2);
+check(count($result->rankings) === 2 && $result->rankings[0]['index'] === 7, 'top_k narrows 512 documents through the PHP client');
 echo "PASS: $count total PHP checks including real HTTP failure cases\n";

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
-from ai_bridge.tasks import InvalidInput, validate
+from ai_bridge.tasks import InvalidInput, execute, validate
 
 
 class ValidationTests(unittest.TestCase):
@@ -25,11 +25,30 @@ class ValidationTests(unittest.TestCase):
     def test_invalid_contracts(self):
         for payload in [None, [], {}, {"query": "", "documents": ["x"]},
                         {"query": "x", "documents": []}, {"query": "x", "documents": [1]},
-                        {"query": "x", "documents": [""]}, {"query": "x", "documents": ["x"] * 33},
+                        {"query": "x", "documents": [""]}, {"query": "x", "documents": ["x"] * 513},
                         {"query": "x", "documents": ["x"], "code": "ignored?"},
                         {"query": "x" * 8193, "documents": ["x"]}]:
             with self.subTest(payload=str(payload)[:60]), self.assertRaises(InvalidInput):
                 validate("rerank", payload)
+
+    def test_large_document_sets_are_accepted(self):
+        payload = {"query": "capital", "documents": ["Paris"] * 512}
+        self.assertEqual(validate("rerank", payload), payload)
+
+    def test_total_input_size_is_bounded(self):
+        # The 200000 character budget covers the query and every document together.
+        accepted = {"query": "x" * 8000, "documents": ["y" * 8000] * 24}
+        self.assertEqual(validate("rerank", accepted), accepted)
+        for query, documents in [("x", ["y" * 8000] * 25), ("x" * 8001, ["y" * 8000] * 24)]:
+            with self.subTest(query=len(query)), self.assertRaises(InvalidInput):
+                validate("rerank", {"query": query, "documents": documents})
+
+    def test_top_k_is_optional_and_bounded(self):
+        payload = {"query": "capital", "documents": ["Paris", "Rome"], "top_k": 1}
+        self.assertEqual(validate("rerank", payload), payload)
+        for value in [0, -1, 3, 1.0, True, "1", None]:
+            with self.subTest(value=value), self.assertRaises(InvalidInput):
+                validate("rerank", {"query": "x", "documents": ["a", "b"], "top_k": value})
 
     def test_tests_are_disabled_by_default(self):
         with self.assertRaises(InvalidInput):
@@ -46,7 +65,27 @@ class ValidationTests(unittest.TestCase):
                 validate("test.delay", {"seconds": value}, True)
 
 
-class JobsTests(unittest.TestCase):
+class ProgressTests(unittest.TestCase):
+    def test_reports_are_bounded_increasing_and_end_on_total(self):
+        for total in [1, 3, 64, 65, 127, 128, 512]:
+            events = []
+            execute("rerank", {"query": "x", "documents": ["x"] * total}, "lexical", "",
+                    lambda completed, _: events.append(completed))
+            with self.subTest(total=total):
+                self.assertLessEqual(len(events), 66)
+                self.assertEqual(events[0], 0)
+                self.assertEqual(events[-1], total)
+                self.assertEqual(events, sorted(set(events)))
+
+
+    def test_large_rerank_completes_through_the_pipe(self):
+        documents = [f"red apple {i}" for i in range(512)]
+        done = self.wait(self.store.submit(
+            "rerank", {"query": "red apple", "documents": documents, "top_k": 5})["id"])
+        self.assertEqual(done["status"], "succeeded")
+        self.assertEqual(len(done["result"]["rankings"]), 5)
+        self.assertEqual(done["progress"], {"completed": 512, "total": 512})
+
     def setUp(self):
         self.store = JobStore(Settings(concurrency=1, test_tasks=True))
 
@@ -69,6 +108,22 @@ class JobsTests(unittest.TestCase):
         self.assertEqual([x["index"] for x in done["result"]["rankings"]], [1, 2, 0])
         self.assertEqual(done["result"]["model"], "lexical-demo-not-a-model")
         self.assertEqual(done["progress"], {"completed": 3, "total": 3})
+
+    def test_top_k_truncates_without_disturbing_order(self):
+        documents = ["blue", "apple red", "red"]
+        full = self.wait(self.store.submit("rerank", {"query": "red apple", "documents": documents})["id"])
+        limited = self.wait(self.store.submit(
+            "rerank", {"query": "red apple", "documents": documents, "top_k": 2})["id"])
+        self.assertEqual(limited["status"], "succeeded")
+        self.assertEqual(limited["result"]["rankings"], full["result"]["rankings"][:2])
+
+    def test_large_rerank_completes_through_the_pipe(self):
+        documents = [f"red apple {i}" for i in range(512)]
+        done = self.wait(self.store.submit(
+            "rerank", {"query": "red apple", "documents": documents, "top_k": 5})["id"])
+        self.assertEqual(done["status"], "succeeded")
+        self.assertEqual(len(done["result"]["rankings"]), 5)
+        self.assertEqual(done["progress"], {"completed": 512, "total": 512})
 
     def test_input_and_snapshot_are_copied(self):
         payload = {"seconds": 0, "value": {"name": "before"}}

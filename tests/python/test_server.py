@@ -52,12 +52,16 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertEqual(data["status"], "queued")
         self.assertNotIn("_input", data)
+        body = json.dumps({"task": "rerank", "input": {"query": "x", "documents": ["x", "y"], "top_k": 1}})
+        self.assertEqual(self.request("POST", "/v1/jobs", body, self.auth())[0], 202)
 
     def test_invalid_bodies(self):
         for body in ["[]", "null", "{", '{"task":"rerank","task":"test.crash","input":{}}',
                      '{"task":"rerank","input":{},"extra":1}',
                      '{"task":"test.crash","input":{}}',
-                     '{"task":"rerank","input":{"query":NaN,"documents":["x"]}}']:
+                     '{"task":"rerank","input":{"query":NaN,"documents":["x"]}}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"],"top_k":2}}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"],"top_k":null}}']:
             with self.subTest(body=body):
                 self.assertEqual(self.request("POST", "/v1/jobs", body, self.auth())[0], 400)
 
