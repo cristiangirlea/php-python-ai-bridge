@@ -13,6 +13,7 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 - Bounded concurrency, queue/result capacity, retention, request sizes and execution deadlines.
 - Cancellation, progress polling, crash detection and generic errors that omit internal exception text.
 - A FrankenPHP example that submits work and returns a job ID immediately.
+- A stdio MCP server with one tool per task, a second client of the same protocol beside the PHP client; see [the MCP guide](docs/mcp.md).
 - CPU inference with `cross-encoder/ms-marco-TinyBERT-L2-v2`, `sentence-transformers/all-MiniLM-L6-v2` and int8 `dslim/bert-base-NER` through ONNX Runtime, using pinned model files and wheel hashes.
 
 The default backends are **`lexical-demo-not-a-model`** for reranking and **`hashing-bow-not-a-model`** for embedding, deterministic word overlap and feature hashing for testing the integration, and **`rules-only-not-a-model`** for redaction, which runs the real checksum and pattern rules but no model. None of them is described as AI. Enable the optional model profile below for real inference.
@@ -113,6 +114,10 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 
+# MCP server, after acquiring its hash-pinned wheels once (network):
+docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
+docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
+
 # PHP syntax validation inside the container:
 docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
   'find src examples tests/php -name "*.php" -print0 | xargs -0 -n1 php -l'
@@ -130,7 +135,7 @@ CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, t
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
 - **Cold model per job:** this prototype favors simple crash/cancellation containment over model pooling and throughput. It does not claim GPU support, automatic batching, multi-host scaling or stateful agents.
 - **Cancellation cannot undo effects:** registered future tasks must manage their own external side effects. A transport failure during POST has an uncertain submission outcome; the client never retries POST automatically.
-- **No token streaming:** progress is polled by job ID. There is no SSE, MCP server, framework plugin or chat SDK.
+- **No token streaming:** progress is polled by job ID. The MCP server forwards that progress to a host that asks for it; there is no SSE, framework plugin or chat SDK.
 
 See [the integration guide](docs/integration.md), [test evidence and limits](docs/testing.md), [the protocol](docs/protocol.md), [security boundaries](docs/security.md), and [contributing](CONTRIBUTING.md).
 

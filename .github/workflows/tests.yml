@@ -52,14 +52,37 @@ jobs:
         if: always()
         run: docker compose -f docker/compose.yaml --profile test down
 
+  mcp:
+    name: MCP server
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare disposable cache
+        run: mkdir -p .cache && chmod 777 .cache
+      - name: Inspect sandbox configuration
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch config
+      - name: Acquire hash-pinned MCP wheels
+        run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
+      - name: Offline MCP server tests
+        run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
+      - name: Stop test containers
+        if: always()
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch down
+
   # Keep the required branch-protection check stable as the matrix changes.
   deterministic:
     if: always()
-    needs: [php]
+    needs: [php, mcp]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - name: Require every supported PHP version to pass
+      - name: Require every supported PHP version and the MCP server to pass
         env:
           MATRIX_RESULT: ${{ needs.php.result }}
-        run: test "$MATRIX_RESULT" = success
+          MCP_RESULT: ${{ needs.mcp.result }}
+        run: test "$MATRIX_RESULT" = success -a "$MCP_RESULT" = success

@@ -31,6 +31,6 @@ Failures use generic error objects with `code` and `message`. Task errors includ
 
 The default capacity is 128 total queued, running and retained jobs, concurrency is 2, and terminal retention is 300 seconds. A full result cache rejects submissions until entries expire; it does not silently evict a result early. Configure these with `BRIDGE_CAPACITY`, `BRIDGE_CONCURRENCY`, and `BRIDGE_RETENTION_SECONDS`.
 
-The PHP client uses a fresh cURL handle per call, refuses redirects, ignores proxy environment variables, caps response bytes, and verifies that GET/cancel responses match the requested ID. Configure its request timeout separately from job execution and local waiting deadlines. There are no transparent submission retries.
+The PHP client uses a fresh cURL handle per call, refuses redirects, ignores proxy environment variables, caps response bytes, and verifies that GET/cancel responses match the requested ID. Configure its request timeout separately from job execution and local waiting deadlines. There are no transparent submission retries. The MCP server in `mcp_server/` is a second, independent client with the same checks; unlike the PHP client it cancels a job whose local wait expires, because no later request will collect it.
 
 Adding a task requires trusted source changes to `worker/ai_bridge/tasks.py`: an explicit name, input validation, bounded output and execution logic. Add a PHP result type where useful, plus successful, malformed-input and lifecycle tests. Task imports, file paths and command strings must not come from request data.

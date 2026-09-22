@@ -1,0 +1,3 @@
+# MCP server dependencies. The server is a client of the HTTP protocol and lives outside the
+# dependency-free worker path; only wheels are acquired, hash-checked against the lock.
+mcp==2.2.0

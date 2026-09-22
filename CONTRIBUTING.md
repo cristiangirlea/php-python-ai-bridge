@@ -2,7 +2,7 @@
 
 This is an experimental project. Please discuss new task families, protocol changes, durability or production deployment work in an issue before a large implementation.
 
-Keep pull requests focused. Use strict types and four-space indentation in PHP; use the Python standard library for the core service. Optional model dependencies belong in the model requirements files, not in the dependency-free worker path.
+Keep pull requests focused. Use strict types and four-space indentation in PHP; use the Python standard library for the core service. Optional model dependencies belong in the model requirements files and the MCP server's in `requirements-mcp.*`, not in the dependency-free worker path.
 
 Run the deterministic unit, HTTP failure and FrankenPHP integration commands in [README.md](README.md). All project builds, tests and dependency acquisition should run in the supplied Docker environments. Do not run downloaded model code or mount credentials into test containers.
 
