@@ -67,22 +67,26 @@ class Bridge:
         job = self.submit(task, payload, max(100, min(300000, int(deadline_s * 1000) + 2000)))
         deadline = time.monotonic() + deadline_s
         reported = None
-        while True:
-            job = self.get(job["id"])
-            progress = job.get("progress")
-            if on_progress and progress and (progress["completed"], progress["total"]) != reported:
-                reported = (progress["completed"], progress["total"])
-                on_progress(*reported)
-            if job["status"] in TERMINAL:
-                break
-            if time.monotonic() >= deadline:
-                try:
-                    self.cancel(job["id"])
-                except BridgeError:
-                    pass
-                raise BridgeError(f"Job did not finish within {deadline_s:g}s and was cancelled", "wait_timeout",
-                                  job_id=job["id"])
-            time.sleep(poll_s)
+        try:
+            while True:
+                job = self.get(job["id"])
+                progress = job.get("progress")
+                if on_progress and progress and (progress["completed"], progress["total"]) != reported:
+                    reported = (progress["completed"], progress["total"])
+                    on_progress(*reported)
+                if job["status"] in TERMINAL:
+                    break
+                if time.monotonic() >= deadline:
+                    raise BridgeError(f"Job did not finish within {deadline_s:g}s and was cancelled", "wait_timeout",
+                                      job_id=job["id"])
+                time.sleep(poll_s)
+        except BaseException:
+            # Whatever interrupted the wait, nobody will come back for this job.
+            try:
+                self.cancel(job["id"])
+            except BridgeError:
+                pass
+            raise
         if job["status"] == "succeeded":
             return job["result"]
         code = (job.get("error") or {}).get("code", job["status"])
@@ -138,17 +142,23 @@ class Bridge:
             connection.close()
         if len(raw) > MAX_BYTES:
             raise BridgeError("Response exceeds 262144 bytes", "invalid_response", status)
-        if content_type.split(";")[0].strip().lower() != "application/json":
-            raise BridgeError("Expected a JSON response", "invalid_response", status)
-        try:
-            decoded = json.loads(raw)
-        except ValueError:
-            raise BridgeError("Malformed JSON response", "invalid_response", status) from None
-        if not isinstance(decoded, dict):
-            raise BridgeError("Expected a JSON object", "invalid_response", status)
+        is_json = content_type.split(";")[0].strip().lower() == "application/json"
+        decoded = None
+        if is_json:
+            try:
+                decoded = json.loads(raw)
+            except ValueError:
+                decoded = None
         if not 200 <= status < 300:
-            # Only the worker's fixed error code is reflected, never free text from the body.
-            code = decoded.get("error", {}).get("code") if isinstance(decoded.get("error"), dict) else None
+            # The status is the fact; only the worker's fixed error code is reflected from the body, never
+            # free text, and a proxy's HTML error page contributes nothing but its status.
+            code = decoded.get("error", {}).get("code") if isinstance(decoded, dict) and isinstance(decoded.get("error"), dict) else None
             code = code if isinstance(code, str) and ERROR_CODE.fullmatch(code) else "http_error"
             raise BridgeError(f"Bridge returned HTTP {status}: {code}", code, status)
+        if not is_json:
+            raise BridgeError("Expected a JSON response", "invalid_response", status)
+        if decoded is None:
+            raise BridgeError("Malformed JSON response", "invalid_response", status)
+        if not isinstance(decoded, dict):
+            raise BridgeError("Expected a JSON object", "invalid_response", status)
         return decoded

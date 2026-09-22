@@ -3,6 +3,8 @@
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import patch
 
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
@@ -61,6 +63,41 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "wait_timeout")
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(self.bridge.get(caught.exception.job_id)["status"], "cancelled")
+
+    def test_an_interrupted_wait_cancels_the_job(self):
+        def explode(completed, total):
+            raise RuntimeError("the host went away")
+
+        with patch.object(self.bridge, "cancel", wraps=self.bridge.cancel) as cancel:
+            with self.assertRaises(RuntimeError):
+                self.bridge.run("test.delay", {"seconds": 3}, deadline_s=5, on_progress=explode, poll_s=0.05)
+        cancel.assert_called_once()
+        self.assertEqual(self.bridge.get(cancel.call_args.args[0])["status"], "cancelled")
+
+    def test_non_json_error_pages_keep_their_status(self):
+        class Unavailable(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"<html>maintenance</html>"
+                self.send_response(503)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        proxy = HTTPServer(("127.0.0.1", 0), Unavailable)
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(BridgeError) as caught:
+                Bridge("http://127.0.0.1:%d" % proxy.server_address[1], TOKEN).health()
+        finally:
+            proxy.shutdown()
+            thread.join()
+            proxy.server_close()
+        self.assertEqual((caught.exception.code, caught.exception.status), ("http_error", 503))
 
     def test_task_failures_become_errors_with_the_worker_code(self):
         for task, code in [("test.crash", "worker_crashed"), ("test.error", "task_failed")]:

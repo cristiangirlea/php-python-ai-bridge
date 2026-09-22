@@ -2,6 +2,7 @@
 the worker, and the test-only tasks cannot appear whatever BRIDGE_TEST_TASKS says."""
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
@@ -27,24 +28,24 @@ MAX_FILE_BYTES = 4 * 1024 * 1024
 SNIPPET_CHARACTERS = 160
 PAIRS = 10
 
-# What each backend really is, in the words the worker itself uses.
+# What each backend really is: the name the worker reports, then what it does, in plain words.
 BACKENDS = {
     "lexical": {
-        "rerank": "lexical-demo-not-a-model: deterministic word overlap between the query and each document. "
-                  "This is NOT a model and knows nothing about meaning; it exists to exercise the pipeline.",
-        "embed": "hashing-bow-not-a-model: a signed hash of word tokens, NOT a model; similarity reflects shared "
-                 "words only.",
-        "redact": "rules-only-not-a-model: checksum and pattern rules only (card numbers, IBANs, emails, IPv4 "
-                  "addresses, phone numbers). No model runs, so names, organisations and places are not found.",
+        "rerank": ("lexical-demo-not-a-model", "deterministic word overlap between the query and each document. "
+                   "This is NOT a model and knows nothing about meaning; it exists to exercise the pipeline."),
+        "embed": ("hashing-bow-not-a-model", "a signed hash of word tokens, NOT a model; similarity reflects "
+                  "shared words only."),
+        "redact": ("rules-only-not-a-model", "checksum and pattern rules only (card numbers, IBANs, emails, IPv4 "
+                   "addresses, phone numbers). No model runs, so names, organisations and places are not found."),
     },
     "onnx": {
-        "rerank": "cross-encoder/ms-marco-TinyBERT-L2-v2 through ONNX Runtime on one CPU thread, a two-layer "
-                  "cross-encoder. Its relevance judgement is well below your own on text you can already read.",
-        "embed": "sentence-transformers/all-MiniLM-L6-v2 through ONNX Runtime on CPU; English, truncated at 256 "
-                 "word pieces; unit-length mean-pooled vectors.",
-        "redact": "checksum and pattern rules plus dslim/bert-base-NER (the int8 ONNX conversion published as "
-                  "Xenova/bert-base-NER) for PER, ORG and LOC. Trained on English news; recall on other text is "
-                  "lower and unmeasured.",
+        "rerank": ("cross-encoder/ms-marco-TinyBERT-L2-v2", "through ONNX Runtime on one CPU thread, a two-layer "
+                   "cross-encoder. Its relevance judgement is well below your own on text you can already read."),
+        "embed": ("sentence-transformers/all-MiniLM-L6-v2", "through ONNX Runtime on CPU; English, truncated at "
+                  "256 word pieces; unit-length mean-pooled vectors."),
+        "redact": ("rules + Xenova/bert-base-NER:int8", "checksum and pattern rules plus dslim/bert-base-NER (the "
+                   "int8 ONNX conversion published as Xenova/bert-base-NER) for PER, ORG and LOC. Trained on "
+                   "English news; recall on other text is lower and unmeasured."),
     },
 }
 
@@ -113,13 +114,71 @@ def _explain(error: BridgeError) -> str:
     }
     if error.status == 401:
         return hints["unauthorized"]
+    if error.status is not None and error.status >= 500:
+        return f"The worker, or a proxy in front of it, returned HTTP {error.status}; retry shortly."
     return hints.get(error.code, f"The worker reported {error.code}; internal details are not exposed.")
 
 
-def _check_texts(texts: list, singular: str, limit: int) -> None:
+def _number(value) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _name(value) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _rankings(result: dict, count: int, top_k: int) -> list:
+    # The same rules as RerankResult in the PHP client: exact count, unique indexes, stable descending order.
+    rankings = result.get("rankings")
+    if not _name(result.get("model")) or not isinstance(rankings, list) or len(rankings) != min(top_k, count):
+        raise ToolError("The worker returned an invalid ranking.")
+    seen, previous = set(), None
+    for item in rankings:
+        if (not isinstance(item, dict) or type(item.get("index")) is not int or not 0 <= item["index"] < count
+                or item["index"] in seen or not _number(item.get("score"))
+                or (previous is not None and (item["score"] > previous[1]
+                                              or (item["score"] == previous[1] and item["index"] < previous[0])))):
+            raise ToolError("The worker returned an invalid ranking.")
+        seen.add(item["index"])
+        previous = (item["index"], item["score"])
+    return rankings
+
+
+def _vectors(result: dict, count: int) -> list:
+    # The same rules as EmbedResult: one vector of the declared dimension per text, finite, unit length.
+    vectors, dimensions = result.get("vectors"), result.get("dimensions")
+    if (not _name(result.get("model")) or type(dimensions) is not int or dimensions < 1
+            or not isinstance(vectors, list) or len(vectors) != count):
+        raise ToolError("The worker returned invalid embeddings.")
+    for vector in vectors:
+        if (not isinstance(vector, list) or len(vector) != dimensions or not all(_number(value) for value in vector)
+                or abs(math.sqrt(sum(value * value for value in vector)) - 1.0) > 1e-3):
+            raise ToolError("The worker returned invalid embeddings.")
+    return vectors
+
+
+def _spans(result: dict, text: str) -> list:
+    # The same rules as RedactResult: spans sorted, disjoint and inside the original text.
+    spans = result.get("spans")
+    if (not _name(result.get("model")) or not isinstance(result.get("text"), str) or not result["text"]
+            or not isinstance(spans, list)):
+        raise ToolError("The worker returned an invalid redaction.")
+    cursor = 0
+    for span in spans:
+        if (not isinstance(span, dict) or type(span.get("start")) is not int or type(span.get("end")) is not int
+                or span["start"] < cursor or span["start"] >= span["end"] or span["end"] > len(text)
+                or not isinstance(span.get("label"), str) or not span["label"]
+                or not isinstance(span.get("source"), str) or not span["source"]
+                or not _number(span.get("score")) or not 0 <= span["score"] <= 1):
+            raise ToolError("The worker returned an invalid redaction.")
+        cursor = span["end"]
+    return spans
+
+
+def _check_texts(texts: list, singular: str, limit: int, extra: int = 0) -> None:
     if not 1 <= len(texts) <= limit:
         raise ToolError(f"Give between 1 and {limit} {singular}s.")
-    total = 0
+    total = extra
     for index, text in enumerate(texts):
         if not isinstance(text, str) or not text.strip():
             raise ToolError(f"{singular} {index} is empty.")
@@ -135,17 +194,22 @@ def _documents_from(root: Path | None, path_text: str) -> list[str]:
         raise ToolError("documents_path needs a configured root: start the server with BRIDGE_MCP_ROOT set to the "
                         "directory whose files may be read.")
     candidate = Path(path_text)
-    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    try:
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    except (OSError, ValueError) as error:
+        raise ToolError(f"Cannot resolve {path_text!r}: {type(error).__name__}.") from None
     if not resolved.is_relative_to(root):
         raise ToolError(f"documents_path must stay inside the configured root ({root}).")
-    if not resolved.is_file():
-        raise ToolError(f"No file at {path_text!r} under the configured root.")
-    if resolved.stat().st_size > MAX_FILE_BYTES:
-        raise ToolError(f"{path_text!r} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB.")
     try:
+        if not resolved.is_file():
+            raise ToolError(f"No file at {path_text!r} under the configured root.")
+        if resolved.stat().st_size > MAX_FILE_BYTES:
+            raise ToolError(f"{path_text!r} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB.")
         text = resolved.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         raise ToolError(f"{path_text!r} is not UTF-8 text.") from None
+    except OSError as error:
+        raise ToolError(f"Cannot read {path_text!r}: {type(error).__name__}.") from None
     if text.lstrip().startswith("["):
         try:
             documents = json.loads(text)
@@ -177,7 +241,8 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         root = root.resolve()
         if not root.is_dir():
             raise ValueError(f"BRIDGE_MCP_ROOT is not a directory: {root}")
-    described = BACKENDS[backend]
+    described = {task: f"{name}: {explanation}" for task, (name, explanation) in BACKENDS[backend].items()}
+    names = {task: name for task, (name, _) in BACKENDS[backend].items()}
     seconds = timeout_ms / 1000
     timing = ("well under a second" if backend == "lexical"
               else "one to ten seconds, as the model is loaded afresh for every call")
@@ -205,7 +270,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             health = await anyio.to_thread.run_sync(bridge.health)
         except BridgeError as error:
             raise ToolError(_explain(error)) from None
-        return {"backend": health["backend"], "protocol": health["protocol"], "models": dict(described)}
+        return {"backend": health["backend"], "protocol": health["protocol"], "models": dict(names)}
 
     @mcp.tool(
         name="bridge_rerank", title="Rerank candidate documents",
@@ -234,14 +299,10 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         if (documents is None) == (documents_path is None):
             raise ToolError("Give exactly one of documents or documents_path.")
         chosen = documents if documents is not None else _documents_from(root, documents_path)
-        _check_texts(chosen, "document", BY_VALUE_DOCUMENTS if documents is not None else BY_REFERENCE_DOCUMENTS)
+        _check_texts(chosen, "document", BY_VALUE_DOCUMENTS if documents is not None else BY_REFERENCE_DOCUMENTS,
+                     extra=len(query))
         result = await run("rerank", {"query": query, "documents": chosen, "top_k": min(top_k, len(chosen))}, ctx)
-        rankings = result.get("rankings")
-        if (not isinstance(rankings, list) or not isinstance(result.get("model"), str)
-                or any(not isinstance(item, dict) or type(item.get("index")) is not int
-                       or not 0 <= item["index"] < len(chosen) or not isinstance(item.get("score"), (int, float))
-                       for item in rankings)):
-            raise ToolError("The worker returned an invalid ranking.")
+        rankings = _rankings(result, len(chosen), top_k)
         return {"model": result["model"], "considered": len(chosen),
                 "results": [{"index": item["index"], "score": item["score"], "snippet": _snippet(chosen[item["index"]])}
                             for item in rankings]}
@@ -260,10 +321,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     ) -> Similarity:
         _check_texts(texts, "text", MAX_TEXTS)
         result = await run("embed", {"texts": texts}, ctx)
-        vectors = result.get("vectors")
-        if (not isinstance(vectors, list) or len(vectors) != len(texts) or not isinstance(result.get("model"), str)
-                or any(not isinstance(vector, list) or len(vector) != result.get("dimensions") for vector in vectors)):
-            raise ToolError("The worker returned invalid embeddings.")
+        vectors = _vectors(result, len(texts))
         matrix = [[round(sum(x * y for x, y in zip(a, b)), 4) for b in vectors] for a in vectors]
         pairs = sorted(({"a": a, "b": b, "similarity": matrix[a][b]}
                         for a in range(len(texts)) for b in range(a + 1, len(texts))),
@@ -282,7 +340,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         text: Annotated[str, Field(description="The text to mask.", min_length=1, max_length=MAX_TEXT_CHARACTERS)],
         ctx: Context,
         entities: Annotated[list[Literal["PER", "ORG", "LOC"]], Field(
-            description="Entity kinds the model pass masks; rules always run.", max_length=3)] = ["PER"],
+            description="Entity kinds the model pass masks; rules always run.", max_length=3)] = ("PER",),
         min_score: Annotated[float, Field(description="Minimum model confidence to mask.", ge=0, le=1)] = 0.85,
     ) -> Redaction:
         if not text.strip():
@@ -290,9 +348,6 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         if len(set(entities)) != len(entities):
             raise ToolError("entities must be distinct.")
         result = await run("redact", {"text": text, "entities": list(entities), "min_score": min_score}, ctx)
-        if not isinstance(result.get("text"), str) or not isinstance(result.get("spans"), list) \
-                or not isinstance(result.get("model"), str):
-            raise ToolError("The worker returned an invalid redaction.")
-        return {"model": result["model"], "text": result["text"], "spans": result["spans"]}
+        return {"model": result["model"], "text": result["text"], "spans": _spans(result, text)}
 
     return mcp

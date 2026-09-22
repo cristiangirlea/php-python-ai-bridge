@@ -8,11 +8,12 @@ import unittest
 from pathlib import Path
 
 from mcp import Client
+from mcp.server.mcpserver.exceptions import ToolError
 
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
 from bridge_mcp.protocol import Bridge
-from bridge_mcp.tools import BY_VALUE_DOCUMENTS, TOOL_NAMES, build_server
+from bridge_mcp.tools import BY_VALUE_DOCUMENTS, TOOL_NAMES, _rankings, _spans, _vectors, build_server
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
 
@@ -36,6 +37,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         (cls.root / "large.txt").write_text("\n".join(["needle token"] + ["other"] * 511) + "\n", encoding="utf-8")
         (cls.root / "toomany.txt").write_text("\n".join(["x"] * 513) + "\n", encoding="utf-8")
         (cls.root / "empty.txt").write_text("\n\n", encoding="utf-8")
+        (cls.root / "budget.txt").write_text("\n".join(["y" * 8000] * 24) + "\n", encoding="utf-8")
         cls.outside = Path(cls.temp.name) / "outside.json"
         cls.outside.write_text(json.dumps(documents), encoding="utf-8")
         cls.mcp = build_server(cls.bridge, backend="lexical", root=cls.root, timeout_ms=10000)
@@ -79,6 +81,8 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.is_error)
         self.assertEqual(result.structured_content["backend"], "lexical")
         self.assertEqual(result.structured_content["protocol"], 1)
+        self.assertEqual(result.structured_content["models"], {
+            "rerank": "lexical-demo-not-a-model", "embed": "hashing-bow-not-a-model", "redact": "rules-only-not-a-model"})
 
     async def test_rerank_by_value_returns_only_the_top_k_with_snippets(self):
         documents = ["no match"] * 10 + ["needle token"]
@@ -153,8 +157,57 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[-1], (512, 512))
         self.assertEqual(seen, sorted(seen))
 
+    async def test_rerank_pre_checks_include_the_query_in_the_budget(self):
+        documents = ["y" * 8000] * 24
+        result = await self.call("bridge_rerank", {"query": "x" * 8001, "documents": documents[:1]})
+        self.assertFalse(result.is_error, result.content)
+        result = await self.call("bridge_rerank", {"query": "x" * 8001, "documents_path": "budget.txt"})
+        self.assertTrue(result.is_error)
+        self.assertIn("200000", result.content[0].text)
+
     async def test_worker_failures_become_tool_errors_without_internals(self):
         broken = build_server(Bridge("http://127.0.0.1:1", TOKEN, request_timeout_s=0.5), backend="lexical", root=None, timeout_ms=10000)
         result = await self.call("bridge_health", {}, server=broken)
         self.assertTrue(result.is_error)
         self.assertNotIn(TOKEN, result.content[0].text)
+
+
+class ResultValidationTests(unittest.TestCase):
+    """The tools apply the PHP typed results' rules to what the worker returns."""
+
+    def test_rankings_need_exact_count_unique_indexes_and_stable_order(self):
+        good = {"model": "m", "rankings": [{"index": 1, "score": 2.0}, {"index": 0, "score": 1.0}]}
+        self.assertEqual(_rankings(good, 2, 2), good["rankings"])
+        self.assertEqual(len(_rankings({"model": "m", "rankings": good["rankings"][:1]}, 2, 1)), 1)
+        for bad in [{"model": "m", "rankings": good["rankings"][:1]},
+                    {"model": "m", "rankings": [{"index": 1, "score": 2.0}, {"index": 1, "score": 1.0}]},
+                    {"model": "m", "rankings": [{"index": 0, "score": 1.0}, {"index": 1, "score": 2.0}]},
+                    {"model": "m", "rankings": [{"index": 1, "score": 1.0}, {"index": 0, "score": 1.0}]},
+                    {"model": "m", "rankings": [{"index": 1, "score": 2.0}, {"index": 0, "score": float("inf")}]},
+                    {"model": "m", "rankings": [{"index": 1, "score": 2.0}, {"index": 2, "score": 1.0}]},
+                    {"model": "", "rankings": good["rankings"]}]:
+            with self.subTest(bad=str(bad)[:70]), self.assertRaises(ToolError):
+                _rankings(bad, 2, 2)
+
+    def test_vectors_need_the_declared_dimension_finite_and_unit_length(self):
+        good = {"model": "m", "dimensions": 3, "vectors": [[1.0, 0, 0], [0, 0.6, 0.8]]}
+        self.assertEqual(_vectors(good, 2), good["vectors"])
+        for bad in [{"model": "m", "dimensions": 3, "vectors": [[1.0, 0, 0]]},
+                    {"model": "m", "dimensions": 2, "vectors": good["vectors"]},
+                    {"model": "m", "dimensions": 3, "vectors": [[2.0, 0, 0], [0, 0.6, 0.8]]},
+                    {"model": "m", "dimensions": 3, "vectors": [[1.0, 0, float("nan")], [0, 0.6, 0.8]]},
+                    {"model": "m", "dimensions": 3, "vectors": [[1.0, 0, "0"], [0, 0.6, 0.8]]}]:
+            with self.subTest(bad=str(bad)[:70]), self.assertRaises(ToolError):
+                _vectors(bad, 2)
+
+    def test_spans_need_to_be_sorted_disjoint_and_inside_the_text(self):
+        text = "caf\u00e9: x@y.io"
+        span = {"start": 6, "end": 12, "label": "EMAIL", "source": "rule:email", "score": 1.0}
+        self.assertEqual(_spans({"model": "m", "text": "caf\u00e9: [EMAIL]", "spans": [span]}, text), [span])
+        for spans in [[{**span, "end": 13}], [{**span, "start": 12}], [{**span, "score": 1.5}], [{**span, "label": ""}],
+                      [{**span, "start": 7, "end": 12}, {**span, "start": 0, "end": 4}],
+                      [{**span, "start": 0, "end": 8}, {**span, "start": 6, "end": 12}], ["not a span"]]:
+            with self.subTest(spans=str(spans)[:70]), self.assertRaises(ToolError):
+                _spans({"model": "m", "text": "masked", "spans": spans}, text)
+        with self.assertRaises(ToolError):
+            _spans({"model": "m", "text": "", "spans": []}, text)
