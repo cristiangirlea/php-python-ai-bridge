@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
-from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, execute, validate
+from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, _entities, _merge, execute, validate
 
 
 class ValidationTests(unittest.TestCase):
@@ -179,6 +179,71 @@ class RedactRulesTests(unittest.TestCase):
         result = self.redact("x@y.io", entities=["PER", "ORG"], min_score=0.5)
         self.assertEqual(result["model"], "rules-only-not-a-model")
         self.assertEqual(result["text"], "[EMAIL]")
+
+    def test_card_beside_other_digits_is_still_found(self):
+        self.assertEqual(self.redact("card 4111 1111 1111 1111 12/26 cvv 123")["text"], "card [CARD] 12/26 cvv 123")
+        self.assertEqual(self.redact("ref 12 4111-1111-1111-1111 end")["text"], "ref 12 [CARD] end")
+
+    def test_iban_followed_by_upper_case_tokens_is_still_found(self):
+        self.assertEqual(self.redact("IBAN DE89 3704 0044 0532 0130 00 BIC COBADEFF")["text"], "IBAN [IBAN] BIC COBADEFF")
+
+    def test_dates_and_short_bare_numbers_are_not_phones(self):
+        for text in ["order 12345678 shipped 2023-09-22", "on 22.09.2023 at 5551234", "until 22/09/23"]:
+            with self.subTest(text=text):
+                self.assertEqual(self.redact(text)["spans"], [])
+        self.assertEqual(self.redact("tel 555-1234 or 5551234567")["text"], "tel [PHONE] or [PHONE]")
+
+    def test_overlapping_candidates_are_merged_not_dropped(self):
+        merged = _merge([
+            {"start": 0, "end": 9, "label": "PER", "source": "model:PER", "score": 0.9, "priority": 5},
+            {"start": 5, "end": 21, "label": "EMAIL", "source": "rule:email", "score": 1.0, "priority": 2},
+            {"start": 30, "end": 34, "label": "LOC", "source": "model:LOC", "score": 0.9, "priority": 5},
+            {"start": 30, "end": 40, "label": "IPV4", "source": "rule:ipv4", "score": 1.0, "priority": 3}])
+        self.assertEqual([(span["start"], span["end"], span["label"]) for span in merged],
+                         [(0, 21, "PER"), (30, 40, "IPV4")])
+
+
+class NerAggregationTests(unittest.TestCase):
+    """Drives the BIO aggregation with a stub window so it is covered without the model."""
+
+    class Window:
+        def __init__(self, word_ids, offsets):
+            self.word_ids, self.offsets = word_ids, offsets
+
+    LABELS = ["O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC"]
+
+    def rows(self, *predictions):
+        rows = []
+        for label, probability in predictions:
+            row = [0.0] * len(self.LABELS)
+            row[self.LABELS.index(label)] = probability
+            rows.append(row)
+        return rows
+
+    def setUp(self):
+        # [CLS] John Smith ##son lives in New York City [SEP]
+        self.window = self.Window(
+            [None, 0, 1, 1, 2, 3, 4, 5, 6, None],
+            [(0, 0), (0, 4), (5, 10), (10, 13), (14, 19), (20, 22), (23, 26), (27, 31), (32, 36), (0, 0)])
+        self.rows_ = self.rows(("O", 1.0), ("B-PER", 0.95), ("I-PER", 0.9), ("O", 0.4), ("O", 0.99), ("O", 0.99),
+                               ("B-LOC", 0.9), ("I-LOC", 0.88), ("I-LOC", 0.7), ("O", 1.0))
+
+    def test_first_piece_labels_words_and_the_threshold_uses_the_mean(self):
+        spans = _entities(self.window, self.rows_, ["PER", "LOC"], 0.85)
+        self.assertEqual(spans, [{"start": 0, "end": 13, "label": "PER", "source": "model:PER", "score": 0.925, "priority": 5}])
+        spans = _entities(self.window, self.rows_, ["PER", "LOC"], 0.8)
+        self.assertEqual([(span["start"], span["end"], span["label"], span["score"]) for span in spans],
+                         [(0, 13, "PER", 0.925), (23, 36, "LOC", 0.8267)])
+
+    def test_unwanted_and_misc_entities_are_dropped(self):
+        self.assertEqual([span["label"] for span in _entities(self.window, self.rows_, ["LOC"], 0.5)], ["LOC"])
+        rows = self.rows(("O", 1.0), ("B-MISC", 0.99), ("I-MISC", 0.99), ("I-MISC", 0.99), ("O", 1.0), ("O", 1.0),
+                         ("I-ORG", 0.9), ("I-ORG", 0.9), ("B-ORG", 0.9), ("O", 1.0))
+        spans = _entities(self.window, rows, ["PER", "ORG", "LOC"], 0.5)
+        # An inside tag without a beginning starts an entity; a fresh beginning closes it.
+        self.assertEqual([(span["start"], span["end"], span["label"]) for span in spans], [(23, 31, "ORG"), (32, 36, "ORG")])
+
+
 
 
 class ProgressTests(unittest.TestCase):

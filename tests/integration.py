@@ -124,7 +124,8 @@ def main():
     assert done["result"]["model"] == "rules-only-not-a-model"
     assert done["result"]["text"] == "café: mail [EMAIL], card [CARD]"
     assert [(s["start"], s["end"], s["source"]) for s in done["result"]["spans"]] == [(11, 17, "rule:email"), (24, 43, "rule:card")]
-    for body in [{"text": ""}, {"text": "x", "entities": ["MISC"]}, {"text": "x", "min_score": 2}, {"texts": ["x"]}]:
+    for body in [{"text": ""}, {"text": "x", "entities": ["MISC"]}, {"text": "x", "min_score": 2}, {"texts": ["x"]},
+                 {"text": "x", "min_score": None}, {"text": "x", "entities": None}, {"text": "x", "entities": [["PER"]]}]:
         try:
             request("/redact", body)
         except HTTPError as error:
