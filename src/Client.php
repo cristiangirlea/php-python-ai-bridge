@@ -88,7 +88,12 @@ final class Client
         if (trim($text) === '' || self::codePoints($text) > self::MAX_TEXT_CHARACTERS) {
             throw new \InvalidArgumentException('Expected 1-' . self::MAX_TEXT_CHARACTERS . ' characters of text');
         }
-        if (!array_is_list($entities) || count(array_unique($entities, SORT_REGULAR)) !== count($entities)
+        foreach ($entities as $entity) {
+            if (!is_string($entity)) {
+                throw new \InvalidArgumentException('entities must be distinct labels among PER, ORG and LOC');
+            }
+        }
+        if (!array_is_list($entities) || count(array_unique($entities)) !== count($entities)
             || array_diff($entities, self::REDACT_ENTITIES) !== []
         ) {
             throw new \InvalidArgumentException('entities must be distinct labels among PER, ORG and LOC');

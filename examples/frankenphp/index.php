@@ -39,8 +39,9 @@ $handler = static function () use ($client, &$handled): void {
                 }
                 $job = $client->submitEmbed($body['texts']);
             } elseif ($path === '/redact') {
-                $entities = $body['entities'] ?? ['PER'];
-                $minScore = $body['min_score'] ?? 0.85;
+                // A present null is not absent and must fail like the worker would fail it.
+                $entities = array_key_exists('entities', $body) ? $body['entities'] : ['PER'];
+                $minScore = array_key_exists('min_score', $body) ? $body['min_score'] : 0.85;
                 if (!is_string($body['text'] ?? null) || !is_array($entities) || (!is_int($minScore) && !is_float($minScore))) {
                     throw new InvalidArgumentException('Invalid redact input');
                 }

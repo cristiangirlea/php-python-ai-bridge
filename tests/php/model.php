@@ -47,10 +47,11 @@ if ($embedding->model !== 'sentence-transformers/all-MiniLM-L6-v2' || $embedding
 ) {
     throw new RuntimeException('Real embedding smoke case failed');
 }
-$text = 'Contact John Smith at john@example.com about Berlin.';
+// The leading dash is one code point of three bytes: byte-based model offsets would misplace every mask.
+$text = "\u{2014} John Smith wrote to john@example.com about Berlin.";
 $job = $client->submitRedact($text, ['PER', 'LOC'], timeoutMs: 60000);
 $redaction = RedactResult::fromJob($client->wait($job->id, 60000), $text);
-if ($redaction->model !== 'Xenova/bert-base-NER:int8' || $redaction->text !== 'Contact [PER] at [EMAIL] about [LOC].'
+if ($redaction->model !== 'Xenova/bert-base-NER:int8' || $redaction->text !== "\u{2014} [PER] wrote to [EMAIL] about [LOC]."
     || array_column($redaction->spans, 'source') !== ['model:PER', 'rule:email', 'model:LOC']
 ) {
     throw new RuntimeException('Real NER smoke case failed: ' . json_encode($redaction->spans));
