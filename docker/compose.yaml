@@ -173,6 +173,71 @@ services:
       FRANKENPHP_URL: http://model-frankenphp:8080
     command: [python, tests/model_integration.py]
 
+  mcp-fetcher:
+    <<: *python
+    profiles: [mcp-fetch]
+    network_mode: bridge
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "1"
+    command:
+      - sh
+      - -ec
+      - 'python -m pip download --require-hashes --only-binary=:all: --dest /cache/wheels -r requirements-mcp.lock'
+
+  # A stdio MCP server for the host's agent: `docker compose -f docker/compose.yaml run --rm -i mcp`.
+  # It reads files only under /data, which is the checkout unless BRIDGE_MCP_DATA holds an absolute path.
+  mcp:
+    <<: *python
+    profiles: [mcp]
+    networks: [isolated]
+    depends_on: [worker]
+    stdin_open: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /deps:rw,exec,nosuid,size=256m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache:ro
+      - ${BRIDGE_MCP_DATA:-..}:/data:ro
+    environment:
+      <<: *python-env
+      PYTHONPATH: /work/mcp_server:/deps
+      BRIDGE_URL: http://worker:8090
+      BRIDGE_MCP_ROOT: /data
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "1"
+    command:
+      - sh
+      - -ec
+      - 'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && exec python -m bridge_mcp'
+
+  mcp-tests:
+    <<: *python
+    profiles: [mcp]
+    network_mode: none
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /deps:rw,exec,nosuid,size=256m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache:ro
+    environment:
+      <<: *python-env
+      PYTHONPATH: /work/worker:/work/mcp_server:/deps
+      # Enabled on purpose: the tests prove the test tasks are never exposed as tools.
+      BRIDGE_TEST_TASKS: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "1"
+    command:
+      - sh
+      - -ec
+      - 'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python -m unittest discover -s tests/mcp -v'
+
 networks:
   isolated:
     internal: true
