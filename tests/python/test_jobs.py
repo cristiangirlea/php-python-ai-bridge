@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
-from ai_bridge.tasks import InvalidInput, validate
+from ai_bridge.tasks import InvalidInput, execute, validate
 
 
 class ValidationTests(unittest.TestCase):
@@ -65,7 +65,27 @@ class ValidationTests(unittest.TestCase):
                 validate("test.delay", {"seconds": value}, True)
 
 
-class JobsTests(unittest.TestCase):
+class ProgressTests(unittest.TestCase):
+    def test_reports_are_bounded_increasing_and_end_on_total(self):
+        for total in [1, 3, 64, 65, 127, 128, 512]:
+            events = []
+            execute("rerank", {"query": "x", "documents": ["x"] * total}, "lexical", "",
+                    lambda completed, _: events.append(completed))
+            with self.subTest(total=total):
+                self.assertLessEqual(len(events), 66)
+                self.assertEqual(events[0], 0)
+                self.assertEqual(events[-1], total)
+                self.assertEqual(events, sorted(set(events)))
+
+
+    def test_large_rerank_completes_through_the_pipe(self):
+        documents = [f"red apple {i}" for i in range(512)]
+        done = self.wait(self.store.submit(
+            "rerank", {"query": "red apple", "documents": documents, "top_k": 5})["id"])
+        self.assertEqual(done["status"], "succeeded")
+        self.assertEqual(len(done["result"]["rankings"]), 5)
+        self.assertEqual(done["progress"], {"completed": 512, "total": 512})
+
     def setUp(self):
         self.store = JobStore(Settings(concurrency=1, test_tasks=True))
 
@@ -97,13 +117,12 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(limited["status"], "succeeded")
         self.assertEqual(limited["result"]["rankings"], full["result"]["rankings"][:2])
 
-    def test_large_rerank_bounds_progress_events(self):
+    def test_large_rerank_completes_through_the_pipe(self):
         documents = [f"red apple {i}" for i in range(512)]
         done = self.wait(self.store.submit(
             "rerank", {"query": "red apple", "documents": documents, "top_k": 5})["id"])
         self.assertEqual(done["status"], "succeeded")
         self.assertEqual(len(done["result"]["rankings"]), 5)
-        # Progress must still land exactly on the total after throttling.
         self.assertEqual(done["progress"], {"completed": 512, "total": 512})
 
     def test_input_and_snapshot_are_copied(self):

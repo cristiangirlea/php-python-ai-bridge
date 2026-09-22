@@ -42,8 +42,9 @@ def validate(task: str, payload: object, test_tasks: bool = False) -> dict:
         raise InvalidInput(f"each document must contain 1-{MAX_FIELD_CHARACTERS} characters")
     if len(query) + sum(len(doc) for doc in documents) > MAX_TOTAL_CHARACTERS:
         raise InvalidInput(f"query and documents must total at most {MAX_TOTAL_CHARACTERS} characters")
+    top_k = payload.get("top_k", len(documents))
     # type() rejects bool, which int subclasses and would otherwise pass a range check.
-    if type(payload.get("top_k", 1)) is not int or not 1 <= payload.get("top_k", 1) <= len(documents):
+    if type(top_k) is not int or not 1 <= top_k <= len(documents):
         raise InvalidInput("top_k must be an integer between 1 and the document count")
     return payload
 
@@ -61,8 +62,9 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
 
     query, documents = payload["query"], payload["documents"]
     total = len(documents)
-    # Bound progress messages so a large set cannot flood the coordinator pipe.
-    step = max(1, total // 64)
+    # Ceiling division bounds progress to at most 66 messages so a large set
+    # cannot flood the coordinator pipe.
+    step = -(-total // 64)
 
     def report(completed):
         if completed % step == 0 or completed == total:
