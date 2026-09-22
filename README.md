@@ -6,7 +6,7 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 
 ## What is implemented
 
-- PHP 8.2–8.5 client using cURL, with validated job and reranking result objects.
+- PHP 8.2–8.5 client using cURL, with validated job and reranking result objects. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result.
 - Python 3.12 service with an explicit task allowlist and a separate process per task.
 - Bounded concurrency, queue/result capacity, retention, request sizes and execution deadlines.
 - Cancellation, progress polling, crash detection and generic errors that omit internal exception text.

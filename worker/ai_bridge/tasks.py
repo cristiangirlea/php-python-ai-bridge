@@ -7,6 +7,13 @@ import time
 from pathlib import Path
 
 
+MAX_DOCUMENTS = 512
+MAX_FIELD_CHARACTERS = 8192
+# Chosen to leave headroom under the 262144 byte request limit for ASCII payloads.
+# Multi-byte text reaches that byte limit first and is rejected by the transport.
+MAX_TOTAL_CHARACTERS = 200000
+
+
 class InvalidInput(ValueError):
     pass
 
@@ -23,15 +30,21 @@ def validate(task: str, payload: object, test_tasks: bool = False) -> dict:
         return payload
     if task != "rerank":
         raise InvalidInput("unknown task")
-    if set(payload) != {"query", "documents"}:
-        raise InvalidInput("rerank requires only query and documents")
+    if not {"query", "documents"} <= set(payload) or set(payload) - {"query", "documents", "top_k"}:
+        raise InvalidInput("rerank requires query and documents, with an optional top_k")
     query, documents = payload["query"], payload["documents"]
-    if not isinstance(query, str) or not query.strip() or len(query) > 8192:
-        raise InvalidInput("query must contain 1-8192 characters")
-    if not isinstance(documents, list) or not 1 <= len(documents) <= 32:
-        raise InvalidInput("documents must contain 1-32 strings")
-    if any(not isinstance(doc, str) or not doc.strip() or len(doc) > 8192 for doc in documents):
-        raise InvalidInput("each document must contain 1-8192 characters")
+    if not isinstance(query, str) or not query.strip() or len(query) > MAX_FIELD_CHARACTERS:
+        raise InvalidInput(f"query must contain 1-{MAX_FIELD_CHARACTERS} characters")
+    if not isinstance(documents, list) or not 1 <= len(documents) <= MAX_DOCUMENTS:
+        raise InvalidInput(f"documents must contain 1-{MAX_DOCUMENTS} strings")
+    if any(not isinstance(doc, str) or not doc.strip() or len(doc) > MAX_FIELD_CHARACTERS
+           for doc in documents):
+        raise InvalidInput(f"each document must contain 1-{MAX_FIELD_CHARACTERS} characters")
+    if len(query) + sum(len(doc) for doc in documents) > MAX_TOTAL_CHARACTERS:
+        raise InvalidInput(f"query and documents must total at most {MAX_TOTAL_CHARACTERS} characters")
+    # type() rejects bool, which int subclasses and would otherwise pass a range check.
+    if type(payload.get("top_k", 1)) is not int or not 1 <= payload.get("top_k", 1) <= len(documents):
+        raise InvalidInput("top_k must be an integer between 1 and the document count")
     return payload
 
 
@@ -47,7 +60,15 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
         return {"value": payload.get("value")}
 
     query, documents = payload["query"], payload["documents"]
-    progress(0, len(documents))
+    total = len(documents)
+    # Bound progress messages so a large set cannot flood the coordinator pipe.
+    step = max(1, total // 64)
+
+    def report(completed):
+        if completed % step == 0 or completed == total:
+            progress(completed, total)
+
+    report(0)
     if backend == "onnx":
         # Optional dependencies are installed separately; no runtime downloads.
         import numpy as np
@@ -75,7 +96,7 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
             }
             output = session.run(None, {key: value for key, value in inputs.items() if key in names})
             scores.append(float(output[0].reshape(-1)[0]))
-            progress(i + 1, len(documents))
+            report(i + 1)
         model = "cross-encoder/ms-marco-TinyBERT-L2-v2"
     else:
         words = set(re.findall(r"\w+", query.casefold()))
@@ -83,10 +104,11 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
         for i, document in enumerate(documents):
             other = set(re.findall(r"\w+", document.casefold()))
             scores.append(len(words & other) / max(1, len(words)))
-            progress(i + 1, len(documents))
+            report(i + 1)
         model = "lexical-demo-not-a-model"
     if any(not math.isfinite(score) for score in scores):
         raise ValueError("model returned a non-finite score")
     rankings = [{"index": i, "score": score} for i, score in enumerate(scores)]
     rankings.sort(key=lambda item: (-item["score"], item["index"]))
-    return {"rankings": rankings, "model": model}
+    # validate() guarantees 1 <= top_k <= len(documents) whenever the key is present.
+    return {"rankings": rankings[:payload.get("top_k", total)], "model": model}

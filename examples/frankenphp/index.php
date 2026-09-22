@@ -33,7 +33,11 @@ $handler = static function () use ($client, &$handled): void {
             if (!is_array($body) || !is_string($body['query'] ?? null) || !is_array($body['documents'] ?? null)) {
                 throw new InvalidArgumentException('Invalid rerank input');
             }
-            $job = $client->submitRerank($body['query'], $body['documents']);
+            $topK = $body['top_k'] ?? null;
+            if ($topK !== null && !is_int($topK)) {
+                throw new InvalidArgumentException('top_k must be an integer');
+            }
+            $job = $client->submitRerank($body['query'], $body['documents'], 30000, $topK);
             http_response_code(202);
         } elseif (preg_match('#\A/jobs/([a-f0-9]{32})(/cancel)?\z#', $path ?? '', $matches)) {
             if ($method === 'GET' && !isset($matches[2])) {

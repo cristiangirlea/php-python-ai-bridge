@@ -15,13 +15,13 @@ Submit:
 {"task":"rerank","input":{"query":"capital of France","documents":["Paris is the capital of France.","Saturn has rings."]},"timeout_ms":30000}
 ```
 
-Only `rerank` is enabled normally. Query and each document must contain 1–8192 characters with non-whitespace content; 1–32 documents are accepted. The deadline is an integer from 100 to 300000 milliseconds and includes queue time, process startup and execution. Missing `timeout_ms` means 30000.
+Only `rerank` is enabled normally. Query and each document must contain 1–8192 characters with non-whitespace content; 1–512 documents are accepted, and the query plus all documents may total at most 200000 characters. The 262144 byte request limit binds first for multi-byte text, and the PHP client counts that budget in bytes rather than characters. An optional integer `top_k` from 1 to the document count limits how many rankings are returned; omitting it returns every document. The deadline is an integer from 100 to 300000 milliseconds and includes queue time, process startup and execution. Missing `timeout_ms` means 30000.
 
 A job contains `id`, `task`, `status`, `timeout_ms`, `result`, `error`, and `progress`. IDs are 32 lowercase hex characters. Result/error/progress are null until applicable. Input documents are not echoed in status responses.
 
 States: `queued` → `running` → `succeeded` or `failed`. A queued/running job may also become `timed_out` or `cancelled`. Terminal states do not change. Cancelling an already completed job returns its unchanged state. Progress contains integer `completed` and `total`; it may be null before execution.
 
-Successful reranking returns `{"model":"...","rankings":[{"index":0,"score":1.0}]}`. Every original document index occurs exactly once, sorted by descending score, with original order breaking ties. The deterministic backend identifies itself as `lexical-demo-not-a-model`. ONNX scores are not calibrated probabilities.
+Successful reranking returns `{"model":"...","rankings":[{"index":0,"score":1.0}]}`. Rankings are sorted by descending score, with original order breaking ties; each original document index occurs at most once, and exactly `top_k` rankings are returned (every document when `top_k` is omitted). Progress reports at most about 64 intermediate steps regardless of document count and always ends at the total. The deterministic backend identifies itself as `lexical-demo-not-a-model`. ONNX scores are not calibrated probabilities.
 
 Failures use generic error objects with `code` and `message`. Task errors include `task_failed`, `worker_crashed`, `worker_start_failed` and `deadline_exceeded`. Internal exception text is not sent to clients. HTTP contract failures return 400, missing auth 401, missing routes/jobs 404, oversized bodies 413 and capacity exhaustion 429.
 

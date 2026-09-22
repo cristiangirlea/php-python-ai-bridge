@@ -14,10 +14,11 @@ final readonly class RerankResult
             throw new BridgeException('Reranking has not succeeded', 'task_not_succeeded');
         }
         $result = $job->result;
-        if ($documentCount < 1 || $documentCount > 32
+        // A top_k request returns fewer rankings than documents, never zero and never more.
+        if ($documentCount < 1 || $documentCount > 512
             || !is_string($result['model'] ?? null) || $result['model'] === ''
             || !is_array($result['rankings'] ?? null) || !array_is_list($result['rankings'])
-            || count($result['rankings']) !== $documentCount
+            || count($result['rankings']) < 1 || count($result['rankings']) > $documentCount
         ) {
             throw new BridgeException('Invalid reranking response', 'invalid_response');
         }

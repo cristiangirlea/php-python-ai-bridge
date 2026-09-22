@@ -44,17 +44,31 @@ final class Client
         return $job;
     }
 
-    public function submitRerank(string $query, array $documents, int $timeoutMs = 30000): Job
+    /** A null top_k returns every document ranked; the worker enforces the same limits. */
+    public function submitRerank(string $query, array $documents, int $timeoutMs = 30000, ?int $topK = null): Job
     {
-        if (trim($query) === '' || !array_is_list($documents) || count($documents) < 1 || count($documents) > 32) {
-            throw new \InvalidArgumentException('Expected a query and 1-32 documents');
+        if (trim($query) === '' || !array_is_list($documents) || count($documents) < 1 || count($documents) > 512) {
+            throw new \InvalidArgumentException('Expected a query and 1-512 documents');
         }
+        // Bytes are counted here, characters in the worker; bytes reach the request limit first.
+        $total = strlen($query);
         foreach ($documents as $document) {
             if (!is_string($document) || trim($document) === '') {
                 throw new \InvalidArgumentException('Documents must be nonempty strings');
             }
+            $total += strlen($document);
         }
-        return $this->submit('rerank', ['query' => $query, 'documents' => $documents], $timeoutMs);
+        if ($total > 200000) {
+            throw new \InvalidArgumentException('Query and documents must total at most 200000 bytes');
+        }
+        if ($topK !== null && ($topK < 1 || $topK > count($documents))) {
+            throw new \InvalidArgumentException('top_k must be between 1 and the document count');
+        }
+        $input = ['query' => $query, 'documents' => $documents];
+        if ($topK !== null) {
+            $input['top_k'] = $topK;
+        }
+        return $this->submit('rerank', $input, $timeoutMs);
     }
 
     public function get(string $id): Job
