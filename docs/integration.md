@@ -14,7 +14,7 @@ Browser -> your application's status endpoint ------> GET job
 
 Composer installs and autoloads the PHP client. It does not install Python, download a model or start a service. Run the Python service separately using the reviewed [Docker setup](../README.md#try-it-with-docker); configure its private address and service token in your PHP application. FrankenPHP is an optional PHP runtime, not a requirement of the client.
 
-Two normal tasks are implemented. Reranking: given a query and up to 512 candidate documents, it returns document indexes sorted by relevance, optionally narrowed to the `top_k` best. Embedding: up to 32 texts return one unit-length vector each, for an index your application owns. It is not a chat/completions API. The default backends are deterministic demos, not AI; the optional ONNX profile runs the real models offline after a separate download step.
+Three normal tasks are implemented. Reranking: given a query and up to 512 candidate documents, it returns document indexes sorted by relevance, optionally narrowed to the `top_k` best. Embedding: up to 32 texts return one unit-length vector each, for an index your application owns. Redaction: one text returns a masked copy and the spans found, from checksum and pattern rules on every backend and a named-entity model on the ONNX profile. It is not a chat/completions API. The default backends are deterministic demos, not AI; the optional ONNX profile runs the real models offline after a separate download step.
 
 ## Install through Composer during evaluation
 

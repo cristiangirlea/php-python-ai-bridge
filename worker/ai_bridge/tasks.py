@@ -16,6 +16,10 @@ MAX_FIELD_CHARACTERS = 8192
 # Multi-byte text reaches that byte limit first and is rejected by the transport.
 MAX_TOTAL_CHARACTERS = 200000
 EMBED_DIMENSIONS = 384
+# MISC (nationalities, events, products) is deliberately not offered: it is the noisiest class and rarely personal data.
+REDACT_ENTITIES = ("PER", "ORG", "LOC")
+# Label order of dslim/bert-base-NER; the smoke test fails loudly if a re-pinned model changes it.
+NER_LABELS = ("O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC")
 
 
 class InvalidInput(ValueError):
@@ -55,6 +59,19 @@ def validate(task: str, payload: object, test_tasks: bool = False) -> dict:
             raise InvalidInput("embed requires only texts")
         _strings(payload["texts"], "texts", "text", MAX_TEXTS)
         return payload
+    if task == "redact":
+        if "text" not in payload or set(payload) - {"text", "entities", "min_score"}:
+            raise InvalidInput("redact requires text, with optional entities and min_score")
+        _text(payload["text"], "text")
+        entities = payload.get("entities", ["PER"])
+        if (not isinstance(entities, list)
+                or any(not isinstance(entity, str) or entity not in REDACT_ENTITIES for entity in entities)
+                or len(set(entities)) != len(entities)):
+            raise InvalidInput("entities must be distinct labels among PER, ORG and LOC")
+        min_score = payload.get("min_score", 0.85)
+        if type(min_score) not in (int, float) or not math.isfinite(min_score) or not 0 <= min_score <= 1:
+            raise InvalidInput("min_score must be a number between 0 and 1")
+        return payload
     if task != "rerank":
         raise InvalidInput("unknown task")
     if not {"query", "documents"} <= set(payload) or set(payload) - {"query", "documents", "top_k"}:
@@ -80,6 +97,8 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
         return {"value": payload.get("value")}
     if task == "embed":
         return _embed(payload["texts"], backend, model_dir, progress)
+    if task == "redact":
+        return _redact(payload, backend, model_dir, progress)
 
     query, documents = payload["query"], payload["documents"]
     total = len(documents)
@@ -124,13 +143,13 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
     return {"rankings": rankings[:payload.get("top_k", total)], "model": model}
 
 
-def _onnx(directory: Path, max_length: int):
+def _onnx(directory: Path, max_length: int, stride: int = 0):
     # Optional dependencies are installed separately; no runtime downloads.
     import onnxruntime as ort
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
-    tokenizer.enable_truncation(max_length=max_length)
+    tokenizer.enable_truncation(max_length=max_length, stride=stride)
     tokenizer.enable_padding()
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
@@ -193,3 +212,130 @@ def _embed(texts: list, backend: str, model_dir: str, progress) -> dict:
         raise ValueError("model returned a non-finite component")
     progress(total, total)
     return {"model": model, "dimensions": EMBED_DIMENSIONS, "vectors": vectors}
+
+
+def _luhn(digits: str) -> bool:
+    total = 0
+    for index, char in enumerate(reversed(digits)):
+        value = int(char)
+        if index % 2:
+            value = value * 2 - 9 if value > 4 else value * 2
+        total += value
+    return total % 10 == 0
+
+
+def _card(candidate: str) -> bool:
+    digits = re.sub(r"\D", "", candidate)
+    return 13 <= len(digits) <= 19 and _luhn(digits)
+
+
+def _iban(candidate: str) -> bool:
+    compact = candidate.replace(" ", "")
+    if not 15 <= len(compact) <= 34:
+        return False
+    return int("".join(str(int(char, 36)) for char in compact[4:] + compact[:4])) % 97 == 1
+
+
+def _phone(candidate: str) -> bool:
+    return 7 <= sum(char.isdigit() for char in candidate) <= 15
+
+
+# Precedence for overlapping candidates: checksummed and exact rules before patterns. Every
+# pattern is anchored on its left so scanning stays linear in the text length.
+RULES = (
+    ("CARD", re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"), _card, 1.0),
+    ("IBAN", re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b"), _iban, 1.0),
+    ("EMAIL", re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"), None, 1.0),
+    ("IPV4", re.compile(r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b"), None, 1.0),
+    ("PHONE", re.compile(r"(?<!\w)\+?\d[\d ().-]{5,}\d(?!\w)"), _phone, 0.8),
+)
+
+
+def _close(spans: list, current, entities: list, min_score: float) -> None:
+    if current is None:
+        return
+    score = sum(current["scores"]) / len(current["scores"])
+    if current["label"] in entities and score >= min_score:
+        spans.append({"start": current["start"], "end": current["end"], "label": current["label"],
+                      "source": "model:" + current["label"], "score": round(score, 4), "priority": len(RULES)})
+
+
+def _entities(window, probabilities, entities: list, min_score: float) -> list:
+    # Each word takes its first word piece's label, the usual BERT aggregation; later pieces only extend it.
+    words = []
+    for position, word_id in enumerate(window.word_ids):
+        if word_id is None:
+            continue
+        start, end = window.offsets[position]
+        if words and words[-1][4] == word_id:
+            words[-1][1] = end
+            continue
+        label_id = int(probabilities[position].argmax())
+        words.append([start, end, NER_LABELS[label_id], float(probabilities[position][label_id]), word_id])
+    spans, current = [], None
+    for start, end, label, score, _ in words:
+        prefix, _, kind = label.partition("-")
+        if prefix == "B" or (prefix == "I" and (current is None or current["label"] != kind)):
+            _close(spans, current, entities, min_score)
+            current = {"start": start, "end": end, "label": kind, "scores": [score]}
+        elif prefix == "I":
+            current["end"] = end
+            current["scores"].append(score)
+        else:
+            _close(spans, current, entities, min_score)
+            current = None
+    _close(spans, current, entities, min_score)
+    return spans
+
+
+def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) -> list:
+    import numpy as np
+
+    # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text.
+    tokenizer, session, names = _onnx(Path(model_dir) / "redact", 512, stride=64)
+    encoding = tokenizer.encode(text)
+    windows = [encoding, *encoding.overflowing]
+    progress(0, len(windows))
+    candidates = []
+    for index, window in enumerate(windows):
+        inputs = {
+            "input_ids": np.array([window.ids], dtype=np.int64),
+            "attention_mask": np.array([window.attention_mask], dtype=np.int64),
+            "token_type_ids": np.array([window.type_ids], dtype=np.int64),
+        }
+        logits = session.run(None, {key: value for key, value in inputs.items() if key in names})[0][0]
+        shifted = np.exp(logits - logits.max(axis=-1, keepdims=True))
+        candidates.extend(_entities(window, shifted / shifted.sum(axis=-1, keepdims=True), entities, min_score))
+        progress(index + 1, len(windows))
+    return candidates
+
+
+def _redact(payload: dict, backend: str, model_dir: str, progress) -> dict:
+    text = payload["text"]
+    candidates = []
+    for priority, (label, pattern, accept, score) in enumerate(RULES):
+        for match in pattern.finditer(text):
+            if accept is None or accept(match.group()):
+                candidates.append({"start": match.start(), "end": match.end(), "label": label,
+                                   "source": "rule:" + label.lower(), "score": score, "priority": priority})
+    if backend == "onnx":
+        candidates.extend(_ner(text, payload.get("entities", ["PER"]), payload.get("min_score", 0.85),
+                               model_dir, progress))
+        model = "Xenova/bert-base-NER:int8"
+    else:
+        progress(0, 1)
+        model = "rules-only-not-a-model"
+    # Leftmost first, then longest, then the stronger rule; anything overlapping a kept span is dropped.
+    candidates.sort(key=lambda span: (span["start"], span["start"] - span["end"], span["priority"]))
+    spans, pieces, cursor = [], [], 0
+    for span in candidates:
+        if span["start"] < cursor:
+            continue
+        pieces.append(text[cursor:span["start"]])
+        pieces.append("[" + span["label"] + "]")
+        cursor = span["end"]
+        spans.append({key: span[key] for key in ("start", "end", "label", "source", "score")})
+    pieces.append(text[cursor:])
+    if backend != "onnx":
+        progress(1, 1)
+    return {"model": model, "text": "".join(pieces), "spans": spans}

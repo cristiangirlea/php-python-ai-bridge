@@ -22,7 +22,7 @@ $handler = static function () use ($client, &$handled): void {
             echo json_encode(['status' => 'ok']);
             return;
         }
-        if ($method === 'POST' && ($path === '/rerank' || $path === '/embed')) {
+        if ($method === 'POST' && in_array($path, ['/rerank', '/embed', '/redact'], true)) {
             $raw = file_get_contents('php://input', false, null, 0, 262145);
             if ($raw === false || strlen($raw) > 262144) {
                 http_response_code(413);
@@ -38,6 +38,13 @@ $handler = static function () use ($client, &$handled): void {
                     throw new InvalidArgumentException('Invalid embed input');
                 }
                 $job = $client->submitEmbed($body['texts']);
+            } elseif ($path === '/redact') {
+                $entities = $body['entities'] ?? ['PER'];
+                $minScore = $body['min_score'] ?? 0.85;
+                if (!is_string($body['text'] ?? null) || !is_array($entities) || (!is_int($minScore) && !is_float($minScore))) {
+                    throw new InvalidArgumentException('Invalid redact input');
+                }
+                $job = $client->submitRedact($body['text'], $entities, (float) $minScore);
             } else {
                 if (!is_string($body['query'] ?? null) || !is_array($body['documents'] ?? null)) {
                     throw new InvalidArgumentException('Invalid rerank input');

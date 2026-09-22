@@ -9,7 +9,9 @@ final class Client
     /** Request limits shared with the worker; RerankResult checks responses against the same cap. */
     public const MAX_DOCUMENTS = 512;
     public const MAX_TEXTS = 32;
+    public const MAX_TEXT_CHARACTERS = 8192;
     public const MAX_TOTAL_BYTES = 200000;
+    private const REDACT_ENTITIES = ['PER', 'ORG', 'LOC'];
 
     private readonly string $baseUrl;
 
@@ -78,6 +80,29 @@ final class Client
             throw new \InvalidArgumentException('Texts must total at most ' . self::MAX_TOTAL_BYTES . ' bytes');
         }
         return $this->submit('embed', ['texts' => $texts], $timeoutMs);
+    }
+
+    /** Rules for structured identifiers run on every backend; entities and minScore only shape the optional model pass. */
+    public function submitRedact(string $text, array $entities = ['PER'], float $minScore = 0.85, int $timeoutMs = 30000): Job
+    {
+        if (trim($text) === '' || self::codePoints($text) > self::MAX_TEXT_CHARACTERS) {
+            throw new \InvalidArgumentException('Expected 1-' . self::MAX_TEXT_CHARACTERS . ' characters of text');
+        }
+        if (!array_is_list($entities) || count(array_unique($entities, SORT_REGULAR)) !== count($entities)
+            || array_diff($entities, self::REDACT_ENTITIES) !== []
+        ) {
+            throw new \InvalidArgumentException('entities must be distinct labels among PER, ORG and LOC');
+        }
+        if (!is_finite($minScore) || $minScore < 0 || $minScore > 1) {
+            throw new \InvalidArgumentException('minScore must be between 0 and 1');
+        }
+        return $this->submit('redact', ['text' => $text, 'entities' => $entities, 'min_score' => $minScore], $timeoutMs);
+    }
+
+    /** Counts Unicode code points without ext-mbstring: bytes minus UTF-8 continuation bytes. */
+    public static function codePoints(string $text): int
+    {
+        return strlen($text) - preg_match_all('/[\x80-\xBF]/', $text);
     }
 
     public function get(string $id): Job

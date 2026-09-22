@@ -27,8 +27,21 @@ MODELS = {
             "model.onnx": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452",
         },
     },
+    # The int8 ONNX conversion of dslim/bert-base-NER published by Xenova: the weights are the
+    # original author's, the conversion is not. Pinned by revision and hash like the others.
+    "redact": {
+        "repository": "Xenova/bert-base-NER",
+        "revision": "8e892123e8b7c2c0c2bd1dcb598b7d244c4e53aa",
+        "license": "MIT",
+        "files": {"tokenizer.json": "tokenizer.json", "onnx/model_int8.onnx": "model.onnx"},
+        "hashes": {
+            "tokenizer.json": "343989712a36cd8b253efeaf8baf6a08b9d2583f78e395e83832e8ee9f8d8ee1",
+            "model.onnx": "7de0a4606c65b60da275a72f37b76a102c41e2b79c6463096a9d0cb800bf3f2c",
+        },
+    },
 }
-LIMIT = 100 * 1024 * 1024
+# Raised from 100 MiB for the 103.5 MiB int8 NER model; the fp32 and 4-bit variants were rejected.
+LIMIT = 128 * 1024 * 1024
 
 
 def fetch(task: str, spec: dict) -> dict:
