@@ -17,6 +17,7 @@ use PhpAiBridge\BridgeException;
 use PhpAiBridge\Client;
 use PhpAiBridge\EmbedResult;
 use PhpAiBridge\Job;
+use PhpAiBridge\RedactResult;
 use PhpAiBridge\RerankResult;
 
 $count = 0;
@@ -71,9 +72,23 @@ rejects(fn () => $client->submitEmbed([1]), InvalidArgumentException::class);
 rejects(fn () => $client->submitEmbed([' ']), InvalidArgumentException::class);
 rejects(fn () => $client->submitEmbed(array_fill(0, 33, 'x')), InvalidArgumentException::class);
 rejects(fn () => $client->submitEmbed(array_fill(0, 26, str_repeat('y', 8000))), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact(''), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact(' '), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact(str_repeat('x', 8193)), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact('x', ['MISC']), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact('x', ['PER', 'PER']), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact('x', ['per']), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact('x', [['PER']]), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact('x', [1]), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact('x', minScore: 1.5), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact('x', minScore: -0.1), InvalidArgumentException::class);
+rejects(fn () => $client->submitRedact('x', minScore: NAN), InvalidArgumentException::class);
+check(Client::codePoints('café: x') === 7 && Client::codePoints('') === 0, 'code points are counted without mbstring');
 foreach ([fn () => $unreachable->submitRerank('x', array_fill(0, 512, 'doc')),
           fn () => $unreachable->submitRerank('x', ['a', 'b'], topK: 2),
-          fn () => $unreachable->submitEmbed(array_fill(0, 32, 'text'))] as $accepted) {
+          fn () => $unreachable->submitEmbed(array_fill(0, 32, 'text')),
+          // 8192 code points of two bytes each is the largest accepted text.
+          fn () => $unreachable->submitRedact(str_repeat('é', 8192), ['PER', 'ORG', 'LOC'], 0.5)] as $accepted) {
     try {
         $accepted();
         throw new RuntimeException('Expected transport failure');
@@ -139,5 +154,29 @@ $rerankJob = sample();
 $rerankJob['status'] = 'succeeded';
 $rerankJob['result'] = ['model' => 'test', 'rankings' => [['index' => 0, 'score' => 1.0]]];
 rejects(fn () => EmbedResult::fromJob(Job::fromArray($rerankJob), 1), BridgeException::class);
+
+// A typed redaction result carries spans in code points of the original text, sorted and disjoint.
+$original = 'café: x@y.io';
+$redacted = sample();
+$redacted['task'] = 'redact';
+$redacted['status'] = 'succeeded';
+$redacted['result'] = ['model' => 'test', 'text' => 'café: [EMAIL]',
+    'spans' => [['start' => 6, 'end' => 12, 'label' => 'EMAIL', 'source' => 'rule:email', 'score' => 1.0]]];
+$typed = RedactResult::fromJob(Job::fromArray($redacted), $original);
+check($typed->text === 'café: [EMAIL]' && $typed->spans[0]['label'] === 'EMAIL' && $typed->model === 'test', 'typed redact result');
+rejects(fn () => EmbedResult::fromJob(Job::fromArray($redacted), 1), BridgeException::class);
+$span = $redacted['result']['spans'][0];
+foreach ([['text' => ''], ['text' => 1], ['model' => ''], ['spans' => 'x'], ['spans' => [['start' => 6]]],
+          ['spans' => [['end' => 13] + $span]], ['spans' => [['start' => -1] + $span]], ['spans' => [['start' => 12] + $span]],
+          ['spans' => [['score' => 1.5] + $span]], ['spans' => [['score' => '1'] + $span]], ['spans' => [['label' => ''] + $span]],
+          ['spans' => [['source' => 7] + $span]], ['spans' => [['start' => 7, 'end' => 12] + $span, ['start' => 0, 'end' => 4] + $span]],
+          ['spans' => [['start' => 0, 'end' => 8] + $span, ['start' => 6, 'end' => 12] + $span]]] as $bad) {
+    $data = $redacted;
+    $data['result'] = array_replace($data['result'], $bad);
+    rejects(fn () => RedactResult::fromJob(Job::fromArray($data), $original), BridgeException::class);
+}
+$redacted['result']['spans'] = [];
+$redacted['result']['text'] = $original;
+check(RedactResult::fromJob(Job::fromArray($redacted), $original)->spans === [], 'clean redact result');
 
 echo "PASS: $count PHP contract checks\n";

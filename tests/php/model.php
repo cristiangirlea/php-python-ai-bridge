@@ -7,6 +7,7 @@ require dirname(__DIR__, 2) . '/examples/bootstrap.php';
 use PhpAiBridge\BridgeException;
 use PhpAiBridge\Client;
 use PhpAiBridge\EmbedResult;
+use PhpAiBridge\RedactResult;
 use PhpAiBridge\RerankResult;
 
 $client = new Client(getenv('BRIDGE_URL') ?: 'http://model-worker:8090', getenv('BRIDGE_TOKEN') ?: '');
@@ -46,4 +47,18 @@ if ($embedding->model !== 'sentence-transformers/all-MiniLM-L6-v2' || $embedding
 ) {
     throw new RuntimeException('Real embedding smoke case failed');
 }
-echo "PASS: 2 real ONNX ranking cases and 1 embedding case through the PHP client\n";
+// The leading dash is one code point of three bytes: byte-based model offsets would misplace every mask.
+$text = "\u{2014} John Smith wrote to john@example.com about Berlin.";
+$job = $client->submitRedact($text, ['PER', 'LOC'], timeoutMs: 60000);
+$redaction = RedactResult::fromJob($client->wait($job->id, 60000), $text);
+if ($redaction->model !== 'Xenova/bert-base-NER:int8' || $redaction->text !== "\u{2014} [PER] wrote to [EMAIL] about [LOC]."
+    || array_column($redaction->spans, 'source') !== ['model:PER', 'rule:email', 'model:LOC']
+) {
+    throw new RuntimeException('Real NER smoke case failed: ' . json_encode($redaction->spans));
+}
+$clean = 'The weather is nice today and the meeting starts at noon.';
+$job = $client->submitRedact($clean, timeoutMs: 60000);
+if (RedactResult::fromJob($client->wait($job->id, 60000), $clean)->spans !== []) {
+    throw new RuntimeException('Real NER smoke case produced spans on clean text');
+}
+echo "PASS: 2 real ONNX ranking cases, 1 embedding case and 2 redaction cases through the PHP client\n";

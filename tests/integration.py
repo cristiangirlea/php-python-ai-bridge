@@ -117,7 +117,22 @@ def main():
             assert error.code == 400, (body, error.code)
         else:
             raise AssertionError("Out-of-contract embed input was accepted")
-    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; invalid and missing-job cases")
+    # Redaction through the same boundary: rules run on the default backend, offsets count code points.
+    status, job, _ = request("/redact", {"text": "café: mail x@y.io, card 4111 1111 1111 1111"})
+    assert status == 202, status
+    done = finished(job["id"])
+    assert done["result"]["model"] == "rules-only-not-a-model"
+    assert done["result"]["text"] == "café: mail [EMAIL], card [CARD]"
+    assert [(s["start"], s["end"], s["source"]) for s in done["result"]["spans"]] == [(11, 17, "rule:email"), (24, 43, "rule:card")]
+    for body in [{"text": ""}, {"text": "x", "entities": ["MISC"]}, {"text": "x", "min_score": 2}, {"texts": ["x"]},
+                 {"text": "x", "min_score": None}, {"text": "x", "entities": None}, {"text": "x", "entities": [["PER"]]}]:
+        try:
+            request("/redact", body)
+        except HTTPError as error:
+            assert error.code == 400, (body, error.code)
+        else:
+            raise AssertionError("Out-of-contract redact input was accepted")
+    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; redaction; invalid and missing-job cases")
 
 
 if __name__ == "__main__":
