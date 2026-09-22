@@ -1,7 +1,5 @@
 """Small model smoke test, not a ranking-quality benchmark."""
 
-import time
-
 from integration import finished, request, wait_ready
 
 
@@ -14,17 +12,9 @@ def main():
     for query, documents, expected in cases:
         status, job, _ = request("/rerank", {"query": query, "documents": documents})
         assert status == 202
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            _, done, _ = request("/jobs/" + job["id"])
-            if done["status"] == "succeeded":
-                assert done["result"]["model"] == "cross-encoder/ms-marco-TinyBERT-L2-v2"
-                assert done["result"]["rankings"][0]["index"] == expected
-                break
-            assert done["status"] in {"queued", "running"}, done
-            time.sleep(0.05)
-        else:
-            raise AssertionError("Model task timed out")
+        done = finished(job["id"])
+        assert done["result"]["model"] == "cross-encoder/ms-marco-TinyBERT-L2-v2"
+        assert done["result"]["rankings"][0]["index"] == expected
     texts = ["A dog barks loudly.", "Puppies make barking noises.", "The stock market fell today."]
     status, job, _ = request("/embed", {"texts": texts})
     assert status == 202

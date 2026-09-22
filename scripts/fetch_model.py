@@ -45,7 +45,7 @@ def fetch(task: str, spec: dict) -> dict:
             while chunk := response.read(1024 * 1024):
                 total += len(chunk)
                 if total > LIMIT:
-                    raise ValueError("Model artifact exceeds the 100 MiB limit")
+                    raise ValueError(f"Model artifact exceeds the {LIMIT // (1024 * 1024)} MiB limit")
                 digest.update(chunk)
                 output.write(chunk)
         if digest.hexdigest() != spec["hashes"][destination]:

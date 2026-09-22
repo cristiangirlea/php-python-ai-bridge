@@ -28,27 +28,6 @@ def wait_ready():
     raise AssertionError("FrankenPHP did not become ready")
 
 
-def scenario(index):
-    documents = ["no matching words"] * (1 + index % 5)
-    expected = index % len(documents)
-    documents[expected] = f"unique{index} token{index}"
-    status, job, _ = request("/rerank", {"query": f"unique{index} token{index}", "documents": documents})
-    assert status == 202
-    assert job["status"] == "queued"
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        _, done, _ = request("/jobs/" + job["id"])
-        if done["status"] == "succeeded":
-            assert done["result"]["model"] == "lexical-demo-not-a-model"
-            assert len(done["result"]["rankings"]) == len(documents)
-            assert done["result"]["rankings"][0]["index"] == expected
-            assert done["result"]["rankings"][0]["score"] == 1
-            return done["id"]
-        assert done["status"] in {"queued", "running"}, done
-        time.sleep(0.02)
-    raise AssertionError("Job did not finish")
-
-
 def finished(job_id, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -56,8 +35,23 @@ def finished(job_id, timeout=30):
         if done["status"] == "succeeded":
             return done
         assert done["status"] in {"queued", "running"}, done
-        time.sleep(0.05)
+        time.sleep(0.02)
     raise AssertionError("Job did not finish")
+
+
+def scenario(index):
+    documents = ["no matching words"] * (1 + index % 5)
+    expected = index % len(documents)
+    documents[expected] = f"unique{index} token{index}"
+    status, job, _ = request("/rerank", {"query": f"unique{index} token{index}", "documents": documents})
+    assert status == 202
+    assert job["status"] == "queued"
+    done = finished(job["id"], 15)
+    assert done["result"]["model"] == "lexical-demo-not-a-model"
+    assert len(done["result"]["rankings"]) == len(documents)
+    assert done["result"]["rankings"][0]["index"] == expected
+    assert done["result"]["rankings"][0]["score"] == 1
+    return done["id"]
 
 
 def main():

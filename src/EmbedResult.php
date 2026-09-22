@@ -27,10 +27,16 @@ final readonly class EmbedResult
             if (!is_array($vector) || !array_is_list($vector) || count($vector) !== $dimensions) {
                 throw new BridgeException('Invalid vector', 'invalid_response');
             }
+            $squares = 0.0;
             foreach ($vector as $value) {
                 if ((!is_int($value) && !is_float($value)) || !is_finite((float) $value)) {
                     throw new BridgeException('Invalid vector', 'invalid_response');
                 }
+                $squares += $value * $value;
+            }
+            // The protocol promises unit length within six-decimal rounding, so dot product is cosine.
+            if (abs(sqrt($squares) - 1.0) > 0.001) {
+                throw new BridgeException('Vector is not unit length', 'invalid_response');
             }
         }
         return new self($result['vectors'], $dimensions, $result['model']);

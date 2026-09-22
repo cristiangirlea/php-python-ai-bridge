@@ -121,15 +121,16 @@ rejects(fn () => RerankResult::fromJob(Job::fromArray($narrowed), 3, 1), BridgeE
 $embedded = sample();
 $embedded['task'] = 'embed';
 $embedded['status'] = 'succeeded';
-$embedded['result'] = ['model' => 'test', 'dimensions' => 3, 'vectors' => [[1.0, 0, 0], [0, 1, 0.5]]];
+$embedded['result'] = ['model' => 'test', 'dimensions' => 3, 'vectors' => [[1.0, 0, 0], [0, 0.6, 0.8]]];
 $typed = EmbedResult::fromJob(Job::fromArray($embedded), 2);
-check($typed->dimensions === 3 && $typed->vectors[1][2] === 0.5 && $typed->model === 'test', 'typed embed result');
+check($typed->dimensions === 3 && $typed->vectors[1][2] === 0.8 && $typed->model === 'test', 'typed embed result');
 rejects(fn () => EmbedResult::fromJob(Job::fromArray($embedded), 1), BridgeException::class);
 rejects(fn () => RerankResult::fromJob(Job::fromArray($embedded), 2), BridgeException::class);
 foreach ([['model' => ''], ['dimensions' => 2], ['dimensions' => '3'], ['dimensions' => 0],
           ['vectors' => [[1.0, 0, 0]]], ['vectors' => [[1.0, 0], [0, 1, 0]]], ['vectors' => [[1.0, 0, INF], [0, 1, 0]]],
           ['vectors' => [[1.0, 0, '0'], [0, 1, 0]]], ['vectors' => [['a' => 1, 'b' => 0, 'c' => 0], [0, 1, 0]]],
-          ['vectors' => [[1.0, 0, 0], 'not a vector']]] as $bad) {
+          ['vectors' => [[1.0, 0, 0], 'not a vector']], ['vectors' => [[2.0, 0, 0], [0, 0.6, 0.8]]],
+          ['vectors' => [[0, 0, 0], [0, 0.6, 0.8]]]] as $bad) {
     $data = $embedded;
     $data['result'] = array_replace($data['result'], $bad);
     rejects(fn () => EmbedResult::fromJob(Job::fromArray($data), 2), BridgeException::class);

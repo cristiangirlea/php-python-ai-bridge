@@ -55,7 +55,7 @@ Acquire dependencies and model data in the bounded, network-enabled fetcher:
 docker compose -f docker/compose.yaml run --rm --no-deps fetcher
 ```
 
-This downloads wheels and about 105 MB of model and tokenizer data into ignored `.cache/`, one directory per task under `models/`; a cache fetched before the embed task existed must be fetched again. Wheels are checked against `requirements-model.lock`; the model revision and SHA-256 hashes are fixed in `scripts/fetch_model.py`. On Linux, ensure `.cache/` exists and is writable by container UID 65532 before acquisition. For a disposable local cache, `mkdir -p .cache && chmod 777 .cache` is sufficient; never apply that permission to the repository or another directory.
+This downloads wheels and about 105 MB of model and tokenizer data into ignored `.cache/`, one directory per task under `models/`. A cache created before the embed task used a flat layout that the fetcher does not delete: remove `.cache/models` and fetch again after upgrading. Wheels are checked against `requirements-model.lock`; the model revision and SHA-256 hashes are fixed in `scripts/fetch_model.py`. On Linux, ensure `.cache/` exists and is writable by container UID 65532 before acquisition. For a disposable local cache, `mkdir -p .cache && chmod 777 .cache` is sufficient; never apply that permission to the repository or another directory.
 
 Then run **without internet access**:
 
