@@ -190,7 +190,7 @@ services:
       - 'python -m pip download --require-hashes --only-binary=:all: --dest /cache/wheels -r requirements-mcp.lock'
 
   # A stdio MCP server for the host's agent: `docker compose -f docker/compose.yaml run --rm -i mcp`.
-  # It reads files only under /data, which is the checkout unless BRIDGE_MCP_DATA points elsewhere.
+  # It reads files only under /data, which is the checkout unless BRIDGE_MCP_DATA holds an absolute path.
   mcp:
     <<: *python
     profiles: [mcp]

@@ -35,6 +35,7 @@ Errors come back as tool errors the agent can act on (capacity reached, out of c
 | `BRIDGE_URL` | The worker origin, default `http://127.0.0.1:8090`. |
 | `BRIDGE_MCP_ROOT` | The one directory whose files `documents_path` may name. Unset means paths are refused. |
 | `BRIDGE_MCP_TIMEOUT_MS` | Per-call wait before cancelling, 100–300000, default 60000. |
+| `BRIDGE_MCP_STARTUP_S` | How long to wait for the worker to answer at start-up before exiting, default 10. Only a refused connection is waited out; a rejected token fails at once. |
 
 The root is server configuration rather than MCP roots on purpose: the 2026-07-28 specification deprecates roots and sampling in favour of explicit parameters, and a host that does not declare the capability fails the call. An operator-set directory gives the same confinement without depending on the host.
 
@@ -47,7 +48,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher   # once: h
 docker compose -f docker/compose.yaml run --rm -i -T mcp
 ```
 
-Compose starts the `worker` alongside it. `/data` inside the container is the checkout by default; set `BRIDGE_MCP_DATA` to mount another directory, read-only. A host that launches MCP servers from a JSON configuration would use, with the token supplied from its environment:
+Compose starts the `worker` alongside it, and the server waits up to `BRIDGE_MCP_STARTUP_S` (default 10) for it to answer before giving up. `/data` inside the container is the checkout by default; set `BRIDGE_MCP_DATA` to the **absolute** path of another directory to mount it there read-only (a relative value resolves against `docker/`, not your shell). A host that launches MCP servers from a JSON configuration would use, with the token supplied from its environment:
 
 ```json
 {"mcpServers": {"bridge": {
@@ -77,4 +78,4 @@ docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 ```
 
-Dependencies are pinned in `requirements-mcp.lock` with SHA-256 hashes for CPython 3.12 on Linux x86_64, like the model wheels. The MCP SDK is the one third-party dependency of this repository's own code, and it stays out of `worker/`, which remains standard library only.
+Dependencies are pinned in `requirements-mcp.lock` with SHA-256 hashes for CPython 3.12 on Linux x86_64, like the model wheels. The SDK hard-depends on its HTTP transport stack (uvicorn, starlette, sse-starlette, cryptography, pyjwt), so those are installed and pinned too although nothing exercises them over stdio; they are part of the supply-chain surface all the same. The MCP SDK is the one third-party dependency of this repository's own code, and it stays out of `worker/`, which remains standard library only.
