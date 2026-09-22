@@ -80,7 +80,31 @@ def main():
             raise AssertionError("Oversized input was accepted")
         body[field] = "é" * 8192 if field == "query" else ["é" * 8192]
         assert request("/rerank", body)[0] == 202, "Character boundary must allow multibyte text"
-    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; invalid and missing-job cases")
+    # A large candidate set narrows to top_k through the whole PHP boundary.
+    documents = ["no matching words"] * 512
+    documents[511] = "needle token"
+    status, job, _ = request("/rerank", {"query": "needle token", "documents": documents, "top_k": 3})
+    assert status == 202, status
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        _, done, _ = request("/jobs/" + job["id"])
+        if done["status"] == "succeeded":
+            break
+        assert done["status"] in {"queued", "running"}, done
+        time.sleep(0.05)
+    assert done["status"] == "succeeded", done
+    assert [item["index"] for item in done["result"]["rankings"]][:1] == [511]
+    assert len(done["result"]["rankings"]) == 3
+    assert done["progress"] == {"completed": 512, "total": 512}, done["progress"]
+    for body in [{"query": "x", "documents": ["x"] * 513}, {"query": "x", "documents": ["x", "y"], "top_k": 3},
+                 {"query": "x", "documents": ["y" * 8000] * 25}]:
+        try:
+            request("/rerank", body)
+        except HTTPError as error:
+            assert error.code == 400, (len(body["documents"]), error.code)
+        else:
+            raise AssertionError("Out-of-contract rerank input was accepted")
+    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; invalid and missing-job cases")
 
 
 if __name__ == "__main__":

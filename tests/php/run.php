@@ -58,6 +58,13 @@ foreach (['../healthz', str_repeat('b', 31), str_repeat('B', 32), str_repeat('a'
 rejects(fn () => $client->submitRerank('', ['x']), InvalidArgumentException::class);
 rejects(fn () => $client->submitRerank('x', ['key' => 'x']), InvalidArgumentException::class);
 rejects(fn () => $client->submitRerank('x', [1]), InvalidArgumentException::class);
+rejects(fn () => $client->submitRerank('x', array_fill(0, 513, 'doc')), InvalidArgumentException::class);
+rejects(fn () => $client->submitRerank('x', array_fill(0, 25, str_repeat('y', 8000))), InvalidArgumentException::class);
+rejects(fn () => $client->submitRerank('x', ['a', 'b'], 30000, 0), InvalidArgumentException::class);
+rejects(fn () => $client->submitRerank('x', ['a', 'b'], 30000, 3), InvalidArgumentException::class);
+// Accepted input reaches the transport, which has no worker to answer it here.
+rejects(fn () => $client->submitRerank('x', array_fill(0, 512, 'doc')), BridgeException::class);
+rejects(fn () => $client->submitRerank('x', ['a', 'b'], 30000, 2), BridgeException::class);
 rejects(fn () => $client->wait(str_repeat('a', 32), 0), InvalidArgumentException::class);
 $job = Job::fromArray(sample());
 check(!$job->isTerminal(), 'queued is not terminal');
@@ -83,4 +90,13 @@ foreach ([['index' => 1, 'score' => 0], ['index' => -1, 'score' => 0], ['index' 
     $data['result']['rankings'][1] = $bad;
     rejects(fn () => RerankResult::fromJob(Job::fromArray($data), 2), BridgeException::class);
 }
+// A top_k response carries fewer rankings than documents, but never more.
+$narrowed = sample();
+$narrowed['status'] = 'succeeded';
+$narrowed['result'] = ['model' => 'test', 'rankings' => [['index' => 2, 'score' => 5.0]]];
+check(RerankResult::fromJob(Job::fromArray($narrowed), 3)->rankings[0]['index'] === 2, 'top_k rerank result');
+rejects(fn () => RerankResult::fromJob(Job::fromArray($narrowed), 2), BridgeException::class);
+$narrowed['result']['rankings'] = [];
+rejects(fn () => RerankResult::fromJob(Job::fromArray($narrowed), 3), BridgeException::class);
+
 echo "PASS: $count PHP contract checks\n";
