@@ -8,11 +8,26 @@ permissions:
   contents: read
 
 jobs:
-  deterministic:
+  php:
+    name: PHP ${{ matrix.php }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - php: '8.2'
+            image: dunglas/frankenphp:1.12.7-php8.2-bookworm@sha256:15646d56650cc5a6c68275ac934eab8f8648a5e776690035f9278a93e0577088
+          - php: '8.3'
+            image: dunglas/frankenphp:1.12.7-php8.3-bookworm@sha256:555b08c41cedd5b4358768726197a076d6c7973b9cec845bc619854f5b116663
+          - php: '8.4'
+            image: dunglas/frankenphp:1.12.7-php8.4-bookworm@sha256:069ddad6dd0f7d10e170d80038e247dfce1b74b36e8a2c60e4b18fe280dd2052
+          - php: '8.5'
+            image: dunglas/frankenphp:1.12.7-php8.5-bookworm@sha256:7380f2c24ef9d86ad496dbc285ba66e212365c864db2797f3e7269afad100dbb
     env:
       BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+      BRIDGE_PHP_IMAGE: ${{ matrix.image }}
+      EXPECTED_PHP: ${{ matrix.php }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -21,6 +36,7 @@ jobs:
         run: docker compose -f docker/compose.yaml --profile test config
       - name: Unit and syntax tests
         run: |
+          docker compose -f docker/compose.yaml run --rm --no-deps -e EXPECTED_PHP php-tests php -r 'exit(PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION === getenv("EXPECTED_PHP") ? 0 : 1);'
           docker compose -f docker/compose.yaml run --rm --no-deps python-tests
           docker compose -f docker/compose.yaml run --rm --no-deps php-tests
           docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec 'find src examples tests/php -name "*.php" -print0 | xargs -0 -n1 php -l'
@@ -35,3 +51,15 @@ jobs:
       - name: Stop test containers
         if: always()
         run: docker compose -f docker/compose.yaml --profile test down
+
+  # Keep the required branch-protection check stable as the matrix changes.
+  deterministic:
+    if: always()
+    needs: [php]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every supported PHP version to pass
+        env:
+          MATRIX_RESULT: ${{ needs.php.result }}
+        run: test "$MATRIX_RESULT" = success

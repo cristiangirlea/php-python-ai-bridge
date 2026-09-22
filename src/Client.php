@@ -170,7 +170,8 @@ final class Client
             }
             return $decoded;
         } finally {
-            curl_close($handle);
+            // PHP 8 releases CurlHandle objects; curl_close() is deprecated in 8.5.
+            unset($handle);
         }
     }
 }
