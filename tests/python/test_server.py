@@ -54,6 +54,8 @@ class HttpTests(unittest.TestCase):
         self.assertNotIn("_input", data)
         body = json.dumps({"task": "rerank", "input": {"query": "x", "documents": ["x", "y"], "top_k": 1}})
         self.assertEqual(self.request("POST", "/v1/jobs", body, self.auth())[0], 202)
+        body = json.dumps({"task": "embed", "input": {"texts": ["x", "y"]}})
+        self.assertEqual(self.request("POST", "/v1/jobs", body, self.auth())[0], 202)
 
     def test_invalid_bodies(self):
         for body in ["[]", "null", "{", '{"task":"rerank","task":"test.crash","input":{}}',
@@ -61,7 +63,9 @@ class HttpTests(unittest.TestCase):
                      '{"task":"test.crash","input":{}}',
                      '{"task":"rerank","input":{"query":NaN,"documents":["x"]}}',
                      '{"task":"rerank","input":{"query":"x","documents":["x"],"top_k":2}}',
-                     '{"task":"rerank","input":{"query":"x","documents":["x"],"top_k":null}}']:
+                     '{"task":"rerank","input":{"query":"x","documents":["x"],"top_k":null}}',
+                     '{"task":"embed","input":{"texts":[]}}',
+                     '{"task":"embed","input":{"texts":["x"],"query":"x"}}']:
             with self.subTest(body=body):
                 self.assertEqual(self.request("POST", "/v1/jobs", body, self.auth())[0], 400)
 

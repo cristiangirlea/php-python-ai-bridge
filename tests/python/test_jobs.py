@@ -1,3 +1,5 @@
+import json
+import math
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -50,6 +52,17 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(InvalidInput):
                 validate("rerank", {"query": "x", "documents": ["a", "b"], "top_k": value})
 
+    def test_valid_embed(self):
+        payload = {"texts": ["Paris", "Rome"]}
+        self.assertEqual(validate("embed", payload), payload)
+
+    def test_embed_invalid_contracts(self):
+        for payload in [None, [], {}, {"texts": []}, {"texts": "Paris"}, {"texts": [1]}, {"texts": [""]},
+                        {"texts": ["x"] * 33}, {"texts": ["x" * 8193]}, {"texts": ["x"], "extra": 1},
+                        {"texts": ["y" * 8000] * 26}]:
+            with self.subTest(payload=str(payload)[:60]), self.assertRaises(InvalidInput):
+                validate("embed", payload)
+
     def test_tests_are_disabled_by_default(self):
         with self.assertRaises(InvalidInput):
             validate("test.crash", {})
@@ -65,6 +78,18 @@ class ValidationTests(unittest.TestCase):
                 validate("test.delay", {"seconds": value}, True)
 
 
+class EmbedResultTests(unittest.TestCase):
+    def test_largest_result_fits_the_php_response_limit(self):
+        texts = [("word%d " % i) * 1000 for i in range(32)]
+        result = execute("embed", {"texts": texts}, "lexical", "", lambda *_: None)
+        for vector in result["vectors"]:
+            for value in vector:
+                self.assertEqual(round(value, 6), value)
+                self.assertLessEqual(abs(value), 1.0)
+        # Worst case 32 x 384 components of "-0.123456," stays under the client's 262144 byte cap.
+        self.assertLessEqual(len(json.dumps(result, separators=(",", ":"))), 262144 - 4096)
+
+
 class ProgressTests(unittest.TestCase):
     def test_reports_are_bounded_increasing_and_end_on_total(self):
         for total in [1, 3, 64, 65, 127, 128, 512]:
@@ -78,14 +103,8 @@ class ProgressTests(unittest.TestCase):
                 self.assertEqual(events, sorted(set(events)))
 
 
-    def test_large_rerank_completes_through_the_pipe(self):
-        documents = [f"red apple {i}" for i in range(512)]
-        done = self.wait(self.store.submit(
-            "rerank", {"query": "red apple", "documents": documents, "top_k": 5})["id"])
-        self.assertEqual(done["status"], "succeeded")
-        self.assertEqual(len(done["result"]["rankings"]), 5)
-        self.assertEqual(done["progress"], {"completed": 512, "total": 512})
 
+class JobsTests(unittest.TestCase):
     def setUp(self):
         self.store = JobStore(Settings(concurrency=1, test_tasks=True))
 
@@ -124,6 +143,30 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(done["status"], "succeeded")
         self.assertEqual(len(done["result"]["rankings"]), 5)
         self.assertEqual(done["progress"], {"completed": 512, "total": 512})
+
+    def test_hashing_embed_is_explicit_unit_length_and_order_free(self):
+        texts = ["red apple", "apple red", "blue sky", "red apple"]
+        done = self.wait(self.store.submit("embed", {"texts": texts})["id"])
+        self.assertEqual(done["status"], "succeeded")
+        self.assertEqual(done["result"]["model"], "hashing-bow-not-a-model")
+        self.assertEqual(done["result"]["dimensions"], 384)
+        vectors = done["result"]["vectors"]
+        self.assertEqual(len(vectors), 4)
+        for vector in vectors:
+            self.assertEqual(len(vector), 384)
+            # Components are rounded to six decimals, so the norm is unit within rounding.
+            self.assertAlmostEqual(math.sqrt(sum(x * x for x in vector)), 1.0, places=4)
+        self.assertEqual(vectors[0], vectors[3])
+        self.assertEqual(vectors[0], vectors[1])
+        dot = lambda a, b: sum(x * y for x, y in zip(a, b))
+        self.assertGreater(dot(vectors[0], vectors[1]), dot(vectors[0], vectors[2]))
+        self.assertEqual(done["progress"], {"completed": 4, "total": 4})
+
+    def test_hashing_embed_is_stable_across_processes(self):
+        # Each job runs in a fresh spawned process; salted hash() would differ between them.
+        first = self.wait(self.store.submit("embed", {"texts": ["red apple"]})["id"])
+        second = self.wait(self.store.submit("embed", {"texts": ["red apple"]})["id"])
+        self.assertEqual(first["result"]["vectors"], second["result"]["vectors"])
 
     def test_input_and_snapshot_are_copied(self):
         payload = {"seconds": 0, "value": {"name": "before"}}
