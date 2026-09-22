@@ -28,6 +28,17 @@ def wait_ready():
     raise AssertionError("FrankenPHP did not become ready")
 
 
+def finished(job_id, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _, done, _ = request("/jobs/" + job_id)
+        if done["status"] == "succeeded":
+            return done
+        assert done["status"] in {"queued", "running"}, done
+        time.sleep(0.02)
+    raise AssertionError("Job did not finish")
+
+
 def scenario(index):
     documents = ["no matching words"] * (1 + index % 5)
     expected = index % len(documents)
@@ -35,18 +46,12 @@ def scenario(index):
     status, job, _ = request("/rerank", {"query": f"unique{index} token{index}", "documents": documents})
     assert status == 202
     assert job["status"] == "queued"
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        _, done, _ = request("/jobs/" + job["id"])
-        if done["status"] == "succeeded":
-            assert done["result"]["model"] == "lexical-demo-not-a-model"
-            assert len(done["result"]["rankings"]) == len(documents)
-            assert done["result"]["rankings"][0]["index"] == expected
-            assert done["result"]["rankings"][0]["score"] == 1
-            return done["id"]
-        assert done["status"] in {"queued", "running"}, done
-        time.sleep(0.02)
-    raise AssertionError("Job did not finish")
+    done = finished(job["id"], 15)
+    assert done["result"]["model"] == "lexical-demo-not-a-model"
+    assert len(done["result"]["rankings"]) == len(documents)
+    assert done["result"]["rankings"][0]["index"] == expected
+    assert done["result"]["rankings"][0]["score"] == 1
+    return done["id"]
 
 
 def main():
@@ -85,15 +90,8 @@ def main():
     documents[511] = "needle token"
     status, job, _ = request("/rerank", {"query": "needle token", "documents": documents, "top_k": 3})
     assert status == 202, status
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        _, done, _ = request("/jobs/" + job["id"])
-        if done["status"] == "succeeded":
-            break
-        assert done["status"] in {"queued", "running"}, done
-        time.sleep(0.05)
-    assert done["status"] == "succeeded", done
-    assert [item["index"] for item in done["result"]["rankings"]][:1] == [511]
+    done = finished(job["id"])
+    assert done["result"]["rankings"][0]["index"] == 511
     assert len(done["result"]["rankings"]) == 3
     assert done["progress"] == {"completed": 512, "total": 512}, done["progress"]
     for body in [{"query": "x", "documents": ["x"] * 513}, {"query": "x", "documents": ["x", "y"], "top_k": 3},
@@ -104,7 +102,22 @@ def main():
             assert error.code == 400, (len(body["documents"]), error.code)
         else:
             raise AssertionError("Out-of-contract rerank input was accepted")
-    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; invalid and missing-job cases")
+    # Embedding through the same boundary: identical bags of words give identical vectors.
+    status, job, _ = request("/embed", {"texts": ["red apple", "apple red", "blue sky"]})
+    assert status == 202, status
+    done = finished(job["id"])
+    assert done["result"]["model"] == "hashing-bow-not-a-model"
+    vectors = done["result"]["vectors"]
+    assert len(vectors) == 3 and len(vectors[0]) == done["result"]["dimensions"] == 384
+    assert vectors[0] == vectors[1] != vectors[2]
+    for body in [{"texts": []}, {"texts": ["x"] * 33}, {"documents": ["x"]}]:
+        try:
+            request("/embed", body)
+        except HTTPError as error:
+            assert error.code == 400, (body, error.code)
+        else:
+            raise AssertionError("Out-of-contract embed input was accepted")
+    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; invalid and missing-job cases")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ require dirname(__DIR__, 2) . '/examples/bootstrap.php';
 
 use PhpAiBridge\BridgeException;
 use PhpAiBridge\Client;
+use PhpAiBridge\EmbedResult;
 use PhpAiBridge\Job;
 use PhpAiBridge\RerankResult;
 
@@ -64,8 +65,15 @@ rejects(fn () => $client->submitRerank('x', ['a', 'b'], topK: 0), InvalidArgumen
 rejects(fn () => $client->submitRerank('x', ['a', 'b'], topK: 3), InvalidArgumentException::class);
 // Accepted input reaches the transport; port 1 refuses instantly so the failure mode is explicit.
 $unreachable = new Client('http://127.0.0.1:1', $token, 1);
+rejects(fn () => $client->submitEmbed([]), InvalidArgumentException::class);
+rejects(fn () => $client->submitEmbed(['key' => 'x']), InvalidArgumentException::class);
+rejects(fn () => $client->submitEmbed([1]), InvalidArgumentException::class);
+rejects(fn () => $client->submitEmbed([' ']), InvalidArgumentException::class);
+rejects(fn () => $client->submitEmbed(array_fill(0, 33, 'x')), InvalidArgumentException::class);
+rejects(fn () => $client->submitEmbed(array_fill(0, 26, str_repeat('y', 8000))), InvalidArgumentException::class);
 foreach ([fn () => $unreachable->submitRerank('x', array_fill(0, 512, 'doc')),
-          fn () => $unreachable->submitRerank('x', ['a', 'b'], topK: 2)] as $accepted) {
+          fn () => $unreachable->submitRerank('x', ['a', 'b'], topK: 2),
+          fn () => $unreachable->submitEmbed(array_fill(0, 32, 'text'))] as $accepted) {
     try {
         $accepted();
         throw new RuntimeException('Expected transport failure');
@@ -108,5 +116,28 @@ foreach ([[3, null], [3, 2], [2, 1], [3, 4], [3, 0]] as [$documentCount, $topK])
 }
 $narrowed['result']['rankings'] = [];
 rejects(fn () => RerankResult::fromJob(Job::fromArray($narrowed), 3, 1), BridgeException::class);
+
+// A typed embedding result has one vector of the declared dimension per input text.
+$embedded = sample();
+$embedded['task'] = 'embed';
+$embedded['status'] = 'succeeded';
+$embedded['result'] = ['model' => 'test', 'dimensions' => 3, 'vectors' => [[1.0, 0, 0], [0, 0.6, 0.8]]];
+$typed = EmbedResult::fromJob(Job::fromArray($embedded), 2);
+check($typed->dimensions === 3 && $typed->vectors[1][2] === 0.8 && $typed->model === 'test', 'typed embed result');
+rejects(fn () => EmbedResult::fromJob(Job::fromArray($embedded), 1), BridgeException::class);
+rejects(fn () => RerankResult::fromJob(Job::fromArray($embedded), 2), BridgeException::class);
+foreach ([['model' => ''], ['dimensions' => 2], ['dimensions' => '3'], ['dimensions' => 0],
+          ['vectors' => [[1.0, 0, 0]]], ['vectors' => [[1.0, 0], [0, 1, 0]]], ['vectors' => [[1.0, 0, INF], [0, 1, 0]]],
+          ['vectors' => [[1.0, 0, '0'], [0, 1, 0]]], ['vectors' => [['a' => 1, 'b' => 0, 'c' => 0], [0, 1, 0]]],
+          ['vectors' => [[1.0, 0, 0], 'not a vector']], ['vectors' => [[2.0, 0, 0], [0, 0.6, 0.8]]],
+          ['vectors' => [[0, 0, 0], [0, 0.6, 0.8]]]] as $bad) {
+    $data = $embedded;
+    $data['result'] = array_replace($data['result'], $bad);
+    rejects(fn () => EmbedResult::fromJob(Job::fromArray($data), 2), BridgeException::class);
+}
+$rerankJob = sample();
+$rerankJob['status'] = 'succeeded';
+$rerankJob['result'] = ['model' => 'test', 'rankings' => [['index' => 0, 'score' => 1.0]]];
+rejects(fn () => EmbedResult::fromJob(Job::fromArray($rerankJob), 1), BridgeException::class);
 
 echo "PASS: $count PHP contract checks\n";

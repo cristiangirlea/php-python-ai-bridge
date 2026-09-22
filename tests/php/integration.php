@@ -6,6 +6,7 @@ require __DIR__ . '/run.php';
 
 use PhpAiBridge\BridgeException;
 use PhpAiBridge\Client;
+use PhpAiBridge\EmbedResult;
 use PhpAiBridge\RerankResult;
 
 function ready(Client $client): void
@@ -92,4 +93,7 @@ $documents[7] = 'needle token';
 $job = $real->submitRerank('needle token', $documents, topK: 2);
 $result = RerankResult::fromJob($real->wait($job->id), count($documents), 2);
 check(count($result->rankings) === 2 && $result->rankings[0]['index'] === 7, 'top_k narrows 512 documents through the PHP client');
+$job = $real->submitEmbed(['red apple', 'apple red', 'blue sky']);
+$vectors = EmbedResult::fromJob($real->wait($job->id), 3)->vectors;
+check($vectors[0] === $vectors[1] && $vectors[0] !== $vectors[2], 'embedding round trip through the PHP client');
 echo "PASS: $count total PHP checks including real HTTP failure cases\n";
