@@ -37,6 +37,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         (cls.root / "large.txt").write_text("\n".join(["needle token"] + ["other"] * 511) + "\n", encoding="utf-8")
         (cls.root / "toomany.txt").write_text("\n".join(["x"] * 513) + "\n", encoding="utf-8")
         (cls.root / "empty.txt").write_text("\n\n", encoding="utf-8")
+        (cls.root / "blank-lines.txt").write_text("first line\n\n   \nneedle token\n", encoding="utf-8")
         (cls.root / "budget.txt").write_text("\n".join(["y" * 8000] * 24) + "\n", encoding="utf-8")
         cls.outside = Path(cls.temp.name) / "outside.json"
         cls.outside.write_text(json.dumps(documents), encoding="utf-8")
@@ -116,6 +117,45 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(body["considered"], 40)
                 self.assertEqual([item["index"] for item in body["results"]][0], 7)
                 self.assertEqual(len(body["results"]), 3)
+
+    async def test_a_line_file_is_indexed_by_its_non_blank_lines(self):
+        # What the description promises: blank and whitespace-only lines are not documents, so they are not counted.
+        result = await self.call("bridge_rerank", {"query": "needle token", "documents_path": "blank-lines.txt", "top_k": 1})
+        self.assertFalse(result.is_error, result.content)
+        self.assertEqual(result.structured_content["considered"], 2)
+        self.assertEqual(result.structured_content["results"][0]["index"], 1)
+
+    async def test_paths_and_positions_are_explained_where_the_agent_reads_them(self):
+        # A model sees a tool's description and input schema; many hosts never show it the output schema. In the
+        # first LLM run Opus had to infer both of these from the data (docs/testing.md).
+        tools = {tool.name: tool for tool in await self.tools()}
+        rerank, similarity, search = tools["bridge_rerank"], tools["bridge_embed_similarity"], tools["bridge_search"]
+        for tool, argument in [(rerank, "documents_path"), (search, "index_path")]:
+            with self.subTest(argument=argument):
+                self.assertIn("relative to the server's root", tool.input_schema["properties"][argument]["description"])
+        self.assertIn("non-blank line", rerank.input_schema["properties"]["documents_path"]["description"])
+        self.assertIn("zero-based position", rerank.description)
+        self.assertIn("non-blank lines", rerank.description)
+        self.assertIn("zero-based position", similarity.description)
+
+    async def test_every_position_in_a_result_is_described_in_the_output_schema(self):
+        # For hosts that do show the output schema: each integer that locates something says what it counts.
+        def field(tool, model, name):
+            schema = tool.output_schema
+            return schema["$defs"][model]["properties"][name].get("description", "")
+
+        tools = {tool.name: tool for tool in await self.tools()}
+        expected = [("bridge_rerank", "RerankHit", "index", "zero-based"),
+                    ("bridge_embed_similarity", "Pair", "a", "zero-based"),
+                    ("bridge_embed_similarity", "Pair", "b", "zero-based"),
+                    ("bridge_search", "SearchHit", "start", "code-point offset"),
+                    ("bridge_search", "SearchHit", "end", "exclusive"),
+                    ("bridge_search", "SearchHit", "chunk", "zero-based"),
+                    ("bridge_redact", "Span", "start", "code-point offset"),
+                    ("bridge_redact", "Span", "end", "exclusive")]
+        for tool, model, name, words in expected:
+            with self.subTest(tool=tool, field=name):
+                self.assertIn(words, field(tools[tool], model, name))
 
     async def test_rerank_refuses_paths_outside_the_root_and_bad_files(self):
         for path in ["../outside.json", str(self.outside), "missing.json", "/etc/hostname", "empty.txt", "toomany.txt"]:
