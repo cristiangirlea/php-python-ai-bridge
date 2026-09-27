@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from .tasks import execute, validate
+from .tasks import MODEL_NAMES, execute, validate
 
 TERMINAL = frozenset({"succeeded", "failed", "timed_out", "cancelled"})
 
@@ -47,7 +47,7 @@ class JobStore:
         if (type(self.settings.concurrency) is not int or type(self.settings.capacity) is not int
                 or not 1 <= self.settings.concurrency <= 8 or not 1 <= self.settings.capacity <= 1024):
             raise ValueError("invalid worker limits")
-        if (self.settings.backend not in {"lexical", "onnx"}
+        if (self.settings.backend not in MODEL_NAMES
                 or not math.isfinite(self.settings.retention_seconds)
                 or self.settings.retention_seconds <= 0):
             raise ValueError("invalid worker settings")

@@ -21,7 +21,7 @@ Every description states what the backend actually is, in the worker's own words
 | `bridge_embed_similarity` | `texts` (2–32) | `model`, `matrix`, `pairs[]` of `a`, `b`, `similarity` | as above |
 | `bridge_redact` | `text`, `entities` (subset of PER, ORG, LOC), `min_score` | `model`, masked `text`, `spans[]` with `source` | as above |
 
-A `documents_path` file is either a JSON array of strings or one document per non-empty line, at most 4 MiB. Relative paths resolve under the root; absolute paths must resolve inside it after following symlinks. Snippets are the first 160 characters of a document with whitespace collapsed; they are content from the agent's own files and enter its context like any other file it reads.
+A `documents_path` file is either a JSON array of strings or one document per non-empty line. A file over 4 MiB is refused before it is parsed, but the limits that bind are the worker's: at most 512 documents, and the query plus all documents within 200000 characters (the encoded request within 262144 bytes), so a usable file is roughly 200 KB of text. Relative paths resolve under the root; absolute paths must resolve inside it after following symlinks. Snippets are the first 160 characters of a document with whitespace collapsed; they are content from the agent's own files and enter its context like any other file it reads.
 
 Progress: the worker reports progress per job, and the server forwards each change as an MCP progress notification when the host supplied a progress token, and nothing otherwise. Time limit: a call waits `BRIDGE_MCP_TIMEOUT_MS` (default 60000) and then **cancels** the job, because no later request will come back for it; the PHP client's `wait()` deliberately does not cancel, for the opposite reason. The worker's own deadline is set two seconds later as a backstop.
 
@@ -48,7 +48,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher   # once: h
 docker compose -f docker/compose.yaml run --rm -i -T mcp
 ```
 
-Compose starts the `worker` alongside it, and the server waits up to `BRIDGE_MCP_STARTUP_S` (default 10) for it to answer before giving up. `/data` inside the container is the checkout by default; set `BRIDGE_MCP_DATA` to the **absolute** path of another directory to mount it there read-only (a relative value resolves against `docker/`, not your shell). A host that launches MCP servers from a JSON configuration would use, with the token supplied from its environment:
+Compose starts a dedicated `mcp-worker` alongside it, never the demo `worker` or one serving an application, and the server waits up to `BRIDGE_MCP_STARTUP_S` (default 10) for it to answer before giving up. The service installs its hash-pinned wheels into a tmpfs on every start, so the first response takes a few seconds longer than later ones. `run --rm` removes only the `mcp` container when the host ends the session: `mcp-worker` keeps running, with up to 300 seconds of retained results in memory, and later sessions reuse it. Stop it with `docker compose -f docker/compose.yaml --profile mcp down`. `/data` inside the container is the checkout by default; set `BRIDGE_MCP_DATA` to the **absolute** path of another directory to mount it there read-only (a relative value resolves against `docker/`, not your shell). A host that launches MCP servers from a JSON configuration would use, with the token supplied from its environment:
 
 ```json
 {"mcpServers": {"bridge": {
@@ -65,7 +65,7 @@ The server writes only JSON-RPC to stdout; everything else goes to stderr.
 Nothing about the worker's trust model changes: a private network, one bearer token, never internet-facing. Two things are new and must be understood:
 
 - **Over stdio there is no authentication.** The host process launches the server and inherits its trust; the server holds `BRIDGE_TOKEN` from its environment. Running this server over HTTP or SSE would be a new, unsolved authorisation surface and is out of scope; the bearer token does not cover it.
-- **An agent can now submit jobs, and an agent can be prompt-injected.** It cannot read the token, but it can fill the worker's capacity or submit junk. Point the MCP server at a **dedicated worker**, never the one serving a production PHP application. Capacity, concurrency and retention are per worker.
+- **An agent can now submit jobs, and an agent can be prompt-injected.** It cannot read the token, but it can fill the worker's capacity or submit junk. Point the MCP server at a **dedicated worker**, never the one serving a production PHP application; the compose `mcp` service does this with `mcp-worker`. Capacity, concurrency and retention are per worker.
 
 Paths are confined to `BRIDGE_MCP_ROOT`; the server never writes files. Results contain indexes, scores, snippets of the agent's own files, masked text and spans; the original documents are not echoed by the worker.
 
