@@ -53,15 +53,26 @@ $scores = static fn (RerankResult $result): array => array_column($result->ranki
 $job = $client->submitRerank($query, $france, 60000);
 $alone = $scores(RerankResult::fromJob($client->wait($job->id, 60000), 3));
 $job = $client->submitRerank($query, $documents, 120000);
-$batched = RerankResult::fromJob($client->wait($job->id, 120000), 70);
+$finished = $client->wait($job->id, 120000);
+if ($finished->progress != ['completed' => 70, 'total' => 70]) {
+    throw new RuntimeException('Batched ranking did not report progress ending on the total');
+}
+$batched = RerankResult::fromJob($finished, 70);
 $together = $scores($batched);
 if ($batched->rankings[0]['index'] !== 40) {
     throw new RuntimeException('Batched ranking smoke case failed: ' . json_encode(array_slice($batched->rankings, 0, 3)));
 }
-foreach ([5, 40, 66] as $position => $index) {
+$indexes = [5, 40, 66];
+foreach ($indexes as $position => $index) {
     if (abs($alone[$position] - $together[$index]) >= 1e-3) {
         throw new RuntimeException("Batched score differs from the unbatched score for document {$index}");
     }
+}
+$aloneOrder = $togetherOrder = [0, 1, 2];
+usort($aloneOrder, static fn (int $a, int $b): int => $alone[$b] <=> $alone[$a]);
+usort($togetherOrder, static fn (int $a, int $b): int => $together[$indexes[$b]] <=> $together[$indexes[$a]]);
+if ($aloneOrder !== $togetherOrder) {
+    throw new RuntimeException('Batched scoring changed the order of the three documents');
 }
 $texts = ['A dog barks loudly.', 'Puppies make barking noises.', 'The stock market fell today.'];
 $job = $client->submitEmbed($texts, 60000);

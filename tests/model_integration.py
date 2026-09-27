@@ -38,6 +38,7 @@ def main():
     # Batched scoring: the relevant document sits in the second batch, and padding must not move any score.
     query = "What is the capital of France?"
     status, job, _ = request("/rerank", {"query": query, "documents": FRANCE})
+    assert status == 202
     alone = scores_by_index(finished(job["id"])["result"]["rankings"])
     status, job, _ = request("/rerank", {"query": query, "documents": batch_set()})
     assert status == 202
