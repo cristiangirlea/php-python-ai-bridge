@@ -14,9 +14,10 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from . import index as index_files
 from .protocol import Bridge, BridgeError
 
-TOOL_NAMES = ("bridge_health", "bridge_rerank", "bridge_embed_similarity", "bridge_redact")
+TOOL_NAMES = ("bridge_health", "bridge_rerank", "bridge_embed_similarity", "bridge_redact", "bridge_search")
 # Past this many documents the agent is paying output tokens to narrow text it already holds;
 # a file under the root costs it nothing to reference.
 BY_VALUE_DOCUMENTS = 64
@@ -24,9 +25,15 @@ BY_REFERENCE_DOCUMENTS = 512
 MAX_TEXTS = 32
 MAX_TEXT_CHARACTERS = 8192
 MAX_TOTAL_CHARACTERS = 200000
+# The protocol client refuses an encoded request over 262144 bytes; leave room for the job envelope.
+REQUEST_BYTES = 262144 - 4096
 MAX_FILE_BYTES = 4 * 1024 * 1024
 SNIPPET_CHARACTERS = 160
 PAIRS = 10
+MAX_SEARCH_TOP_K = 50
+# bridge_search reranks the best max(4 x top_k, 20) chunks by dot product.
+CANDIDATE_FACTOR = 4
+MIN_CANDIDATES = 20
 
 # What each backend really is: the name the worker reports, then what it does, in plain words. The names
 # must equal ai_bridge.tasks.MODEL_NAMES, which this package cannot import; tests/mcp/test_models.py checks.
@@ -71,6 +78,8 @@ protocol, polls it to completion and returns the finished result; the worker run
 Economics: a tool's input is your output. Do not paste hundreds of documents into bridge_rerank; put them in a
 file under the configured root and pass documents_path. bridge_embed_similarity never returns raw vectors.
 bridge_redact protects whatever you forward next, not this conversation: the text is already here.
+bridge_search searches an index the operator built from files under the root with
+`python -m bridge_mcp.index build` and returns chunk offsets and snippets, never vectors.
 
 The worker for this server is {backend!r}. Backends: rerank = {rerank} embed = {embed} redact = {redact}"""
 
@@ -91,6 +100,24 @@ class Rerank(TypedDict):
     model: str
     considered: int
     results: list[RerankHit]
+
+
+class SearchHit(TypedDict):
+    source: str
+    chunk: int
+    start: int
+    end: int
+    similarity: float
+    rerank_score: float | None
+    snippet: str
+
+
+class Search(TypedDict):
+    embed_model: str
+    rerank_model: str | None
+    chunks: int
+    considered: int
+    results: list[SearchHit]
 
 
 class Pair(TypedDict):
@@ -205,9 +232,10 @@ def _check_texts(texts: list, singular: str, limit: int, extra: int = 0) -> None
         raise ToolError(f"The {singular}s total {total} characters; the limit is {MAX_TOTAL_CHARACTERS}.")
 
 
-def _documents_from(root: Path | None, path_text: str) -> list[str]:
+def _confine(root: Path | None, path_text: str, argument: str) -> Path:
+    """Resolve a path the agent gave, following symlinks, and refuse it unless it lies inside the root."""
     if root is None:
-        raise ToolError("documents_path needs a configured root: start the server with BRIDGE_MCP_ROOT set to the "
+        raise ToolError(f"{argument} needs a configured root: start the server with BRIDGE_MCP_ROOT set to the "
                         "directory whose files may be read.")
     candidate = Path(path_text)
     try:
@@ -215,7 +243,12 @@ def _documents_from(root: Path | None, path_text: str) -> list[str]:
     except (OSError, ValueError) as error:
         raise ToolError(f"Cannot resolve {path_text!r}: {type(error).__name__}.") from None
     if not resolved.is_relative_to(root):
-        raise ToolError(f"documents_path must stay inside the configured root ({root}).")
+        raise ToolError(f"{argument} must stay inside the configured root ({root}).")
+    return resolved
+
+
+def _documents_from(root: Path | None, path_text: str) -> list[str]:
+    resolved = _confine(root, path_text, "documents_path")
     try:
         if not resolved.is_file():
             raise ToolError(f"No file at {path_text!r} under the configured root.")
@@ -243,9 +276,57 @@ def _documents_from(root: Path | None, path_text: str) -> list[str]:
     return documents
 
 
-def _snippet(text: str) -> str:
+def _index_from(root: Path | None, path_text: str, cache) -> index_files.LoadedIndex:
+    resolved = _confine(root, path_text, "index_path")
+    sidecar = resolved
+    try:
+        if resolved.is_dir():
+            # The sidecar inside a named directory can itself be a symlink, so it is confined again.
+            sidecar = _confine(root, str(resolved / index_files.SIDECAR), "index_path")
+        if not sidecar.is_file():
+            raise ToolError(f"No index at {path_text!r} under the configured root; the operator builds one with "
+                            "python -m bridge_mcp.index build.")
+        return cache.get(sidecar, within=root)
+    except index_files.InvalidIndex as error:
+        raise ToolError(f"{path_text!r} is not a usable index: {error}.") from None
+    except OSError as error:
+        raise ToolError(f"Cannot read the index at {path_text!r}: {type(error).__name__}.") from None
+
+
+def _encoded(text: str) -> int:
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
+
+
+def _source(loaded: index_files.LoadedIndex, root: Path, number: int) -> str:
+    """A chunk's source file relative to the root, which is how the agent names files; else as recorded."""
+    recorded = loaded.sources[number]
+    try:
+        return (loaded.directory / recorded).resolve().relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return recorded
+
+
+def _snippet(text: str, query: str | None = None) -> str:
+    """At most SNIPPET_CHARACTERS of text with whitespace collapsed: the start, or with a query, a window around
+    the first query word the text contains, so a long search chunk shows why it matched."""
     collapsed = re.sub(r"\s+", " ", text).strip()
-    return collapsed if len(collapsed) <= SNIPPET_CHARACTERS else collapsed[:SNIPPET_CHARACTERS - 1] + "…"
+    if len(collapsed) <= SNIPPET_CHARACTERS:
+        return collapsed
+    start = 0
+    if query:
+        # Whole words of three letters or more, the longest first: a short word such as "is" inside "this"
+        # would otherwise pull the window back to the start. Matched in the collapsed text itself, since
+        # casefolding first could change lengths and shift offsets.
+        for word in sorted({word for word in re.findall(r"\w+", query) if len(word) >= 3}, key=lambda w: (-len(w), w)):
+            match = re.search(rf"\b{re.escape(word)}\b", collapsed, re.IGNORECASE)
+            if match:
+                start = max(0, min(match.start() - SNIPPET_CHARACTERS // 3, len(collapsed) - SNIPPET_CHARACTERS + 1))
+                break
+    prefix = "…" if start else ""
+    window = SNIPPET_CHARACTERS - len(prefix)
+    if start + window >= len(collapsed):
+        return prefix + collapsed[start:]
+    return prefix + collapsed[start:start + window - 1] + "…"
 
 
 def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: int) -> MCPServer:
@@ -261,13 +342,14 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     names = {task: name for task, (name, _) in BACKENDS[backend].items()}
     seconds = timeout_ms / 1000
     timing = TIMING[backend]
+    cache = index_files.IndexCache()
     mcp = MCPServer("bridge_mcp", title="PHP-Python AI bridge", version="0.1",
                     instructions=INSTRUCTIONS.format(backend=backend, **described))
 
     async def run(task: str, payload: dict, ctx: Context) -> dict:
         def on_progress(completed: int, total: int) -> None:
             # The SDK sends nothing when the host gave no progress token, so this is unconditional.
-            anyio.from_thread.run(ctx.report_progress, completed, total, f"{completed}/{total}")
+            anyio.from_thread.run(ctx.report_progress, completed, total, f"{task} {completed}/{total}")
 
         try:
             return await anyio.to_thread.run_sync(lambda: bridge.run(task, payload, seconds, on_progress, 0.1))
@@ -364,5 +446,66 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             raise ToolError("entities must be distinct.")
         result = await run("redact", {"text": text, "entities": list(entities), "min_score": min_score}, ctx)
         return {"model": result["model"], "text": result["text"], "spans": _spans(result, text)}
+
+    @mcp.tool(
+        name="bridge_search", title="Search an index of local files",
+        description=f"Search an index built from files under the configured root and return the best top_k chunks "
+                    f"with their source file, code-point offsets and a snippet, never vectors. The operator builds "
+                    f"the index first with `python -m bridge_mcp.index build` (the mcp-index compose service); pass "
+                    f"its directory as index_path. The query is embedded with one embed job and the index is scored "
+                    f"by cosine similarity; unless rerank is false, the best max({CANDIDATE_FACTOR} x top_k, "
+                    f"{MIN_CANDIDATES}) chunks are then reranked by the worker, so you pay for none of their text. "
+                    f"Read the source between the offsets for the full chunk. An index built with another embedding "
+                    f"model is refused. Takes {timing['embed']}, plus with rerank {timing['rerank']}. "
+                    f"Backends: embed = {described['embed']} rerank = {described['rerank']}",
+        annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
+    )
+    async def bridge_search(
+        query: Annotated[str, Field(description="What to look for.", min_length=1, max_length=MAX_TEXT_CHARACTERS)],
+        index_path: Annotated[str, Field(description="An index directory, or its index.json, under BRIDGE_MCP_ROOT.")],
+        ctx: Context,
+        top_k: Annotated[int, Field(description="How many chunks to return.", ge=1, le=MAX_SEARCH_TOP_K)] = 5,
+        rerank: Annotated[bool, Field(description="Rerank the candidates with the worker's rerank task.")] = True,
+    ) -> Search:
+        _check_texts([query], "query", 1)
+        loaded = await anyio.to_thread.run_sync(lambda: _index_from(root, index_path, cache))
+        # Vectors from different models are not comparable, so the gate comes before any job is spent.
+        if loaded.model != names["embed"]:
+            raise ToolError(f"The index at {index_path!r} was built with {loaded.model!r}; this worker embeds with "
+                            f"{names['embed']!r} (bridge_health reports it). Rebuild the index against this worker.")
+        result = await run("embed", {"texts": [query]}, ctx)
+        query_vector = _vectors(result, 1)[0]
+        if (result["model"], result["dimensions"]) != (loaded.model, loaded.dimensions):
+            raise ToolError(f"The worker embedded the query with {result['model']!r}, but the index was built with "
+                            f"{loaded.model!r}. The worker changed since start-up; check bridge_health.")
+        wanted = min(loaded.count, max(CANDIDATE_FACTOR * top_k, MIN_CANDIDATES))
+        candidates = await anyio.to_thread.run_sync(lambda: index_files.search(loaded, query_vector, wanted))
+        rerank_model, ordered = None, [(number, similarity, None) for number, similarity in candidates]
+        if rerank:
+            # Keep the query and the candidates inside the worker's character budget and the request's byte
+            # limit; multi-byte text reaches the bytes first.
+            characters, encoded, kept = MAX_TOTAL_CHARACTERS - len(query), REQUEST_BYTES - _encoded(query), []
+            for number, similarity in candidates:
+                text = loaded.chunks[number]["text"]
+                characters -= len(text)
+                encoded -= _encoded(text) + 1
+                if characters < 0 or encoded < 0:
+                    break
+                kept.append((number, similarity))
+            candidates = kept
+            texts = [loaded.chunks[number]["text"] for number, _ in candidates]
+            wanted_k = min(top_k, len(candidates))
+            reranked = await run("rerank", {"query": query, "documents": texts, "top_k": wanted_k}, ctx)
+            rerank_model = reranked["model"]
+            ordered = [(candidates[item["index"]][0], candidates[item["index"]][1], item["score"])
+                       for item in _rankings(reranked, len(texts), wanted_k)]
+        results = []
+        for number, similarity, score in ordered[:top_k]:
+            chunk = loaded.chunks[number]
+            results.append({"source": _source(loaded, root, chunk["source"]), "chunk": number,
+                            "start": chunk["start"], "end": chunk["end"], "similarity": round(similarity, 4),
+                            "rerank_score": score, "snippet": _snippet(chunk["text"], query)})
+        return {"embed_model": loaded.model, "rerank_model": rerank_model, "chunks": loaded.count,
+                "considered": len(candidates), "results": results}
 
     return mcp
