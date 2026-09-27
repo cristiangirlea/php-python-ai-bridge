@@ -61,7 +61,8 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(os.environ.get("BRIDGE_TEST_TASKS"), "1", "the harness must run with test tasks enabled")
         tools = await self.tools()
         self.assertEqual(sorted(tool.name for tool in tools), sorted(TOOL_NAMES))
-        self.assertEqual(sorted(TOOL_NAMES), ["bridge_embed_similarity", "bridge_health", "bridge_redact", "bridge_rerank"])
+        self.assertEqual(sorted(TOOL_NAMES), ["bridge_embed_similarity", "bridge_health", "bridge_redact", "bridge_rerank",
+                                              "bridge_search"])
         self.assertFalse(any("test" in tool.name for tool in tools))
 
     async def test_descriptions_state_the_real_backend_and_never_the_token(self):
