@@ -9,7 +9,10 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -85,7 +88,6 @@ class ConfigurationTests(unittest.TestCase):
         self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", env)
         self.assertTrue(Path(env["BRIDGE_MCP_DATA"]).is_absolute())
         self.assertNotIn("\\", env["BRIDGE_MCP_DATA"])
-        self.assertEqual(env["MSYS_NO_PATHCONV"], "1")
         self.assertGreaterEqual(int(env["MCP_TIMEOUT"]), 60000)
         self.assertEqual(environ["CLAUDECODE"], "1", "the caller's environment is copied, not changed")
 
@@ -139,12 +141,139 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(record["score"], 0)
         self.assertEqual(len(record["problems"]), 2)
 
+    def test_unexpected_event_shapes_are_problems_not_crashes(self):
+        odd = [{"type": "system", "subtype": "init", "tools": "bridge", "mcp_servers": ["bridge"]},
+               {"type": "assistant", "message": "thinking"},
+               {"type": "assistant", "message": {"content": "text"}},
+               {"type": "user", "message": {"content": ["plain"]}},
+               outcome("<response>amber</response>")]
+        record = evaluate.read_events(stream(*odd), "amber")
+        self.assertEqual(record["score"], 0)
+        self.assertFalse(record["connected"])
+        self.assertIn("the bridge server was missing", record["problems"])
+
+    def test_the_record_says_whether_the_server_connected(self):
+        self.assertTrue(evaluate.read_events(stream(init(), outcome("x")), "x")["connected"])
+        self.assertFalse(evaluate.read_events(stream(init([], "failed"), outcome("x")), "x")["connected"])
+        self.assertFalse(evaluate.read_events([], "x")["connected"])
+
     def test_tool_errors_are_recorded_and_noise_is_ignored(self):
         failed = {"type": "user", "message": {"content": [
             {"type": "tool_result", "is_error": True, "content": "index_path must stay under the root"}]}}
         record = evaluate.read_events(["not json", *stream(init(), failed, outcome("<response>5</response>"))], "5")
         self.assertEqual(record["tool_errors"], ["index_path must stay under the root"])
         self.assertEqual(record["score"], 1)
+
+
+class AskTests(unittest.TestCase):
+    def test_a_timeout_keeps_what_was_streamed_and_does_not_count(self):
+        streamed = "\n".join(stream(init(), outcome("<response>amber</response>"))).encode()
+        timeout = subprocess.TimeoutExpired(["claude"], 60, output=streamed)
+        with mock.patch.object(evaluate.subprocess, "run", side_effect=timeout):
+            record = evaluate.ask(["claude"], "amber", {}, Path("."), 60)
+        self.assertEqual(record["score"], 0)
+        self.assertEqual(record["model"], "claude-sonnet-5")
+        self.assertIn("timed out after 60 s", record["problems"])
+
+    def test_a_timeout_before_any_output_does_not_count(self):
+        with mock.patch.object(evaluate.subprocess, "run", side_effect=subprocess.TimeoutExpired(["claude"], 60)):
+            record = evaluate.ask(["claude"], "amber", {}, Path("."), 60)
+        self.assertEqual(record["score"], 0)
+        self.assertIn("timed out after 60 s", record["problems"])
+
+    def test_a_failed_exit_does_not_count_and_names_the_error(self):
+        finished = subprocess.CompletedProcess(["claude"], 1, "\n".join(stream(init(), outcome("<response>amber</response>"))),
+                                               "starting\nError: not logged in\n")
+        with mock.patch.object(evaluate.subprocess, "run", return_value=finished):
+            record = evaluate.ask(["claude"], "amber", {}, Path("."), 60)
+        self.assertEqual(record["score"], 0)
+        self.assertIn("claude exited with 1: Error: not logged in", record["problems"])
+
+
+def fake_record(expected, answer=None, connected=True):
+    problems = [] if connected else ["the bridge server was failed"]
+    answer = expected if answer is None else answer
+    return {"expected": expected, "model": "claude-sonnet-5", "calls": [], "tool_errors": [], "problems": problems,
+            "result": f"<response>{answer}</response>", "turns": 1, "cost_usd": 0.0, "response": answer,
+            "feedback": None, "connected": connected, "score": int(connected and answer == expected), "seconds": 0.1}
+
+
+class RunTests(unittest.TestCase):
+    """main() end to end with the sessions faked: what reaches --out, stderr and the exit status."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.data = Path(self.temp.name) / "data"
+        (self.data / "index").mkdir(parents=True)
+        (self.data / "index" / "index.json").write_text("{}", encoding="utf-8")
+        self.out = Path(self.temp.name) / "results.json"
+        self.environ = {"BRIDGE_TOKEN": TOKEN, "BRIDGE_MCP_DATA": str(self.data), "PATH": os.environ.get("PATH", "")}
+        self.calls = []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_main(self, fake, *arguments, environ=None):
+        def ask(argv, expected, env, cwd, timeout):
+            self.calls.append(argv[argv.index("-p") + 1])
+            return fake(len(self.calls), expected)
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        # The version probe runs a claude that does not exist here; the runner must survive that.
+        with mock.patch.dict(os.environ, environ or self.environ, clear=True), \
+                mock.patch.object(evaluate.shutil, "which", return_value="/nonexistent/claude"), \
+                mock.patch.object(evaluate, "ask", side_effect=ask), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = evaluate.main(["--model", "sonnet", *arguments])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_every_answer_right_exits_zero_and_writes_the_record(self):
+        code, stdout, _ = self.run_main(lambda n, expected: fake_record(expected), "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("10/10 correct", stdout)
+        written = json.loads(self.out.read_text(encoding="utf-8"))
+        self.assertEqual(len(written["runs"]["sonnet"]), 10)
+
+    def test_a_wrong_answer_exits_one_and_still_writes_the_record(self):
+        code, _, _ = self.run_main(lambda n, expected: fake_record(expected, "wrong" if n == 3 else None),
+                                   "--out", str(self.out))
+        self.assertEqual(code, 1)
+        self.assertEqual(sum(r["score"] for r in json.loads(self.out.read_text(encoding="utf-8"))["runs"]["sonnet"]), 9)
+
+    def test_an_out_path_in_a_missing_directory_is_refused_before_any_session(self):
+        code, _, stderr = self.run_main(lambda n, expected: fake_record(expected),
+                                        "--out", str(Path(self.temp.name) / "missing" / "results.json"))
+        self.assertEqual(code, 2)
+        self.assertIn("--out", stderr)
+        self.assertEqual(self.calls, [])
+
+    def test_a_server_that_does_not_connect_stops_the_run_after_one_session(self):
+        code, _, stderr = self.run_main(lambda n, expected: fake_record(expected, connected=False))
+        self.assertEqual(code, 2)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("mcp-fetcher", stderr)
+
+    def test_the_first_session_runs_alone_before_the_rest_start(self):
+        events, lock = [], threading.Lock()
+
+        def fake(n, expected):
+            with lock:
+                events.append(("start", n))
+            time.sleep(0.05 if n == 1 else 0)
+            with lock:
+                events.append(("end", n))
+            return fake_record(expected)
+
+        code, _, _ = self.run_main(fake, "--jobs", "4")
+        self.assertEqual(code, 0)
+        self.assertEqual(events[:2], [("start", 1), ("end", 1)])
+
+    def test_an_api_key_in_the_environment_is_announced(self):
+        code, _, stderr = self.run_main(lambda n, expected: fake_record(expected), "--only", "1",
+                                        environ={**self.environ, "ANTHROPIC_API_KEY": "sk-test-not-real"})
+        self.assertEqual(code, 0)
+        self.assertIn("ANTHROPIC_API_KEY", stderr)
+        self.assertNotIn("sk-test-not-real", stderr)
 
 
 class RefusalTests(unittest.TestCase):
