@@ -3,8 +3,11 @@ import json
 import math
 import time
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from ai_bridge import tasks
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
 from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, _entities, _merge, execute, validate
 
@@ -244,6 +247,114 @@ class NerAggregationTests(unittest.TestCase):
         self.assertEqual([(span["start"], span["end"], span["label"]) for span in spans], [(23, 31, "ORG"), (32, 36, "ORG")])
 
 
+
+
+class RerankBatchingTests(unittest.TestCase):
+    """Drives batched cross-encoder scoring with a stub tokenizer and session, so it is covered without the model."""
+
+    NAMES = {"input_ids", "attention_mask", "token_type_ids"}
+
+    class Encoding:
+        def __init__(self, ids, attention_mask, type_ids):
+            self.ids, self.attention_mask, self.type_ids = ids, attention_mask, type_ids
+
+    class Tokenizer:
+        def __init__(self):
+            self.calls = []
+
+        def encode_batch(self, pairs):
+            self.calls.append(list(pairs))
+            # One token per document character, padded to the longest in the call like enable_padding().
+            width = max(len(document) for _, document in pairs)
+            return [RerankBatchingTests.Encoding([7] * len(document) + [0] * (width - len(document)),
+                                                 [1] * len(document) + [0] * (width - len(document)),
+                                                 [1] * width) for _, document in pairs]
+
+    class Logits:
+        def __init__(self, values):
+            self.values = values
+
+        def reshape(self, _):
+            return self.values
+
+    class Session:
+        def __init__(self, short=False):
+            self.shapes, self.short = [], short
+
+        def get_outputs(self):
+            return [SimpleNamespace(name="logits")]
+
+        def run(self, _, inputs):
+            self.shapes.append((len(inputs["input_ids"]), len(inputs["input_ids"][0])))
+            # A document's score is its number of attended tokens, so padding must not count.
+            scores = [float(sum(row)) for row in inputs["attention_mask"]]
+            return [RerankBatchingTests.Logits(scores[:-1] if self.short else scores)]
+
+    @staticmethod
+    def tensors(encodings):
+        return {"input_ids": [item.ids for item in encodings],
+                "attention_mask": [item.attention_mask for item in encodings],
+                "token_type_ids": [item.type_ids for item in encodings]}
+
+    @staticmethod
+    def documents(count):
+        return ["d" * (i + 1) for i in range(count)]
+
+    def score(self, documents, batch_size=None, session=None):
+        tokenizer, session, reports = self.Tokenizer(), session or self.Session(), []
+        size = tasks.RERANK_BATCH_SIZE if batch_size is None else batch_size
+        with patch.object(tasks, "_tensors", self.tensors):
+            scores = tasks._score_pairs(tokenizer, session, self.NAMES, "q", documents, reports.append, size)
+        return scores, tokenizer, session, reports
+
+    def test_seventy_documents_take_three_calls_with_a_partial_last_batch(self):
+        self.assertEqual(tasks.RERANK_BATCH_SIZE, 32)
+        _, _, session, _ = self.score(self.documents(70))
+        # Each batch is padded to its own longest document, not to the longest overall.
+        self.assertEqual(session.shapes, [(32, 32), (32, 64), (6, 70)])
+
+    def test_pairs_are_encoded_as_query_document_tuples_in_order(self):
+        documents = self.documents(70)
+        _, tokenizer, _, _ = self.score(documents)
+        self.assertEqual(tokenizer.calls[0], [("q", document) for document in documents[:32]])
+        self.assertEqual(tokenizer.calls[2], [("q", document) for document in documents[64:]])
+
+    def test_scores_keep_document_order_across_batches(self):
+        documents = self.documents(70)
+        self.assertEqual(self.score(documents)[0], [float(i + 1) for i in range(70)])
+        self.assertEqual(self.score(documents[::-1])[0], [float(70 - i) for i in range(70)])
+
+    def test_progress_is_reported_after_each_batch_and_ends_on_the_total(self):
+        self.assertEqual(self.score(self.documents(70))[3], [32, 64, 70])
+
+    def test_batch_size_one_is_the_sequential_behaviour(self):
+        documents = self.documents(70)
+        scores, _, session, reports = self.score(documents, batch_size=1)
+        self.assertEqual(session.shapes, [(1, i + 1) for i in range(70)])
+        self.assertEqual(scores, self.score(documents)[0])
+        self.assertEqual(reports, list(range(1, 71)))
+
+    def test_execute_on_onnx_reports_every_batch(self):
+        tokenizer, session, events = self.Tokenizer(), self.Session(), []
+        with patch.object(tasks, "_onnx", return_value=(tokenizer, session, self.NAMES)) as onnx, \
+                patch.object(tasks, "_tensors", self.tensors):
+            result = execute("rerank", {"query": "q", "documents": self.documents(130), "top_k": 3}, "onnx",
+                             "/unused", lambda completed, total: events.append((completed, total)))
+        onnx.assert_called_once_with(Path("/unused") / "rerank", 512)
+        self.assertEqual(result["model"], "cross-encoder/ms-marco-TinyBERT-L2-v2")
+        self.assertEqual([item["index"] for item in result["rankings"]], [129, 128, 127])
+        self.assertEqual([rows for rows, _ in session.shapes], [32, 32, 32, 32, 2])
+        # 130 documents give a throttle step of 3, which divides none of 32, 64 and 128: batch reports must
+        # bypass the per-document throttle or the client sees nothing between 0 and 96.
+        self.assertEqual(events, [(0, 130), (32, 130), (64, 130), (96, 130), (128, 130), (130, 130)])
+
+    def test_a_wrong_number_of_scores_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.score(self.documents(5), session=self.Session(short=True))
+
+    def test_batch_size_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            self.score(self.documents(5), batch_size=0)
 
 
 class ModelNameTests(unittest.TestCase):

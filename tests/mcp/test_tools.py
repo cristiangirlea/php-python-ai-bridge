@@ -76,6 +76,18 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("not-a-model", text)
         self.assertNotIn(TOKEN, text)
 
+    async def test_every_timing_claim_is_a_measured_median(self):
+        # Descriptions may only quote the measured cold-job table, never an unmeasured range.
+        for backend in ("lexical", "onnx"):
+            server = build_server(self.bridge, backend=backend, root=None, timeout_ms=10000)
+            for tool in await self.tools(server):
+                if tool.name == "bridge_health":
+                    continue
+                with self.subTest(backend=backend, tool=tool.name):
+                    self.assertNotIn("one to ten seconds", tool.description)
+                    self.assertIn("median of five cold jobs", tool.description)
+                    self.assertIn("docs/testing.md", tool.description)
+
     async def test_health_reports_the_worker_backend(self):
         result = await self.call("bridge_health", {})
         self.assertFalse(result.is_error)

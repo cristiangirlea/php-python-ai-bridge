@@ -173,6 +173,19 @@ services:
       FRANKENPHP_URL: http://model-frankenphp:8080
     command: [python, tests/model_integration.py]
 
+  # Informational cold-job latency for docs/testing.md; asserts correctness, never speed.
+  model-bench:
+    <<: *python
+    profiles: [model]
+    networks: [isolated]
+    environment:
+      <<: *python-env
+      BENCH_TARGETS: onnx=http://model-worker:8090,lexical=http://worker:8090
+      BENCH_RUNS: "5"
+      BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
+      BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
+    command: [python, scripts/benchmark.py]
+
   mcp-fetcher:
     <<: *python
     profiles: [mcp-fetch]

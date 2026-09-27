@@ -42,12 +42,12 @@ PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4
 
 | Layer | Scope and counting |
 | --- | --- |
-| Python worker | 64 tests: lifecycle, validation and HTTP, process crashes, cancellation, timeouts, retention, allocation/exit races, redaction rules, NER aggregation driven by a stub window, progress bounds, and the model-name table every result reports from |
-| MCP server | 30 tests, offline with hash-pinned wheels: the protocol client against an in-process worker, every tool through the SDK's in-memory client with test tasks enabled, the entry point as a subprocess, result validators on synthetic data, and a check that the server's model names match the worker's |
+| Python worker | 72 tests: lifecycle, validation and HTTP, process crashes, cancellation, timeouts, retention, allocation/exit races, redaction rules, NER aggregation and batched cross-encoder scoring driven by stubs, progress bounds, and the model-name table every result reports from |
+| MCP server | 31 tests, offline with hash-pinned wheels: the protocol client against an in-process worker, every tool through the SDK's in-memory client with test tasks enabled, the entry point as a subprocess, result validators on synthetic data, a check that the server's model names match the worker's, and a check that every timing claim in a tool description is a measured median |
 | PHP contracts + HTTP | 134 checks per PHP version; this **includes** the 101 contract checks, not 134 + 101 |
 | FrankenPHP | 12 jobs submitted by six concurrent test threads through a reused PHP worker, a 512-document `top_k` request, embedding and redaction round trips, and invalid-input, missing-job and multibyte boundary checks |
 | PHP syntax | All 12 PHP source/example/test files |
-| Optional ONNX | Through both the PHP CLI and FrankenPHP HTTP: 2 rerank, 1 embedding and 2 redaction cases, the second redaction case asserting that clean text produces no spans; smoke checks, not quality datasets |
+| Optional ONNX | Through both the PHP CLI and FrankenPHP HTTP: 2 rerank cases, a 70-document rerank across three batches with its relevant document in the second, a parity check that three documents score within 1e-3 alone and inside that set, 1 embedding and 2 redaction cases, the second asserting that clean text produces no spans; smoke checks, not quality datasets |
 
 Test durations reported by the runners are suite durations, not inference latency or a reproducible performance benchmark.
 
@@ -62,12 +62,41 @@ The original prototype was not entirely developed with TDD. Review corrections u
 - No measured line/branch coverage percentage, formal security audit or production certification.
 - No full Symfony kernel or Laravel application/Octane integration test, including configuration caching and multi-user authorization.
 - No fresh consumer Composer-install smoke test or Packagist release yet; repository examples use a small local autoloader.
-- No sustained load/soak benchmark, throughput claim, p50/p95/p99 latency, measured memory-per-job limit or CPU cost per inference.
+- No sustained load/soak benchmark, throughput claim, p95/p99 latency, warm-model latency, measured memory-per-job limit or CPU cost per inference; the only timing figures are the cold-job medians below.
 - No representative ranking-quality evaluation (for example NDCG/MRR), multilingual accuracy evaluation, measured NER precision/recall or GPU benchmark.
 - No evaluation of whether an LLM host uses the MCP tools well; the MCP tests prove the contract, the confinement and the honesty of descriptions, not agent behaviour.
 - No verified native Windows/macOS service execution or ARM runtime; Docker tests target Linux amd64/Python 3.12.
 - No durable delivery, restart recovery, automatic retry, idempotency or multi-instance result routing. Jobs and results live in memory.
 
-Configured resources are **limits, not measurements**: ordinary services, including the MCP server's own `mcp-worker`, get one CPU and 512 MiB each; the model worker gets one CPU and 1536 MiB. Normal task concurrency defaults to two, total capacity to 128 and terminal retention to 300 seconds. The model profile sets concurrency to one and loads a model per job. None of these imply 128 simultaneous inference jobs or a specific requests-per-second rate.
+Configured resources are **limits, not measurements**: ordinary services, including the MCP server's own `mcp-worker`, get one CPU and 512 MiB each; the model worker gets one CPU and 1536 MiB. Normal task concurrency defaults to two, total capacity to 128 and terminal retention to 300 seconds. The model profile sets concurrency to one, loads a model per job, and scores rerank documents 32 pairs per forward pass. None of these imply 128 simultaneous inference jobs or a specific requests-per-second rate.
+
+## Measured latency (informational)
+
+Measured 2026-09-27 UTC by the model smoke workflow on pull request #8 at branch head `c3c2706` (GitHub's pull-request merge ref `53e1f6f`), runner GitHub-hosted ubuntu-latest, CPU AMD EPYC 9V74 80-Core Processor. Limits: model-worker cpus=1, mem_limit=1536m, BRIDGE_CONCURRENCY=1; worker cpus=1, mem_limit=512m. N=5 sequential jobs per row; wall time from `POST /v1/jobs` to the first `GET` showing a terminal state, polled every 0.05 s, so figures carry up to 0.05 s of polling.
+
+| Backend | Case | N | min s | p50 s | max s | Note |
+| --- | --- | --- | --- | --- | --- | --- |
+| onnx | rerank 32 documents of ~40 words | 5 | 0.70 | 0.74 | 0.75 | cold; 1 batch of 32 |
+| onnx | rerank 512 documents of ~40 words | 5 | 1.00 | 1.00 | 1.01 | cold; 16 batches of 32 |
+| onnx | rerank 32 documents of 6000 characters | 5 | 1.05 | 1.10 | 1.10 | cold; 1 full batch of 32 at the 512-token limit, the worst case |
+| onnx | embed 32 texts of ~40 words | 5 | 1.10 | 1.10 | 1.11 | cold; 1 forward pass |
+| onnx | redact 2000 characters, PER+ORG+LOC | 5 | 1.59 | 1.60 | 1.61 | cold; rules plus windows of 512 |
+| lexical | rerank 32 documents of ~40 words | 5 | 0.36 | 0.36 | 0.48 | cold process, no model |
+| lexical | rerank 512 documents of ~40 words | 5 | 0.36 | 0.37 | 0.37 | cold process, no model |
+| lexical | rerank 32 documents of 6000 characters | 5 | 0.37 | 0.37 | 0.37 | cold process, no model |
+| lexical | embed 32 texts of ~40 words | 5 | 0.37 | 0.37 | 0.37 | cold process, no model |
+| lexical | redact 2000 characters, PER+ORG+LOC | 5 | 0.36 | 0.36 | 0.36 | cold process, no model |
+
+The CPU a runner gets matters more than run-to-run noise. An earlier run on the same pull request, at `41393c0` on an AMD EPYC 7763, measured ONNX medians 15-50% higher: 0.85 s for 32 documents, 1.20 s for 512, 1.30 s for embedding and 2.40 s for redaction, and 0.41-0.43 s on the lexical rows. Its memory row used 24 documents of 8000 characters, not the worst case above. The ranges quoted in the MCP tool descriptions span both runs.
+
+Every job is cold by design: a fresh process imports its dependencies and, on the ONNX backend, loads the model before any work. The lexical rows are therefore the cost of that process alone, about 0.4 s, and most of each ONNX row is start-up and model loading rather than scoring: 512 documents take 0.26 s more than 32, and a full batch at the 512-token limit fits the model worker's memory limit. There is no measurement from before batched reranking, because the benchmark was added with it, so these figures do not state a speed-up. They are worker time only; the PHP client, FrankenPHP and the MCP server add their own polling and HTTP overhead. The benchmark asserts that every job succeeds with progress ending on the total, and a failure fails the smoke run; it asserts nothing about speed.
+
+Every model smoke run prints a fresh table to its job summary. To reproduce locally after acquiring the models:
+
+```sh
+docker compose -f docker/compose.yaml up -d worker model-worker
+docker compose -f docker/compose.yaml run --rm --no-deps -T model-bench
+docker compose -f docker/compose.yaml --profile model down
+```
 
 Before calling this production-ready, test the actual application/framework combinations, measure cold and warm latency separately on documented hardware and workloads, exercise overload/restarts, validate tenant isolation, and decide whether the in-memory lifecycle is acceptable. The current result is an experimental, testable integration—not a replacement for a durable job system.

@@ -9,6 +9,10 @@ from pathlib import Path
 
 
 MAX_DOCUMENTS = 512
+# Query-document pairs per forward pass. An estimate, not a measurement: at 512 tokens TinyBERT-L2 keeps
+# roughly 3.5 MiB of activations per pair, far inside the model worker's 1536 MiB. The benchmark's worst-case
+# row runs a full batch of 32 pairs at 512 tokens inside that limit.
+RERANK_BATCH_SIZE = 32
 # 32 vectors of 384 six-decimal components stay well inside the PHP client's 262144 byte response cap.
 MAX_TEXTS = 32
 MAX_FIELD_CHARACTERS = 8192
@@ -121,20 +125,10 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
 
     report(0)
     if backend == "onnx":
-        import numpy as np
-
         tokenizer, session, names = _onnx(Path(model_dir) / "rerank", 512)
-        scores = []
-        for i, document in enumerate(documents):
-            encoded = tokenizer.encode(query, document)
-            inputs = {
-                "input_ids": np.array([encoded.ids], dtype=np.int64),
-                "attention_mask": np.array([encoded.attention_mask], dtype=np.int64),
-                "token_type_ids": np.array([encoded.type_ids], dtype=np.int64),
-            }
-            output = session.run(None, {key: value for key, value in inputs.items() if key in names})
-            scores.append(float(output[0].reshape(-1)[0]))
-            report(i + 1)
+        # At most 17 batch reports, so they need no throttle, and the throttle's step rarely divides 32.
+        scores = _score_pairs(tokenizer, session, names, query, documents,
+                              lambda completed: progress(completed, total))
         model = MODEL_NAMES["onnx"]["rerank"]
     else:
         words = set(re.findall(r"\w+", query.casefold()))
@@ -150,6 +144,40 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
     rankings.sort(key=lambda item: (-item["score"], item["index"]))
     # validate() guarantees 1 <= top_k <= len(documents) whenever the key is present.
     return {"rankings": rankings[:payload.get("top_k", total)], "model": model}
+
+
+def _tensors(encodings: list) -> dict:
+    """The model inputs for a list of encodings of equal length, as int64 arrays. The only numpy touchpoint."""
+    import numpy as np
+
+    return {
+        "input_ids": np.array([item.ids for item in encodings], dtype=np.int64),
+        "attention_mask": np.array([item.attention_mask for item in encodings], dtype=np.int64),
+        "token_type_ids": np.array([item.type_ids for item in encodings], dtype=np.int64),
+    }
+
+
+def _score_pairs(tokenizer, session, names: set, query: str, documents: list, report,
+                 batch_size: int = RERANK_BATCH_SIZE) -> list:
+    """One cross-encoder forward pass per batch of (query, document) pairs, scores in document order.
+
+    The tokenizer pads each batch to its own longest pair and the attention mask hides the padding, so a
+    document scores the same whichever batch it lands in.
+    """
+    if batch_size < 1:
+        raise ValueError("batch size must be positive")
+    scores = []
+    for start in range(0, len(documents), batch_size):
+        batch = documents[start:start + batch_size]
+        inputs = _tensors(tokenizer.encode_batch([(query, document) for document in batch]))
+        outputs = session.run(None, {key: value for key, value in inputs.items() if key in names})
+        # The cross-encoder has one label, so logits are [batch, 1]; anything else is a different model.
+        values = [float(value) for value in _output(session, outputs, "logits").reshape(-1)]
+        if len(values) != len(batch):
+            raise ValueError("model returned the wrong number of scores")
+        scores.extend(values)
+        report(len(scores))
+    return scores
 
 
 def _onnx(directory: Path, max_length: int, stride: int = 0):
@@ -195,12 +223,7 @@ def _embed(texts: list, backend: str, model_dir: str, progress) -> dict:
 
         # The model was trained on 256 word pieces; longer input is truncated, not rejected.
         tokenizer, session, names = _onnx(Path(model_dir) / "embed", 256)
-        encoded = tokenizer.encode_batch(texts)
-        inputs = {
-            "input_ids": np.array([item.ids for item in encoded], dtype=np.int64),
-            "attention_mask": np.array([item.attention_mask for item in encoded], dtype=np.int64),
-            "token_type_ids": np.array([item.type_ids for item in encoded], dtype=np.int64),
-        }
+        inputs = _tensors(tokenizer.encode_batch(texts))
         outputs = session.run(None, {key: value for key, value in inputs.items() if key in names})
         hidden = _output(session, outputs, "last_hidden_state")
         # Mean pooling over attended tokens, then unit length, as sentence-transformers does.
@@ -370,11 +393,7 @@ def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) 
     progress(0, len(windows))
     candidates = []
     for index, window in enumerate(windows):
-        inputs = {
-            "input_ids": np.array([window.ids], dtype=np.int64),
-            "attention_mask": np.array([window.attention_mask], dtype=np.int64),
-            "token_type_ids": np.array([window.type_ids], dtype=np.int64),
-        }
+        inputs = _tensors([window])
         outputs = session.run(None, {key: value for key, value in inputs.items() if key in names})
         logits = _output(session, outputs, "logits")[0]
         shifted = np.exp(logits - logits.max(axis=-1, keepdims=True))

@@ -14,6 +14,7 @@ on:
       - requirements-model.txt
       - requirements-model.lock
       - worker/ai_bridge/tasks.py
+      - scripts/benchmark.py
       - tests/php/model.php
       - tests/model_integration.py
       # What those smoke tests run through: the shared HTTP helpers, the PHP client and the demo route.
@@ -36,7 +37,7 @@ concurrency:
 jobs:
   model:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
     steps:
@@ -54,6 +55,17 @@ jobs:
           docker compose -f docker/compose.yaml up -d model-worker model-frankenphp
           docker compose -f docker/compose.yaml run --rm --no-deps model-test
           docker compose -f docker/compose.yaml run --rm --no-deps model-integration
+      # Times never gate: the benchmark asserts nothing about speed. Its jobs must succeed, including the
+      # worst-case batch, so bash's pipefail keeps tee from hiding a failure.
+      - name: Latency benchmark (times informational, correctness gating)
+        shell: bash
+        env:
+          BENCH_COMMIT: ${{ github.sha }}
+          BENCH_RUNNER: GitHub-hosted ubuntu-latest
+        run: |
+          docker compose -f docker/compose.yaml up -d worker
+          docker compose -f docker/compose.yaml run --rm --no-deps -T model-bench | tee benchmark.md
+          { echo "## Measured latency (informational)"; echo; cat benchmark.md; } >> "$GITHUB_STEP_SUMMARY"
       - name: Service logs on failure
         if: failure()
         run: docker compose -f docker/compose.yaml --profile model logs --tail 100
