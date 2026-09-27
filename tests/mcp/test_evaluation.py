@@ -61,6 +61,18 @@ REACH = [
       ("bridge_search", {"query": "Tollin Marine keeps yard", **INDEX})], found("Carrowby"), False),
 ]
 
+# First steps of the two-step question: the one above, and the queries Sonnet, Opus and Haiku actually sent first
+# when the evaluation ran through the Claude Code CLI on 2026-09-27. Each must name the company and none may
+# already show its yard, or the question tests one search rather than two.
+FIRST_HOPS = [
+    "copper fittings delivered lantern gallery",
+    "lantern gallery metal fittings supplier",
+    "lantern gallery metal fittings supplied by company",
+    "metal fittings lantern gallery company delivered",
+    "metal fittings lantern gallery delivered company",
+    "metal fittings lantern gallery",
+]
+
 
 class EvaluationTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
@@ -111,6 +123,24 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             if not may_contain:
                 with self.subTest(question=question[:60]):
                     self.assertNotIn(answer.casefold(), question.casefold())
+
+    async def test_a_default_search_sees_only_part_of_the_corpus(self):
+        # With a corpus no bigger than one search's candidates, every search returns everything and the search
+        # questions only test reading. A default search must consider fewer chunks than the index holds.
+        async with Client(self.mcp, raise_exceptions=True) as client:
+            result = await client.call_tool("bridge_search", {"query": "lantern", **INDEX})
+        body = result.structured_content
+        self.assertLess(body["considered"], body["chunks"])
+        self.assertLess(len(body["results"]), body["considered"])
+
+    async def test_the_two_step_question_needs_both_steps(self):
+        async with Client(self.mcp, raise_exceptions=True) as client:
+            for query in FIRST_HOPS:
+                with self.subTest(query=query):
+                    result = await client.call_tool("bridge_search", {"query": query, **INDEX})
+                    shown = snippets(result.structured_content)
+                    self.assertIn("Tollin Marine", shown)
+                    self.assertNotIn("Carrowby", shown)
 
     def test_the_documented_build_command_uses_the_tested_chunking(self):
         self.assertIn(BUILD_COMMAND, (HERE.parent.parent / "docs" / "mcp.md").read_text(encoding="utf-8"))
