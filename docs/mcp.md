@@ -45,6 +45,23 @@ docker compose -f docker/compose.yaml run --rm mcp-index /data/docs --out /data/
 - **Searching.** An index built with a different embedding model than the worker now uses is refused before any job is spent: vectors from different models are not comparable. Otherwise the query is embedded with one job and every chunk is scored by dot product (the vectors are unit length, so this is cosine similarity), by brute force in pure Python: there is no approximate index and no incremental rebuild. Unless `rerank` is false, the best max(4 x `top_k`, 20) chunks are sent to the worker's `rerank` task, trimmed from the bottom to fit its 200000-character budget and the 262144-byte request limit, which multi-byte text reaches first, and the results are ordered by that score; the agent pays for none of their text. Each result names its source relative to the root, the chunk's offsets, and a 160-character snippet around the longest query word of three or more letters that the chunk contains as a whole word, or its start. Read the source between the offsets for the whole chunk.
 - **Caching.** The server keeps loaded indexes up to 128 MiB of index files, always at least the latest, keyed by path and reloaded when either file is replaced or its modification time or size changes. Every rebuild replaces both files, so every rebuild is noticed; only an in-place rewrite by another tool that keeps the inode, time and size is not. Loading runs outside the cache's lock, so a search of a cached index never waits for another index to load.
 
+## Evaluating with an LLM
+
+The tests prove the tools keep their contract; whether an agent uses them well is a separate question, which `tests/mcp/evaluation.xml` asks. It holds ten questions with single, string-comparable answers over an invented corpus in `tests/mcp/fixtures/eval`, so no model can answer from memory: facts found by searching an index, a rerank by file reference, redaction labels and counts, a similarity ranking, a two-step search, and whether the redaction tool runs a model at all. The answers assume the demo worker the compose `mcp` service uses, whose search matches words rather than meaning, so the questions stay close to the corpus's wording; an evaluation of semantic retrieval would need an ONNX-backed worker behind the MCP server, which compose does not provide yet.
+
+CI does not run an LLM. `tests/mcp/test_evaluation.py` proves every answer is reachable through the tools by making the calls a capable agent would make, including the two-step chain, and that no question contains its own answer.
+
+To run it with an LLM, build the fixture index once, then point a harness at the stdio server. With the harness in Anthropic's MCP builder skill (`scripts/evaluation.py`, which needs `anthropic` and `mcp` and an API key), and an absolute path to the fixtures:
+
+```sh
+export BRIDGE_MCP_DATA="$PWD/tests/mcp/fixtures/eval"
+docker compose -f docker/compose.yaml run --rm mcp-index /data/notes --out /data/index --chunk-chars 300 --overlap-chars 60
+python evaluation.py tests/mcp/evaluation.xml -t stdio -m <current model> -c sh -a scripts/mcp_stdio.sh \
+  -e BRIDGE_TOKEN="$BRIDGE_TOKEN" BRIDGE_MCP_DATA="$BRIDGE_MCP_DATA"
+```
+
+`scripts/mcp_stdio.sh` wraps the compose command, because the harness would read compose's own flags as its options; the evaluation file comes first because `-e` takes every argument after it. The fixture index is git-ignored. Pass `-m`: the harness's default model is old. The evaluation has not been run with an LLM as part of this repository's checks.
+
 ## Configuration
 
 | Variable | Meaning |

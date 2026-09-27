@@ -4,6 +4,7 @@
 /.cache/
 /models/
 /artifacts/
+/tests/mcp/fixtures/eval/index/
 __pycache__/
 *.py[cod]
 .DS_Store
