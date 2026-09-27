@@ -16,6 +16,14 @@ MAX_FIELD_CHARACTERS = 8192
 # Multi-byte text reaches that byte limit first and is rejected by the transport.
 MAX_TOTAL_CHARACTERS = 200000
 EMBED_DIMENSIONS = 384
+# What every result's "model" field says, by backend and task. The MCP server keeps its own copy
+# (it cannot import the worker); tests/mcp/test_models.py fails if the two drift apart.
+MODEL_NAMES = {
+    "lexical": {"rerank": "lexical-demo-not-a-model", "embed": "hashing-bow-not-a-model",
+                "redact": "rules-only-not-a-model"},
+    "onnx": {"rerank": "cross-encoder/ms-marco-TinyBERT-L2-v2", "embed": "sentence-transformers/all-MiniLM-L6-v2",
+             "redact": "Xenova/bert-base-NER:int8"},
+}
 # MISC (nationalities, events, products) is deliberately not offered: it is the noisiest class and rarely personal data.
 REDACT_ENTITIES = ("PER", "ORG", "LOC")
 REDACT_DEFAULTS = {"entities": ["PER"], "min_score": 0.85}
@@ -127,7 +135,7 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
             output = session.run(None, {key: value for key, value in inputs.items() if key in names})
             scores.append(float(output[0].reshape(-1)[0]))
             report(i + 1)
-        model = "cross-encoder/ms-marco-TinyBERT-L2-v2"
+        model = MODEL_NAMES["onnx"]["rerank"]
     else:
         words = set(re.findall(r"\w+", query.casefold()))
         scores = []
@@ -135,7 +143,7 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
             other = set(re.findall(r"\w+", document.casefold()))
             scores.append(len(words & other) / max(1, len(words)))
             report(i + 1)
-        model = "lexical-demo-not-a-model"
+        model = MODEL_NAMES["lexical"]["rerank"]
     if any(not math.isfinite(score) for score in scores):
         raise ValueError("model returned a non-finite score")
     rankings = [{"index": i, "score": score} for i, score in enumerate(scores)]
@@ -199,10 +207,10 @@ def _embed(texts: list, backend: str, model_dir: str, progress) -> dict:
         mask = inputs["attention_mask"][:, :, None].astype(hidden.dtype)
         pooled = (hidden * mask).sum(axis=1) / np.clip(mask.sum(axis=1), 1e-9, None)
         vectors = (pooled / np.clip(np.linalg.norm(pooled, axis=1, keepdims=True), 1e-12, None)).tolist()
-        model = "sentence-transformers/all-MiniLM-L6-v2"
+        model = MODEL_NAMES["onnx"]["embed"]
     else:
         vectors = [_hashing_vector(text) for text in texts]
-        model = "hashing-bow-not-a-model"
+        model = MODEL_NAMES["lexical"]["embed"]
     # Six decimals bound the JSON size; unit vectors keep dot product equal to cosine.
     vectors = [[round(float(value), 6) for value in vector] for vector in vectors]
     if any(len(vector) != EMBED_DIMENSIONS for vector in vectors):
@@ -400,10 +408,10 @@ def _redact(payload: dict, backend: str, model_dir: str, progress) -> dict:
     if backend == "onnx" and entities:
         candidates.extend(_ner(text, entities, payload.get("min_score", REDACT_DEFAULTS["min_score"]),
                                model_dir, progress))
-        model = "Xenova/bert-base-NER:int8"
+        model = MODEL_NAMES["onnx"]["redact"]
     else:
         progress(0, 1)
-        model = "rules-only-not-a-model"
+        model = MODEL_NAMES["lexical"]["redact"]
     spans = _merge(candidates)
     pieces, cursor = [], 0
     for span in spans:
@@ -411,6 +419,6 @@ def _redact(payload: dict, backend: str, model_dir: str, progress) -> dict:
         pieces.append("[" + span["label"] + "]")
         cursor = span["end"]
     pieces.append(text[cursor:])
-    if model == "rules-only-not-a-model":
+    if model == MODEL_NAMES["lexical"]["redact"]:
         progress(1, 1)
     return {"model": model, "text": "".join(pieces), "spans": spans}

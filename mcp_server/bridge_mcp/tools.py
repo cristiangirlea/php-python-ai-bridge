@@ -28,7 +28,8 @@ MAX_FILE_BYTES = 4 * 1024 * 1024
 SNIPPET_CHARACTERS = 160
 PAIRS = 10
 
-# What each backend really is: the name the worker reports, then what it does, in plain words.
+# What each backend really is: the name the worker reports, then what it does, in plain words. The names
+# must equal ai_bridge.tasks.MODEL_NAMES, which this package cannot import; tests/mcp/test_models.py checks.
 BACKENDS = {
     "lexical": {
         "rerank": ("lexical-demo-not-a-model", "deterministic word overlap between the query and each document. "
@@ -43,7 +44,7 @@ BACKENDS = {
                    "cross-encoder. Its relevance judgement is well below your own on text you can already read."),
         "embed": ("sentence-transformers/all-MiniLM-L6-v2", "through ONNX Runtime on CPU; English, truncated at "
                   "256 word pieces; unit-length mean-pooled vectors."),
-        "redact": ("rules + Xenova/bert-base-NER:int8", "checksum and pattern rules plus dslim/bert-base-NER (the "
+        "redact": ("Xenova/bert-base-NER:int8", "checksum and pattern rules plus dslim/bert-base-NER (the "
                    "int8 ONNX conversion published as Xenova/bert-base-NER) for PER, ORG and LOC. Trained on "
                    "English news; recall on other text is lower and unmeasured."),
     },
