@@ -238,6 +238,23 @@ services:
       - -ec
       - 'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && exec python -m bridge_mcp'
 
+  # Operator-run index builder for bridge_search, e.g.
+  # `docker compose -f docker/compose.yaml run --rm mcp-index /data/docs --out /data/artifacts/docs`.
+  # The only service that can write to /data; it talks to mcp-worker over the protocol and needs no wheels.
+  mcp-index:
+    <<: *python
+    profiles: [mcp]
+    networks: [isolated]
+    depends_on: [mcp-worker]
+    volumes:
+      - ..:/work:ro
+      - ${BRIDGE_MCP_DATA:-..}:/data
+    environment:
+      <<: *python-env
+      PYTHONPATH: /work/mcp_server
+      BRIDGE_URL: http://mcp-worker:8090
+    entrypoint: [python, -m, bridge_mcp.index, build]
+
   mcp-tests:
     <<: *python
     profiles: [mcp]
