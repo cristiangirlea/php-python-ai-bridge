@@ -62,7 +62,6 @@ def child_env(environ, data: Path) -> dict:
         raise ValueError("BRIDGE_TOKEN is not set; the MCP server needs the worker's token")
     env = {key: value for key, value in environ.items() if key not in NESTING}
     env["BRIDGE_MCP_DATA"] = Path(data).resolve().as_posix()  # compose mounts it, and Docker wants it absolute
-    env["MSYS_NO_PATHCONV"] = "1"  # Git Bash on Windows would otherwise rewrite the container's /data paths
     env.setdefault("MCP_TIMEOUT", "180000")  # the mcp container installs its wheels into a tmpfs on every start
     return env
 
@@ -87,7 +86,7 @@ def _text(content) -> str:
 def read_events(lines, expected: str) -> dict:
     """Score one session from its stream-json lines; anything that is not a JSON object is ignored."""
     record = {"expected": expected, "model": None, "calls": [], "tool_errors": [], "problems": [],
-              "result": None, "turns": None, "cost_usd": None}
+              "result": None, "turns": None, "cost_usd": None, "connected": False}
     init = None
     for line in lines:
         try:
@@ -96,18 +95,20 @@ def read_events(lines, expected: str) -> dict:
             continue
         if not isinstance(event, dict):
             continue
-        kind, message = event.get("type"), event.get("message") or {}
+        kind, message = event.get("type"), event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
         if kind == "system" and event.get("subtype") == "init":
             init = event
             record["model"] = event.get("model")
         elif kind == "assistant":
-            for block in message.get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
+            for block in blocks:
+                if block.get("type") == "tool_use":
                     record["calls"].append({"name": str(block.get("name", "")).removeprefix(PREFIX),
                                             "input": block.get("input")})
-        elif kind == "user" and isinstance(message.get("content"), list):
-            for block in message["content"]:
-                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+        elif kind == "user":
+            for block in blocks:
+                if block.get("type") == "tool_result" and block.get("is_error"):
                     record["tool_errors"].append(_text(block.get("content")))
         elif kind == "result":
             record.update(result=event.get("result"), turns=event.get("num_turns"),
@@ -117,11 +118,15 @@ def read_events(lines, expected: str) -> dict:
     if init is None:
         record["problems"].append("the CLI never reported its tools")
     else:
-        others = sorted(str(tool) for tool in init.get("tools") or [] if not str(tool).startswith(PREFIX))
+        tools, servers = init.get("tools"), init.get("mcp_servers")
+        others = sorted(str(tool) for tool in tools if not str(tool).startswith(PREFIX)) \
+            if isinstance(tools, list) else ["an unreadable tool list"]
         if others:
             record["problems"].append("the agent could also use " + ", ".join(others))
-        status = {server.get("name"): server.get("status") for server in init.get("mcp_servers") or []}
-        if status.get(SERVER) != "connected":
+        status = {server.get("name"): server.get("status") for server in servers if isinstance(server, dict)} \
+            if isinstance(servers, list) else {}
+        record["connected"] = status.get(SERVER) == "connected"
+        if not record["connected"]:
             record["problems"].append(f"the {SERVER} server was {status.get(SERVER, 'missing')}")
     if record["result"] is None:
         record["problems"].append("the CLI returned no result")
@@ -189,6 +194,8 @@ def main(argv=None) -> int:
         return refuse("--only takes question numbers separated by commas")
     if not 1 <= arguments.jobs <= 16 or arguments.timeout < 60 or not set(wanted) <= set(range(1, len(pairs) + 1)):
         return refuse(f"--jobs must be 1-16, --timeout at least 60, and questions 1-{len(pairs)}")
+    if arguments.out and not (arguments.out.parent.is_dir() and os.access(arguments.out.parent, os.W_OK)):
+        return refuse(f"--out must name a file in an existing, writable directory: {arguments.out}")
     data = Path(os.environ.get("BRIDGE_MCP_DATA") or FIXTURES).resolve()
     try:
         env = child_env(os.environ, data)
@@ -200,9 +207,18 @@ def main(argv=None) -> int:
     if not (data / "index" / "index.json").is_file():
         return refuse(f"no index at {(data / 'index').as_posix()}; build it first, from the repository root, "
                       f"with BRIDGE_MCP_DATA set to that data directory:\n  {BUILD}")
-    version = subprocess.run([executable, "--version"], capture_output=True, text=True, env=env).stdout.strip()
+    if env.get("ANTHROPIC_API_KEY"):
+        print("mcp_evaluate: ANTHROPIC_API_KEY is set, so claude authenticates with it and the sessions are billed "
+              "to that key rather than the CLI's login; unset it to use the login", file=sys.stderr)
+    try:
+        version = subprocess.run([executable, "--version"], capture_output=True, text=True, env=env,
+                                 timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        version = ""
+    today = datetime.date.today().isoformat()
     runs, correct, total = {}, 0, 0
-    with tempfile.TemporaryDirectory(prefix="mcp-evaluate-") as scratch:
+    # Cleanup may fail on Windows while a timed-out session's server still runs there; the results do not depend on it.
+    with tempfile.TemporaryDirectory(prefix="mcp-evaluate-", ignore_cleanup_errors=True) as scratch:
         config, cwd = Path(scratch) / "mcp.json", Path(scratch) / "cwd"
         config.write_text(json.dumps(server_config()), encoding="utf-8")
         cwd.mkdir()  # empty: no project files, no CLAUDE.md, no local settings
@@ -213,15 +229,23 @@ def main(argv=None) -> int:
                 print(f"{model} question {number}: {'right' if record['score'] else 'wrong'}", file=sys.stderr)
                 return {"n": number, "question": question, **record}
 
+            # The first session runs alone: it starts the shared mcp-worker once rather than in a race between
+            # sessions, and a server that cannot start costs one session rather than the whole run.
+            records = [one(wanted[0])]
+            if not records[0]["connected"]:
+                print(report(model, records) + "\n")
+                return refuse(f"the {SERVER} server did not connect ({'; '.join(records[0]['problems'])}). Check that "
+                              "Docker is running, that the MCP wheels were fetched once with `docker compose -f "
+                              "docker/compose.yaml run --rm --no-deps mcp-fetcher`, and that sh is on PATH")
             with concurrent.futures.ThreadPoolExecutor(arguments.jobs) as pool:
-                records = list(pool.map(one, wanted))
+                records += list(pool.map(one, wanted[1:]))
             runs[model] = records
             correct, total = correct + sum(record["score"] for record in records), total + len(records)
             print(report(model, records) + "\n")
-    print(f"{datetime.date.today().isoformat()}, {version or 'claude version unknown'}: {correct}/{total} correct.")
-    if arguments.out:
-        arguments.out.write_text(json.dumps({"claude": version, "date": datetime.date.today().isoformat(),
-                                             "runs": runs}, indent=2), encoding="utf-8")
+            if arguments.out:  # after each model, so an interrupted run keeps what finished
+                arguments.out.write_text(json.dumps({"claude": version, "date": today, "runs": runs}, indent=2),
+                                         encoding="utf-8")
+    print(f"{today}, {version or 'claude version unknown'}: {correct}/{total} correct.")
     return 0 if correct == total else 1
 
 
