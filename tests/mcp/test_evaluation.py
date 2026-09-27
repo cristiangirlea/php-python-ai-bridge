@@ -149,6 +149,12 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Tollin Marine", shown)
                     self.assertNotIn("Carrowby", shown)
 
+    def test_the_rerank_question_s_line_index_is_the_tool_s_index(self):
+        # The question asks for a line index; bridge_rerank counts non-blank lines. They agree only while the
+        # file has no blank line.
+        lines = (FIXTURES / "tasks.txt").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(lines and all(line.strip() for line in lines), "tasks.txt must not contain a blank line")
+
     def test_the_documented_build_command_uses_the_tested_chunking(self):
         self.assertIn(BUILD_COMMAND, (DOCS / "mcp.md").read_text(encoding="utf-8"))
         # The runner prints the same command when the index is missing.
