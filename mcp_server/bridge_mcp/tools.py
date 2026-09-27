@@ -83,6 +83,12 @@ bridge_search searches an index the operator built from files under the root wit
 
 The worker for this server is {backend!r}. Backends: rerank = {rerank} embed = {embed} redact = {redact}"""
 
+# Said once and used wherever it applies, so the path parameters and the rerank index cannot drift apart.
+ROOT_PATH = ("relative to the server's root directory, as it appears inside that directory; any path, relative or "
+             "absolute, must stay inside that root after following symlinks")
+LINE_FILE = "a JSON array of strings, or one document per non-blank line"
+POSITION = "zero-based position: in documents, in the JSON array, or among the file's non-blank lines"
+
 
 class Health(TypedDict):
     backend: str
@@ -91,8 +97,7 @@ class Health(TypedDict):
 
 
 class RerankHit(TypedDict):
-    index: Annotated[int, Field(description="The document's zero-based position: in documents, in the JSON array, "
-                                            "or among the file's non-blank lines.")]
+    index: Annotated[int, Field(description=f"The document's {POSITION}.")]
     score: float
     snippet: str
 
@@ -104,7 +109,8 @@ class Rerank(TypedDict):
 
 
 class SearchHit(TypedDict):
-    source: str
+    source: Annotated[str, Field(description="The chunk's file as a path relative to the server's root; as recorded "
+                                             "in the index if it lies outside the root.")]
     chunk: Annotated[int, Field(description="The chunk's zero-based number in the index.")]
     start: Annotated[int, Field(description="The code-point offset in source where the chunk starts.")]
     end: Annotated[int, Field(description="The code-point offset in source where the chunk ends, exclusive.")]
@@ -129,7 +135,8 @@ class Pair(TypedDict):
 
 class Similarity(TypedDict):
     model: str
-    matrix: list[list[float]]
+    matrix: Annotated[list[list[float]], Field(description="Cosine similarities with rows and columns in the order "
+                                                           "of texts: matrix[i][j] compares text i with text j.")]
     pairs: list[Pair]
 
 
@@ -375,11 +382,10 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         description=f"Rank candidate documents against a query and return only the best top_k with a short snippet "
                     f"of each. Give the documents by value only when there are a few ({BY_VALUE_DOCUMENTS} at most); "
                     f"for a real candidate set write them to a file under the configured root and pass "
-                    f"documents_path (a JSON array of strings, or one document per non-blank line, up to "
-                    f"{BY_REFERENCE_DOCUMENTS}). Each result's index is the document's zero-based position: in "
-                    f"documents, in the JSON array, or among the file's non-blank lines. If you have already read the "
-                    f"documents, rank them yourself: this tool earns its place on text you have not read. "
-                    f"Takes {timing['rerank']}. Backend: {described['rerank']}",
+                    f"documents_path (up to {BY_REFERENCE_DOCUMENTS} documents). Each result's index is the "
+                    f"document's {POSITION}. If you have already read the documents, rank them yourself: this tool "
+                    f"earns its place on text you have not read. Takes {timing['rerank']}. "
+                    f"Backend: {described['rerank']}",
         annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
     )
     async def bridge_rerank(
@@ -390,9 +396,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             description=f"Documents by value, at most {BY_VALUE_DOCUMENTS}; prefer documents_path.",
             max_length=BY_VALUE_DOCUMENTS)] = None,
         documents_path: Annotated[str | None, Field(
-            description="A file path relative to the server's root directory, such as candidates.txt; an absolute "
-                        "path must lie inside that root. The file is a JSON array of strings, or one document per "
-                        "non-blank line.")] = None,
+            description=f"A file path {ROOT_PATH}. The file is {LINE_FILE}.")] = None,
         top_k: Annotated[int, Field(description="How many of the best documents to return.", ge=1,
                                     le=BY_REFERENCE_DOCUMENTS)] = 10,
     ) -> Rerank:
@@ -468,9 +472,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     )
     async def bridge_search(
         query: Annotated[str, Field(description="What to look for.", min_length=1, max_length=MAX_TEXT_CHARACTERS)],
-        index_path: Annotated[str, Field(description="An index directory, or its index.json, as a path relative to "
-                                                     "the server's root directory, such as artifacts/docs; an absolute "
-                                                     "path must lie inside that root.")],
+        index_path: Annotated[str, Field(description=f"An index directory, or its index.json, as a path {ROOT_PATH}.")],
         ctx: Context,
         top_k: Annotated[int, Field(description="How many chunks to return.", ge=1, le=MAX_SEARCH_TOP_K)] = 5,
         rerank: Annotated[bool, Field(description="Rerank the candidates with the worker's rerank task.")] = True,
