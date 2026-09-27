@@ -405,7 +405,8 @@ def _redact(payload: dict, backend: str, model_dir: str, progress) -> dict:
             candidates.append({"start": start, "end": end, "label": label, "source": "rule:" + label.lower(),
                                "score": score, "priority": priority})
     # Nothing to ask the model when no entity is wanted, so the model is not even loaded.
-    if backend == "onnx" and entities:
+    ran_model = backend == "onnx" and bool(entities)
+    if ran_model:
         candidates.extend(_ner(text, entities, payload.get("min_score", REDACT_DEFAULTS["min_score"]),
                                model_dir, progress))
         model = MODEL_NAMES["onnx"]["redact"]
@@ -419,6 +420,6 @@ def _redact(payload: dict, backend: str, model_dir: str, progress) -> dict:
         pieces.append("[" + span["label"] + "]")
         cursor = span["end"]
     pieces.append(text[cursor:])
-    if model == MODEL_NAMES["lexical"]["redact"]:
+    if not ran_model:
         progress(1, 1)
     return {"model": model, "text": "".join(pieces), "spans": spans}

@@ -267,6 +267,16 @@ class ModelNameTests(unittest.TestCase):
                 result = execute(task, payload, "lexical", "", lambda *_: None)
                 self.assertEqual(result["model"], MODEL_NAMES["lexical"][task])
 
+    def test_onnx_redaction_without_entities_is_rules_only_and_loads_no_model(self):
+        from ai_bridge.tasks import MODEL_NAMES
+
+        events = []
+        # A missing model directory proves no model is loaded on this path.
+        result = execute("redact", {"text": "mail x@y.io", "entities": []}, "onnx", "/missing-model",
+                         lambda completed, total: events.append((completed, total)))
+        self.assertEqual((result["model"], result["text"]), (MODEL_NAMES["lexical"]["redact"], "mail [EMAIL]"))
+        self.assertEqual(events, [(0, 1), (1, 1)])
+
 
 class ProgressTests(unittest.TestCase):
     def test_reports_are_bounded_increasing_and_end_on_total(self):
