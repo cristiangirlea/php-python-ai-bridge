@@ -34,7 +34,9 @@ SIDECAR = "index.json"
 VECTORS = "vectors.f32"
 MAX_INDEX_CHUNKS = 50000
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
-MAX_SIDECAR_BYTES = 96 * 1024 * 1024
+# Parsing a sidecar costs several times its size in memory, and the mcp container has 512 MiB.
+MAX_SIDECAR_BYTES = 64 * 1024 * 1024
+CACHE_BYTES = 128 * 1024 * 1024
 MAX_CHUNK_CHARACTERS = 8192
 # The worker embeds at most 32 texts per job, and the encoded request must stay under 262144 bytes.
 EMBED_BATCH = 32
@@ -45,7 +47,6 @@ CAPACITY_RETRIES = 60
 DEFAULT_SUFFIXES = (".txt", ".md")
 _WORD = re.compile(r"\S")
 _SPACE = re.compile(r"\s")
-_WHITESPACE = " \t\n\r\f\v"
 
 
 class InvalidIndex(ValueError):
@@ -68,6 +69,12 @@ class LoadedIndex:
     vectors: array.array
     directory: Path
     vectors_path: Path = field(repr=False)
+    # (device, inode, mtime, size) of the sidecar and vectors files exactly as read.
+    stamps: tuple = field(repr=False, default=())
+
+    @property
+    def size(self) -> int:
+        return sum(stamp[3] for stamp in self.stamps)
 
 
 # ------------------------------------------------------------------------------------------------ chunking
@@ -78,9 +85,12 @@ def _skip_space(text: str, i: int) -> int:
 
 
 def _last_space(text: str, low: int, high: int):
-    """The index of the last whitespace character in text[low:high + 1], or None."""
-    found = max(text.rfind(char, low, high + 1) for char in _WHITESPACE)
-    return found if found >= low else None
+    """The index of the last whitespace character in text[low:high + 1], or None. Unicode whitespace counts,
+    as it does everywhere else in the chunker."""
+    last = None
+    for match in _SPACE.finditer(text, low, high + 1):
+        last = match.start()
+    return last
 
 
 def _next_word(text: str, i: int) -> int:
@@ -136,7 +146,8 @@ def _check(condition: bool, message: str) -> None:
 
 def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunking: dict, sources: list,
                 chunks: list, rows) -> dict:
-    """Stream `rows` into vectors.f32, then write index.json; both appear together or not at all."""
+    """Stream `rows` into vectors.f32, then write index.json. Nothing is replaced unless both were written; the
+    two renames are separate, so a reader between them sees a checksum mismatch and must retry."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     vectors_tmp, sidecar_tmp = out / (VECTORS + ".tmp"), out / (SIDECAR + ".tmp")
@@ -172,9 +183,11 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
     """Read and verify an index. With `within`, its vectors file must also resolve inside that directory."""
     sidecar = Path(sidecar)
     try:
-        _check(sidecar.stat().st_size <= MAX_SIDECAR_BYTES, f"{SIDECAR} is larger than "
-               f"{MAX_SIDECAR_BYTES // (1024 * 1024)} MiB")
-        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        with sidecar.open("rb") as handle:
+            sidecar_stamp = _fstamp(handle)
+            _check(sidecar_stamp[3] <= MAX_SIDECAR_BYTES, f"{SIDECAR} is larger than "
+                   f"{MAX_SIDECAR_BYTES // (1024 * 1024)} MiB")
+            meta = json.loads(handle.read().decode("utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as error:
         if isinstance(error, InvalidIndex):
             raise
@@ -206,8 +219,10 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
         _check(vectors_path.is_relative_to(Path(within).resolve()), "the vectors file is outside the allowed directory")
     expected = count * dimensions * 4
     try:
-        _check(vectors_path.stat().st_size == expected, f"{name} does not hold {count} x {dimensions} float32 values")
-        data = vectors_path.read_bytes()
+        with vectors_path.open("rb") as handle:
+            vectors_stamp = _fstamp(handle)
+            _check(vectors_stamp[3] == expected, f"{name} does not hold {count} x {dimensions} float32 values")
+            data = handle.read()
     except OSError as error:
         raise InvalidIndex(f"{name} cannot be read ({type(error).__name__})") from None
     _check(len(data) == expected, f"{name} changed while it was read")
@@ -216,33 +231,44 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
     vectors.frombytes(data)
     if sys.byteorder == "big":
         vectors.byteswap()
+    rows = memoryview(vectors)
     for row in range(count):
-        values = vectors[row * dimensions:(row + 1) * dimensions]
+        values = rows[row * dimensions:(row + 1) * dimensions]
         _check(all(math.isfinite(value) for value in values)
                and abs(math.sqrt(math.sumprod(values, values)) - 1.0) <= UNIT_TOLERANCE,
                f"vector {row} is not a finite unit vector")
     return LoadedIndex(model, backend, dimensions, count, chunking, sources, chunks, vectors,
-                       sidecar.parent, vectors_path)
+                       sidecar.parent, vectors_path, (sidecar_stamp, vectors_stamp))
 
 
 def search(loaded: LoadedIndex, query_vector, n: int) -> list:
     """The n chunks with the highest dot product, as (chunk, score); ties keep the lower chunk number."""
-    width, vectors = loaded.dimensions, loaded.vectors
+    # A memoryview slices rows without copying them.
+    width, vectors = loaded.dimensions, memoryview(loaded.vectors)
     query = array.array("f", query_vector)
     scores = ((math.sumprod(query, vectors[row * width:(row + 1) * width]), -row) for row in range(loaded.count))
     return [(-negative, score) for score, negative in heapq.nlargest(n, scores)]
 
 
+def _identity(status) -> tuple:
+    # Every rebuild replaces both files by rename, so the inode changes even when size and time do not.
+    return status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size
+
+
+def _fstamp(handle) -> tuple:
+    return _identity(os.fstat(handle.fileno()))
+
+
 def _stamp(path: Path) -> tuple:
-    status = path.stat()
-    return status.st_mtime_ns, status.st_size
+    return _identity(path.stat())
 
 
 class IndexCache:
-    """Loaded indexes keyed by resolved sidecar path, reloaded when either file's mtime or size changes."""
+    """Loaded indexes keyed by resolved sidecar path, bounded by the bytes of their files, and reloaded when
+    either file is replaced or changes. Loading happens outside the lock, so a hit never waits for a load."""
 
-    def __init__(self, limit: int = 4):
-        self.limit = limit
+    def __init__(self, limit_bytes: int = CACHE_BYTES):
+        self.limit_bytes = limit_bytes
         self._items = OrderedDict()
         self._lock = threading.Lock()
 
@@ -250,22 +276,29 @@ class IndexCache:
         sidecar = Path(sidecar).resolve()
         key = (sidecar, within)
         with self._lock:
-            cached = self._items.get(key)
-            if cached is not None:
-                loaded, stamps = cached
-                try:
-                    if stamps == (_stamp(sidecar), _stamp(loaded.vectors_path)):
-                        self._items.move_to_end(key)
-                        return loaded
-                except OSError:
-                    pass
-            stamps = _stamp(sidecar)
+            loaded = self._items.get(key)
+        if loaded is not None:
+            try:
+                if loaded.stamps == (_stamp(sidecar), _stamp(loaded.vectors_path)):
+                    with self._lock:
+                        if key in self._items:
+                            self._items.move_to_end(key)
+                    return loaded
+            except OSError:
+                pass
+        try:
             loaded = load_index(sidecar, within)
-            self._items[key] = (loaded, (stamps, _stamp(loaded.vectors_path)))
+        except InvalidIndex:
+            # A rebuild replaces the two files one after the other; a load between the renames sees a
+            # checksum mismatch. One retry after a pause separates that from a genuinely broken index.
+            _pause(0.2)
+            loaded = load_index(sidecar, within)
+        with self._lock:
+            self._items[key] = loaded
             self._items.move_to_end(key)
-            while len(self._items) > self.limit:
+            while len(self._items) > 1 and sum(item.size for item in self._items.values()) > self.limit_bytes:
                 self._items.popitem(last=False)
-            return loaded
+        return loaded
 
 
 # ------------------------------------------------------------------------------------------------ building
@@ -396,6 +429,8 @@ def main(argv=None) -> int:
 
     try:
         chunk_text("", arguments.chunk_chars, arguments.overlap_chars)
+        if not 1 <= arguments.timeout_s <= 300:
+            raise ValueError("--timeout-s must be between 1 and 300 seconds")
         bridge = Bridge(os.environ.get("BRIDGE_URL", "http://127.0.0.1:8090"), os.environ.get("BRIDGE_TOKEN", ""))
         suffixes = tuple(item.strip() for item in arguments.suffix.split(",") if item.strip())
         meta = build(bridge, arguments.inputs, Path(arguments.out), arguments.chunk_chars, arguments.overlap_chars,
