@@ -25,6 +25,8 @@ BY_REFERENCE_DOCUMENTS = 512
 MAX_TEXTS = 32
 MAX_TEXT_CHARACTERS = 8192
 MAX_TOTAL_CHARACTERS = 200000
+# The protocol client refuses an encoded request over 262144 bytes; leave room for the job envelope.
+REQUEST_BYTES = 262144 - 4096
 MAX_FILE_BYTES = 4 * 1024 * 1024
 SNIPPET_CHARACTERS = 160
 PAIRS = 10
@@ -291,6 +293,10 @@ def _index_from(root: Path | None, path_text: str, cache) -> index_files.LoadedI
         raise ToolError(f"Cannot read the index at {path_text!r}: {type(error).__name__}.") from None
 
 
+def _encoded(text: str) -> int:
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
+
+
 def _source(loaded: index_files.LoadedIndex, root: Path, number: int) -> str:
     """A chunk's source file relative to the root, which is how the agent names files; else as recorded."""
     recorded = loaded.sources[number]
@@ -308,11 +314,14 @@ def _snippet(text: str, query: str | None = None) -> str:
         return collapsed
     start = 0
     if query:
-        # Matched in the collapsed text itself: casefolding first could change lengths and shift offsets.
-        hits = [match.start() for word in set(re.findall(r"\w+", query))
-                if (match := re.search(re.escape(word), collapsed, re.IGNORECASE))]
-        if hits:
-            start = max(0, min(min(hits) - SNIPPET_CHARACTERS // 3, len(collapsed) - SNIPPET_CHARACTERS + 1))
+        # Whole words of three letters or more, the longest first: a short word such as "is" inside "this"
+        # would otherwise pull the window back to the start. Matched in the collapsed text itself, since
+        # casefolding first could change lengths and shift offsets.
+        for word in sorted({word for word in re.findall(r"\w+", query) if len(word) >= 3}, key=lambda w: (-len(w), w)):
+            match = re.search(rf"\b{re.escape(word)}\b", collapsed, re.IGNORECASE)
+            if match:
+                start = max(0, min(match.start() - SNIPPET_CHARACTERS // 3, len(collapsed) - SNIPPET_CHARACTERS + 1))
+                break
     prefix = "…" if start else ""
     window = SNIPPET_CHARACTERS - len(prefix)
     if start + window >= len(collapsed):
@@ -473,11 +482,14 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         candidates = await anyio.to_thread.run_sync(lambda: index_files.search(loaded, query_vector, wanted))
         rerank_model, ordered = None, [(number, similarity, None) for number, similarity in candidates]
         if rerank:
-            # Keep the query and the candidates' text inside the worker's character budget.
-            budget, kept = MAX_TOTAL_CHARACTERS - len(query), []
+            # Keep the query and the candidates inside the worker's character budget and the request's byte
+            # limit; multi-byte text reaches the bytes first.
+            characters, encoded, kept = MAX_TOTAL_CHARACTERS - len(query), REQUEST_BYTES - _encoded(query), []
             for number, similarity in candidates:
-                budget -= len(loaded.chunks[number]["text"])
-                if budget < 0:
+                text = loaded.chunks[number]["text"]
+                characters -= len(text)
+                encoded -= _encoded(text) + 1
+                if characters < 0 or encoded < 0:
                     break
                 kept.append((number, similarity))
             candidates = kept
