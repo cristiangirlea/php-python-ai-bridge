@@ -9,8 +9,9 @@ from pathlib import Path
 
 
 MAX_DOCUMENTS = 512
-# Query-document pairs per forward pass. At 512 tokens TinyBERT-L2 keeps roughly 3.5 MiB of activations
-# per pair, so 32 pairs stay far inside the model worker's 1536 MiB, the scale embed already runs at.
+# Query-document pairs per forward pass. An estimate, not a measurement: at 512 tokens TinyBERT-L2 keeps
+# roughly 3.5 MiB of activations per pair, far inside the model worker's 1536 MiB. The benchmark's worst-case
+# row runs a full batch of 32 pairs at 512 tokens inside that limit.
 RERANK_BATCH_SIZE = 32
 # 32 vectors of 384 six-decimal components stay well inside the PHP client's 262144 byte response cap.
 MAX_TEXTS = 32
@@ -125,7 +126,9 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
     report(0)
     if backend == "onnx":
         tokenizer, session, names = _onnx(Path(model_dir) / "rerank", 512)
-        scores = _score_pairs(tokenizer, session, names, query, documents, report)
+        # At most 17 batch reports, so they need no throttle, and the throttle's step rarely divides 32.
+        scores = _score_pairs(tokenizer, session, names, query, documents,
+                              lambda completed: progress(completed, total))
         model = MODEL_NAMES["onnx"]["rerank"]
     else:
         words = set(re.findall(r"\w+", query.casefold()))
