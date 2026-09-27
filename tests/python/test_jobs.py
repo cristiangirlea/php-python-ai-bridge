@@ -246,6 +246,28 @@ class NerAggregationTests(unittest.TestCase):
 
 
 
+class ModelNameTests(unittest.TestCase):
+    """Every result names its model from one table, which the MCP server's table is checked against."""
+
+    def test_the_table_covers_every_backend_and_task(self):
+        from ai_bridge.tasks import MODEL_NAMES
+
+        self.assertEqual(set(MODEL_NAMES), {"lexical", "onnx"})
+        for backend, tasks in MODEL_NAMES.items():
+            with self.subTest(backend=backend):
+                self.assertEqual(set(tasks), {"rerank", "embed", "redact"})
+                self.assertTrue(all(isinstance(name, str) and name for name in tasks.values()))
+
+    def test_lexical_results_report_the_names_in_the_table(self):
+        from ai_bridge.tasks import MODEL_NAMES
+
+        payloads = {"rerank": {"query": "x", "documents": ["x"]}, "embed": {"texts": ["x"]}, "redact": {"text": "x"}}
+        for task, payload in payloads.items():
+            with self.subTest(task=task):
+                result = execute(task, payload, "lexical", "", lambda *_: None)
+                self.assertEqual(result["model"], MODEL_NAMES["lexical"][task])
+
+
 class ProgressTests(unittest.TestCase):
     def test_reports_are_bounded_increasing_and_end_on_total(self):
         for total in [1, 3, 64, 65, 127, 128, 512]:
