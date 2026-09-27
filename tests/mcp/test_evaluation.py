@@ -102,8 +102,9 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_answer_is_given_away_by_its_question(self):
         # The fixture facts are invented, so a model cannot answer from memory; the question must not contain
-        # them either, except where the tool works on text the question supplies.
-        by_value = {"PHONE", "2", "AB"}
+        # them either, except where the tool works on text the question supplies or the question offers the
+        # answer as one of its choices.
+        by_value = {"PHONE", "2", "AB", "rules"}
         for question, answer in self.pairs:
             if answer not in by_value:
                 with self.subTest(question=question[:60]):

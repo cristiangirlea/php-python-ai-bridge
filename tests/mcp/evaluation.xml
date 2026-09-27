@@ -1,0 +1,48 @@
+<evaluation>
+   <!--
+   Ten questions for an LLM host that has only this repository's MCP server, running on the demo worker the
+   compose mcp service uses, with BRIDGE_MCP_DATA set to tests/mcp/fixtures/eval and the index built into
+   its index directory (see docs/mcp.md). The corpus is invented, so answers cannot come from memory.
+   tests/mcp/test_evaluation.py proves every answer is reachable through the tools.
+   -->
+   <qa_pair>
+      <question>An index of the Gull Rock notes is available at index_path "index". After the lighthouse's restoration, what colour was the glass fitted in the lantern room? Answer with one lowercase word.</question>
+      <answer>amber</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index", which company delivered the metal fittings for the lantern gallery? Give the company name exactly as written in the notes.</question>
+      <answer>Tollin Marine</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>According to the Gull Rock notes index at index_path "index", which keeper mended the fog signal? Answer with the keeper's surname only.</question>
+      <answer>Merrow</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Mask the personal data in this text with the redaction tool: "Call the harbour office on +44 20 7946 0958 or write to office@gullrock.example." Which placeholder label replaces the telephone number? Answer with the label in capital letters and no brackets.</question>
+      <answer>PHONE</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Run the redaction tool on the text "Call the harbour office on +44 20 7946 0958 or write to office@gullrock.example." How many spans does it report? Answer with a number.</question>
+      <answer>2</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>The file tasks.txt under the server's root lists one maintenance task per line. Rank those lines against the query "tide gauge brass datum plate" without reading the file yourself. What is the zero-based line index of the best match? Answer with a number.</question>
+      <answer>5</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Compare these three phrases with the similarity tool: A is "lantern glass amber", B is "amber lantern glass", C is "fog signal repair". Which two phrases does it rate most similar? Answer with the two letters in alphabetical order and no space.</question>
+      <answer>AB</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Does this server's redaction tool run a machine-learning model, or does it apply rules only? Answer with the single word "model" or "rules".</question>
+      <answer>rules</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index", in which year did the light shine for the first time? Answer with a four-digit year.</question>
+      <answer>1871</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index", find the company that supplied the lantern gallery's metal fittings, then find where that company keeps its yard. Name the town only.</question>
+      <answer>Carrowby</answer>
+   </qa_pair>
+</evaluation>
