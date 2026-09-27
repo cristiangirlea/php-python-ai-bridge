@@ -18,6 +18,8 @@ from urllib.request import Request, urlopen
 TOKEN = os.environ.get("BRIDGE_TOKEN", "")
 TARGETS = [target.split("=", 1) for target in
            os.environ.get("BENCH_TARGETS", "onnx=http://model-worker:8090,lexical=http://worker:8090").split(",")]
+if any(len(target) != 2 or not all(target) for target in TARGETS):
+    raise SystemExit("BENCH_TARGETS entries must look like backend=http://host:port, separated by commas")
 RUNS = int(os.environ.get("BENCH_RUNS", "5"))
 POLL_S = 0.05
 TERMINAL = {"succeeded", "failed", "timed_out", "cancelled"}
@@ -37,9 +39,11 @@ CASES = [
      {"query": QUERY, "documents": [sentence(i, 40) for i in range(32)]}, "1 batch of 32"),
     ("rerank 512 documents of ~40 words", "rerank",
      {"query": QUERY, "documents": [sentence(i, 40) for i in range(512)], "top_k": 10}, "16 batches of 32"),
-    ("rerank 24 documents of 8000 characters", "rerank",
-     {"query": QUERY, "documents": [(sentence(i, 1200) * 2)[:8000] for i in range(24)], "top_k": 5},
-     "1 batch of 24 at the 512-token limit"),
+    # The worst reachable batch: 32 x 6000 characters fits the 200000-character budget and every
+    # document still truncates to 512 tokens, so this is one full batch at the widest possible padding.
+    ("rerank 32 documents of 6000 characters", "rerank",
+     {"query": QUERY, "documents": [(sentence(i, 1200) * 2)[:6000] for i in range(32)], "top_k": 5},
+     "1 full batch of 32 at the 512-token limit, the worst case"),
     ("embed 32 texts of ~40 words", "embed", {"texts": [sentence(i, 40) for i in range(32)]}, "1 forward pass"),
     ("redact 2000 characters, PER+ORG+LOC", "redact",
      {"text": ("Maria Lopez of Northwind Traders met John Carter in Lisbon on Tuesday; write to "

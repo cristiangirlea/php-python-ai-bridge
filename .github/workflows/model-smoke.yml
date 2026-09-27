@@ -55,8 +55,10 @@ jobs:
           docker compose -f docker/compose.yaml up -d model-worker model-frankenphp
           docker compose -f docker/compose.yaml run --rm --no-deps model-test
           docker compose -f docker/compose.yaml run --rm --no-deps model-integration
-      - name: Latency benchmark (informational, never gating)
-        continue-on-error: true
+      # Times never gate: the benchmark asserts nothing about speed. Its jobs must succeed, including the
+      # worst-case batch, so bash's pipefail keeps tee from hiding a failure.
+      - name: Latency benchmark (times informational, correctness gating)
+        shell: bash
         env:
           BENCH_COMMIT: ${{ github.sha }}
           BENCH_RUNNER: GitHub-hosted ubuntu-latest
