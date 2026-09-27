@@ -334,7 +334,7 @@ class RerankBatchingTests(unittest.TestCase):
         self.assertEqual(scores, self.score(documents)[0])
         self.assertEqual(reports, list(range(1, 71)))
 
-    def test_execute_on_onnx_uses_the_batched_path_and_the_throttle(self):
+    def test_execute_on_onnx_reports_every_batch(self):
         tokenizer, session, events = self.Tokenizer(), self.Session(), []
         with patch.object(tasks, "_onnx", return_value=(tokenizer, session, self.NAMES)) as onnx, \
                 patch.object(tasks, "_tensors", self.tensors):
@@ -344,10 +344,9 @@ class RerankBatchingTests(unittest.TestCase):
         self.assertEqual(result["model"], "cross-encoder/ms-marco-TinyBERT-L2-v2")
         self.assertEqual([item["index"] for item in result["rankings"]], [129, 128, 127])
         self.assertEqual([rows for rows, _ in session.shapes], [32, 32, 32, 32, 2])
-        completed = [done for done, _ in events]
-        self.assertEqual((completed[0], completed[-1]), (0, 130))
-        self.assertEqual(completed, sorted(set(completed)))
-        self.assertLessEqual(len(events), 66)
+        # 130 documents give a throttle step of 3, which divides none of 32, 64 and 128: batch reports must
+        # bypass the per-document throttle or the client sees nothing between 0 and 96.
+        self.assertEqual(events, [(0, 130), (32, 130), (64, 130), (96, 130), (128, 130), (130, 130)])
 
     def test_a_wrong_number_of_scores_is_rejected(self):
         with self.assertRaises(ValueError):
