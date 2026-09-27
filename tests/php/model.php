@@ -38,6 +38,31 @@ foreach ($cases as [$query, $documents, $expected]) {
         throw new RuntimeException('Real model smoke case failed');
     }
 }
+// Batched scoring: 70 documents in batches of 32, 32 and 6, the relevant one at 40 in the second batch.
+// Distractors range from a few words to several hundred, so padding widths differ widely between batches.
+$france = ['Bananas are yellow fruit.', 'Paris is the capital of France.', 'A car has four wheels.'];
+$query = 'What is the capital of France?';
+$words = ['gardening', 'tomatoes', 'rainfall', 'recipes', 'compost', 'seedlings'];
+$documents = [];
+for ($i = 0; $i < 70; ++$i) {
+    $length = 3 + ($i * 37) % 290;
+    $documents[] = implode(' ', array_map(static fn (int $j): string => $words[$j % 6], range(0, $length - 1))) . " note {$i}.";
+}
+[$documents[5], $documents[40], $documents[66]] = $france;
+$scores = static fn (RerankResult $result): array => array_column($result->rankings, 'score', 'index');
+$job = $client->submitRerank($query, $france, 60000);
+$alone = $scores(RerankResult::fromJob($client->wait($job->id, 60000), 3));
+$job = $client->submitRerank($query, $documents, 120000);
+$batched = RerankResult::fromJob($client->wait($job->id, 120000), 70);
+$together = $scores($batched);
+if ($batched->rankings[0]['index'] !== 40) {
+    throw new RuntimeException('Batched ranking smoke case failed: ' . json_encode(array_slice($batched->rankings, 0, 3)));
+}
+foreach ([5, 40, 66] as $position => $index) {
+    if (abs($alone[$position] - $together[$index]) >= 1e-3) {
+        throw new RuntimeException("Batched score differs from the unbatched score for document {$index}");
+    }
+}
 $texts = ['A dog barks loudly.', 'Puppies make barking noises.', 'The stock market fell today.'];
 $job = $client->submitEmbed($texts, 60000);
 $embedding = EmbedResult::fromJob($client->wait($job->id, 60000), count($texts));
@@ -61,4 +86,4 @@ $job = $client->submitRedact($clean, timeoutMs: 60000);
 if (RedactResult::fromJob($client->wait($job->id, 60000), $clean)->spans !== []) {
     throw new RuntimeException('Real NER smoke case produced spans on clean text');
 }
-echo "PASS: 2 real ONNX ranking cases, 1 embedding case and 2 redaction cases through the PHP client\n";
+echo "PASS: 2 real ONNX ranking cases, a 70-document batched ranking with score parity, 1 embedding case and 2 redaction cases through the PHP client\n";
