@@ -16,11 +16,22 @@ on:
       - worker/ai_bridge/tasks.py
       - tests/php/model.php
       - tests/model_integration.py
+      # What those smoke tests run through: the shared HTTP helpers, the PHP client and the demo route.
+      - tests/integration.py
+      - src/**
+      - examples/bootstrap.php
+      - examples/frankenphp/**
+      - scripts/run_frankenphp.sh
       - docker/compose.yaml
       - .github/workflows/model-smoke.yml
 
 permissions:
   contents: read
+
+# A new push to the same branch makes an in-flight run obsolete; do not download the models twice.
+concurrency:
+  group: model-smoke-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   model:
