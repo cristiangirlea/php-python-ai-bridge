@@ -132,30 +132,40 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         rerank, similarity, search = tools["bridge_rerank"], tools["bridge_embed_similarity"], tools["bridge_search"]
         for tool, argument in [(rerank, "documents_path"), (search, "index_path")]:
             with self.subTest(argument=argument):
-                self.assertIn("relative to the server's root", tool.input_schema["properties"][argument]["description"])
+                described = tool.input_schema["properties"][argument]["description"]
+                self.assertIn("relative to the server's root", described)
+                # Relative paths are confined too, and after symlinks, not only absolute ones.
+                self.assertIn("must stay inside that root after following symlinks", described)
         self.assertIn("non-blank line", rerank.input_schema["properties"]["documents_path"]["description"])
         self.assertIn("zero-based position", rerank.description)
         self.assertIn("non-blank lines", rerank.description)
         self.assertIn("zero-based position", similarity.description)
 
     async def test_every_position_in_a_result_is_described_in_the_output_schema(self):
-        # For hosts that do show the output schema: each integer that locates something says what it counts.
-        def field(tool, model, name):
-            schema = tool.output_schema
-            return schema["$defs"][model]["properties"][name].get("description", "")
+        # For hosts that do show the output schema: each field that locates something says what it counts. The
+        # walk follows $ref wherever the SDK puts a definition, so inlining or renaming them changes nothing here.
+        def described(schema, *path):
+            node = schema
+            for name in path:
+                while "$ref" in node:
+                    node = schema["$defs"][node["$ref"].rsplit("/", 1)[1]]
+                node = node["items"] if name == "[]" else node["properties"][name]
+            return node.get("description", "")
 
-        tools = {tool.name: tool for tool in await self.tools()}
-        expected = [("bridge_rerank", "RerankHit", "index", "zero-based"),
-                    ("bridge_embed_similarity", "Pair", "a", "zero-based"),
-                    ("bridge_embed_similarity", "Pair", "b", "zero-based"),
-                    ("bridge_search", "SearchHit", "start", "code-point offset"),
-                    ("bridge_search", "SearchHit", "end", "exclusive"),
-                    ("bridge_search", "SearchHit", "chunk", "zero-based"),
-                    ("bridge_redact", "Span", "start", "code-point offset"),
-                    ("bridge_redact", "Span", "end", "exclusive")]
-        for tool, model, name, words in expected:
-            with self.subTest(tool=tool, field=name):
-                self.assertIn(words, field(tools[tool], model, name))
+        tools = {tool.name: tool.output_schema for tool in await self.tools()}
+        expected = [("bridge_rerank", ("results", "[]", "index"), "zero-based"),
+                    ("bridge_embed_similarity", ("pairs", "[]", "a"), "zero-based"),
+                    ("bridge_embed_similarity", ("pairs", "[]", "b"), "zero-based"),
+                    ("bridge_embed_similarity", ("matrix",), "in the order of texts"),
+                    ("bridge_search", ("results", "[]", "source"), "relative to the server's root"),
+                    ("bridge_search", ("results", "[]", "chunk"), "zero-based"),
+                    ("bridge_search", ("results", "[]", "start"), "code-point offset"),
+                    ("bridge_search", ("results", "[]", "end"), "exclusive"),
+                    ("bridge_redact", ("spans", "[]", "start"), "code-point offset"),
+                    ("bridge_redact", ("spans", "[]", "end"), "exclusive")]
+        for tool, path, words in expected:
+            with self.subTest(tool=tool, field=".".join(path)):
+                self.assertIn(words, described(tools[tool], *path))
 
     async def test_rerank_refuses_paths_outside_the_root_and_bad_files(self):
         for path in ["../outside.json", str(self.outside), "missing.json", "/etc/hostname", "empty.txt", "toomany.txt"]:
