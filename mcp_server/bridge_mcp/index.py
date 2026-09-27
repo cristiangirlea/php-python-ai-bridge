@@ -438,6 +438,10 @@ def main(argv=None) -> int:
     except (ValueError, BuildError, BridgeError) as error:
         say(str(error))
         return 2
+    except OSError as error:
+        # Most often an --out the container user cannot write; the path is the operator's own.
+        say(f"cannot write {error.filename or arguments.out}: {type(error).__name__}")
+        return 2
     say(f"wrote {meta['count']} chunks from {len(meta['sources'])} files to {arguments.out} with {meta['model']!r}")
     return 0
 
