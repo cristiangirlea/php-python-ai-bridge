@@ -185,6 +185,18 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
             await self.call({"query": "needle token quartz", "index_path": "index", "top_k": 4})
             self.assertEqual(run.call_count, 3)
 
+    async def test_rerank_candidates_fit_the_request_byte_limit(self):
+        # About 1.4 bytes per character: 200 candidates of 1000 characters fit the character budget, not the bytes.
+        (self.root / "wide").mkdir()
+        (self.root / "wide" / "text.md").write_text(" ".join(f"\u00e9\u00e8\u00ea\u00eb{i:05d}" for i in range(20000)),
+                                                    encoding="utf-8")
+        index.build(self.bridge, [self.root / "wide" / "text.md"], self.root / "wide" / "idx")
+        result = await self.call({"query": "\u00e9\u00e8\u00ea\u00eb00042", "index_path": "wide/idx", "top_k": 50})
+        self.assertFalse(result.is_error, result.content)
+        body = result.structured_content
+        self.assertEqual(len(body["results"]), 50)
+        self.assertLess(body["considered"], 200, "candidates are trimmed to the encoded request limit")
+
     async def test_top_k_above_the_chunk_count_returns_every_chunk(self):
         for rerank in (True, False):
             with self.subTest(rerank=rerank):

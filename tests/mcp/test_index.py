@@ -56,6 +56,13 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(spans[-1][1], 2500)
         self.assertTrue(all(following <= end for (_, end), (following, _) in zip(spans, spans[1:])))
 
+    def test_unicode_whitespace_is_a_cut_point(self):
+        text = "\u3000".join(f"word{i}" for i in range(400))
+        spans = index.chunk_text(text, 1000, 200)
+        self.assertGreater(len(spans), 2)
+        for start, end in spans[:-1]:
+            self.assertTrue(text[end].isspace(), "an ideographic space is a word boundary")
+
     def test_parameters_are_bounded(self):
         for chars, overlap in [(199, 0), (4001, 0), (1000, 500), (1000, -1)]:
             with self.subTest(chars=chars, overlap=overlap), self.assertRaises(ValueError):
@@ -145,7 +152,7 @@ class FormatTests(unittest.TestCase):
 
     def test_the_cache_reloads_on_change_and_evicts_the_oldest(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
-        cache = index.IndexCache(limit=1)
+        cache = index.IndexCache(limit_bytes=1)
         with patch.object(index, "load_index", wraps=index.load_index) as load:
             first = cache.get(sidecar)
             self.assertIs(cache.get(sidecar), first)
@@ -160,7 +167,19 @@ class FormatTests(unittest.TestCase):
                               rows=[[0.0, 1.0, 0.0]])
             cache.get(other / index.SIDECAR)
             cache.get(sidecar)
-            self.assertEqual(load.call_count, 4, "a limit of one evicts the first index")
+            self.assertEqual(load.call_count, 4, "a one-byte budget keeps only the latest index")
+
+    def test_the_cache_notices_a_rebuild_with_the_same_size_and_time(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        cache = index.IndexCache()
+        self.assertEqual(list(cache.get(sidecar).vectors), [1.0, 0.0, 0.0])
+        times = {name: (self.out / name).stat() for name in (index.SIDECAR, index.VECTORS)}
+        self.write([[0.0, 1.0, 0.0]])
+        for name, stamp in times.items():
+            self.assertEqual((self.out / name).stat().st_size, stamp.st_size)
+            os.utime(self.out / name, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        # Every rebuild replaces both files by rename, so their inodes change even when size and time do not.
+        self.assertEqual(list(cache.get(sidecar).vectors), [0.0, 1.0, 0.0])
 
 
 class BuildTests(unittest.TestCase):
@@ -273,11 +292,14 @@ class BuildTests(unittest.TestCase):
                                  ((str(binary), "--out", str(self.out)), TOKEN),
                                  ((str(self.data / "missing.txt"), "--out", str(self.out)), TOKEN),
                                  ((str(self.data / "a.txt"), "--out", str(self.data / "a.txt")), TOKEN),
+                                 ((str(self.data / "a.txt"), "--out", str(self.out), "--timeout-s", "0"), TOKEN),
                                  ((str(self.data / "a.txt"), "--out", str(self.out)), "")]:
             with self.subTest(arguments=arguments[0][-12:], token=bool(token)):
                 completed = self.cli(*arguments, token=token)
                 self.assertEqual(completed.returncode, 2, completed.stderr)
                 self.assertIn("bridge_mcp.index:", completed.stderr)
+                if "--timeout-s" in arguments:
+                    self.assertIn("--timeout-s", completed.stderr)
                 self.assertNotIn(TOKEN, completed.stdout + completed.stderr)
 
     def test_the_builder_does_not_import_the_mcp_sdk(self):

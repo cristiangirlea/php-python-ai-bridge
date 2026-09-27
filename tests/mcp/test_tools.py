@@ -13,7 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
 from bridge_mcp.protocol import Bridge
-from bridge_mcp.tools import BY_VALUE_DOCUMENTS, TOOL_NAMES, _rankings, _spans, _vectors, build_server
+from bridge_mcp.tools import BY_VALUE_DOCUMENTS, TOOL_NAMES, _rankings, _snippet, _spans, _vectors, build_server
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
 
@@ -224,3 +224,14 @@ class ResultValidationTests(unittest.TestCase):
                 _spans({"model": "m", "text": "masked", "spans": spans}, text)
         with self.assertRaises(ToolError):
             _spans({"model": "m", "text": "", "spans": []}, text)
+
+
+class SnippetTests(unittest.TestCase):
+    def test_centres_on_the_longest_whole_query_word(self):
+        text = "this chunk " + "filler " * 40 + "then the needle is here " + "tail " * 30
+        snippet = _snippet(text, "what is the needle")
+        self.assertIn("needle", snippet, "short words inside longer ones must not pull the window back")
+        self.assertTrue(snippet.startswith("\u2026") and snippet.endswith("\u2026"))
+        self.assertLessEqual(len(snippet), 160)
+        self.assertEqual(_snippet(text, "absent words"), _snippet(text))
+        self.assertEqual(_snippet("short text", "text"), "short text")
