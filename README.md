@@ -6,7 +6,7 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 
 ## What is implemented
 
-- PHP 8.2–8.5 client using cURL, with validated job and reranking result objects. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result.
+- PHP 8.2–8.5 client using cURL, with validated job objects and typed rerank, embedding and redaction results. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result.
 - Python 3.12 service with an explicit task allowlist and a separate process per task.
 - Text embedding: up to 32 texts per job return unit-length 384-dimensional vectors for an index the caller owns.
 - Redaction: checksum and pattern rules for card numbers, IBANs, emails, IPv4 addresses and phone numbers on every backend, plus named-entity masking with int8 `bert-base-NER` on the ONNX profile. Assistive, not a compliance control.
@@ -125,7 +125,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
 
 Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only in the test service with `BRIDGE_TEST_TASKS=1`.
 
-CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. The stable `deterministic` check succeeds only if every PHP matrix job succeeds. A separate, manually dispatched workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image; it does not use paid APIs or GPUs.
+CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. The stable `deterministic` check succeeds only if every PHP matrix job and the offline MCP server suite succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, and it does not use paid APIs or GPUs.
 
 ## Important limits
 
