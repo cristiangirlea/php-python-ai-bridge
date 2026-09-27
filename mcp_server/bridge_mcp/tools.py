@@ -91,7 +91,8 @@ class Health(TypedDict):
 
 
 class RerankHit(TypedDict):
-    index: int
+    index: Annotated[int, Field(description="The document's zero-based position: in documents, in the JSON array, "
+                                            "or among the file's non-blank lines.")]
     score: float
     snippet: str
 
@@ -104,9 +105,9 @@ class Rerank(TypedDict):
 
 class SearchHit(TypedDict):
     source: str
-    chunk: int
-    start: int
-    end: int
+    chunk: Annotated[int, Field(description="The chunk's zero-based number in the index.")]
+    start: Annotated[int, Field(description="The code-point offset in source where the chunk starts.")]
+    end: Annotated[int, Field(description="The code-point offset in source where the chunk ends, exclusive.")]
     similarity: float
     rerank_score: float | None
     snippet: str
@@ -121,8 +122,8 @@ class Search(TypedDict):
 
 
 class Pair(TypedDict):
-    a: int
-    b: int
+    a: Annotated[int, Field(description="The zero-based position of one text in texts.")]
+    b: Annotated[int, Field(description="The zero-based position of the other text in texts, after a.")]
     similarity: float
 
 
@@ -133,8 +134,8 @@ class Similarity(TypedDict):
 
 
 class Span(TypedDict):
-    start: int
-    end: int
+    start: Annotated[int, Field(description="The code-point offset in the input text where the span starts.")]
+    end: Annotated[int, Field(description="The code-point offset in the input text where the span ends, exclusive.")]
     label: str
     source: str
     score: float
@@ -374,9 +375,11 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         description=f"Rank candidate documents against a query and return only the best top_k with a short snippet "
                     f"of each. Give the documents by value only when there are a few ({BY_VALUE_DOCUMENTS} at most); "
                     f"for a real candidate set write them to a file under the configured root and pass "
-                    f"documents_path (a JSON array of strings, or one document per line, up to "
-                    f"{BY_REFERENCE_DOCUMENTS}). If you have already read the documents, rank them yourself: this "
-                    f"tool earns its place on text you have not read. Takes {timing['rerank']}. Backend: {described['rerank']}",
+                    f"documents_path (a JSON array of strings, or one document per non-blank line, up to "
+                    f"{BY_REFERENCE_DOCUMENTS}). Each result's index is the document's zero-based position: in "
+                    f"documents, in the JSON array, or among the file's non-blank lines. If you have already read the "
+                    f"documents, rank them yourself: this tool earns its place on text you have not read. "
+                    f"Takes {timing['rerank']}. Backend: {described['rerank']}",
         annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
     )
     async def bridge_rerank(
@@ -387,7 +390,9 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             description=f"Documents by value, at most {BY_VALUE_DOCUMENTS}; prefer documents_path.",
             max_length=BY_VALUE_DOCUMENTS)] = None,
         documents_path: Annotated[str | None, Field(
-            description="A file under BRIDGE_MCP_ROOT: a JSON array of strings, or one document per line.")] = None,
+            description="A file path relative to the server's root directory, such as candidates.txt; an absolute "
+                        "path must lie inside that root. The file is a JSON array of strings, or one document per "
+                        "non-blank line.")] = None,
         top_k: Annotated[int, Field(description="How many of the best documents to return.", ge=1,
                                     le=BY_REFERENCE_DOCUMENTS)] = 10,
     ) -> Rerank:
@@ -407,7 +412,8 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     @mcp.tool(
         name="bridge_embed_similarity", title="Semantic similarity between texts",
         description=f"Embed 2 to {MAX_TEXTS} texts and return their cosine similarity matrix and the most similar "
-                    f"pairs, for grouping or deduplicating short texts. Vectors themselves are never returned: build "
+                    f"pairs, for grouping or deduplicating short texts; a pair names each text by its zero-based "
+                    f"position in texts. Vectors themselves are never returned: build "
                     f"an index with the HTTP protocol from a script instead. Takes {timing['embed']}. "
                     f"Backend: {described['embed']}",
         annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
@@ -462,7 +468,9 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     )
     async def bridge_search(
         query: Annotated[str, Field(description="What to look for.", min_length=1, max_length=MAX_TEXT_CHARACTERS)],
-        index_path: Annotated[str, Field(description="An index directory, or its index.json, under BRIDGE_MCP_ROOT.")],
+        index_path: Annotated[str, Field(description="An index directory, or its index.json, as a path relative to "
+                                                     "the server's root directory, such as artifacts/docs; an absolute "
+                                                     "path must lie inside that root.")],
         ctx: Context,
         top_k: Annotated[int, Field(description="How many chunks to return.", ge=1, le=MAX_SEARCH_TOP_K)] = 5,
         rerank: Annotated[bool, Field(description="Rerank the candidates with the worker's rerank task.")] = True,
