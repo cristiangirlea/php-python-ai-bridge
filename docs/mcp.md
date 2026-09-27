@@ -47,22 +47,30 @@ docker compose -f docker/compose.yaml run --rm mcp-index /data/docs --out /data/
 
 ## Evaluating with an LLM
 
-The tests prove the tools keep their contract; whether an agent uses them well is a separate question, which `tests/mcp/evaluation.xml` asks. It holds ten questions with single, string-comparable answers over an invented corpus in `tests/mcp/fixtures/eval`, so no model can answer from memory: facts found by searching an index, a rerank by file reference, redaction labels and counts, a similarity ranking, a two-step search, and whether the redaction tool runs a model at all. The answers assume the demo worker the compose `mcp` service uses, whose search matches words rather than meaning, so the questions stay close to the corpus's wording; an evaluation of semantic retrieval would need an ONNX-backed worker behind the MCP server, which compose does not provide yet.
+The tests prove the tools keep their contract; whether an agent uses them well is a separate question, which `tests/mcp/evaluation.xml` asks. It holds ten questions with single, string-comparable answers over an invented corpus in `tests/mcp/fixtures/eval`, so no model can answer from memory: facts found by searching an index, a rerank by file reference, redaction labels and counts, a similarity ranking, a two-step search, and whether the redaction tool runs a model at all. The notes split into 27 chunks, so a default search considers 20 and returns 5 of them, and they carry distractors: a second delivery of fittings, the lantern's old panes, another keeper's repair, other years, several firms' yards. The answers assume the demo worker the compose `mcp` service uses, whose search matches words rather than meaning, so the questions stay close to the corpus's wording; an evaluation of semantic retrieval would need an ONNX-backed worker behind the MCP server, which compose does not provide yet.
 
-CI does not run an LLM. `tests/mcp/test_evaluation.py` proves every answer is reachable through the tools by making the calls a capable agent would make, including the two-step chain, and that no question contains its own answer.
+CI does not run an LLM. `tests/mcp/test_evaluation.py` proves every answer is reachable through the tools by making the calls a capable agent would make, and that no question contains its own answer. It also checks that a default search sees only part of the corpus, and that none of the first steps agents actually sent on the two-step question already shows its answer.
 
-To run it with an LLM, build the fixture index once, then point a harness at the stdio server. With the harness in Anthropic's MCP builder skill (its `scripts/evaluation.py`, which needs `anthropic` and `mcp` and an API key), run from the repository root with an absolute path to the fixtures:
+To run it with an LLM, build the fixture index once, from the repository root with an absolute path to the fixtures, then run the questions with the Claude Code CLI:
 
 ```sh
 export BRIDGE_MCP_DATA="$PWD/tests/mcp/fixtures/eval"
 docker compose -f docker/compose.yaml run --rm mcp-index /data/notes --out /data/index --chunk-chars 300 --overlap-chars 60
+python scripts/mcp_evaluate.py --model sonnet --model haiku --out results.json
+```
+
+`scripts/mcp_evaluate.py` runs each question in its own headless `claude -p` session with the CLI's own login, so it needs no API key and spends that account's usage. The agent gets this server through `scripts/mcp_stdio.sh` and nothing else: built-in tools are off, other MCP servers and your own settings are not loaded, and a session whose agent could see another tool does not count. `BRIDGE_TOKEN` must be set; it reaches the server through the environment and is never written to the configuration file. Answers are scored by exact match on the last `<response>` tag. The report goes to stdout as Markdown, with every session's tool calls and the agent's feedback on the tools in `--out`; the exit status is 0 only when every answer is right. It needs `claude`, `sh` and `docker` on `PATH`; on Windows, `sh` is Git's.
+
+The harness in Anthropic's MCP builder skill runs the same file through the API instead. It needs `anthropic`, `mcp` and an API key, and takes the same index:
+
+```sh
 python /path/to/mcp-builder/scripts/evaluation.py tests/mcp/evaluation.xml -t stdio -m <current model> \
   -c sh -a scripts/mcp_stdio.sh -e BRIDGE_TOKEN="$BRIDGE_TOKEN" BRIDGE_MCP_DATA="$BRIDGE_MCP_DATA"
 ```
 
-On Linux the fixture directory must be writable by container UID 65532 for the build step, or the builder refuses with "cannot write". Under Git Bash on Windows, give `BRIDGE_MCP_DATA` as `E:/...` rather than `$PWD`'s `/e/...`, and set `MSYS_NO_PATHCONV=1` so the container paths `/data/...` are not rewritten into Windows paths.
+`scripts/mcp_stdio.sh` wraps the compose command, because the harness would read compose's own flags as its options; the evaluation file comes first because `-e` takes every argument after it. Pass `-m`: the harness's default model is old.
 
-`scripts/mcp_stdio.sh` wraps the compose command, because the harness would read compose's own flags as its options; the evaluation file comes first because `-e` takes every argument after it. The fixture index is git-ignored. Pass `-m`: the harness's default model is old. The evaluation has not been run with an LLM as part of this repository's checks.
+On Linux the fixture directory must be writable by container UID 65532 for the build step, or the builder refuses with "cannot write". Under Git Bash on Windows, give `BRIDGE_MCP_DATA` as `E:/...` rather than `$PWD`'s `/e/...`, and set `MSYS_NO_PATHCONV=1` for the build step so the container paths `/data/...` are not rewritten into Windows paths; the runner sets it for the server itself. The fixture index is git-ignored. The latest recorded run is in [the testing notes](testing.md#llm-evaluation-informational).
 
 ## Configuration
 
