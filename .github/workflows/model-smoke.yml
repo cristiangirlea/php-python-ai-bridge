@@ -2,6 +2,22 @@ name: Real model smoke tests
 
 on:
   workflow_dispatch:
+  # Weekly, so a change upstream (a pinned file removed, a wheel yanked) is noticed without a PR.
+  # GitHub runs schedules on the default branch only and pauses them after 60 days without commits.
+  schedule:
+    - cron: "17 6 * * 1"
+  # Any change that can alter model acquisition or inference. Not a required check: it downloads
+  # about 215 MB and needs the network, which the deterministic gate deliberately does not.
+  pull_request:
+    paths:
+      - scripts/fetch_model.py
+      - requirements-model.txt
+      - requirements-model.lock
+      - worker/ai_bridge/tasks.py
+      - tests/php/model.php
+      - tests/model_integration.py
+      - docker/compose.yaml
+      - .github/workflows/model-smoke.yml
 
 permissions:
   contents: read

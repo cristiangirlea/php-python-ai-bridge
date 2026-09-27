@@ -189,13 +189,22 @@ services:
       - -ec
       - 'python -m pip download --require-hashes --only-binary=:all: --dest /cache/wheels -r requirements-mcp.lock'
 
-  # A stdio MCP server for the host's agent: `docker compose -f docker/compose.yaml run --rm -i mcp`.
+  # The MCP server's own worker. An agent can be prompt-injected into filling a worker's capacity, so the
+  # MCP server never shares one with an application or with the FrankenPHP demo.
+  mcp-worker:
+    <<: *python
+    profiles: [mcp]
+    networks: [isolated]
+    command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
+
+  # A stdio MCP server for the host's agent: `docker compose -f docker/compose.yaml run --rm -i -T mcp`.
   # It reads files only under /data, which is the checkout unless BRIDGE_MCP_DATA holds an absolute path.
+  # The pinned wheels are installed into a tmpfs on every start, before the first JSON-RPC byte.
   mcp:
     <<: *python
     profiles: [mcp]
     networks: [isolated]
-    depends_on: [worker]
+    depends_on: [mcp-worker]
     stdin_open: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
@@ -207,7 +216,7 @@ services:
     environment:
       <<: *python-env
       PYTHONPATH: /work/mcp_server:/deps
-      BRIDGE_URL: http://worker:8090
+      BRIDGE_URL: http://mcp-worker:8090
       BRIDGE_MCP_ROOT: /data
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_CACHE_DIR: "1"
