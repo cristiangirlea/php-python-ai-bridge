@@ -51,14 +51,16 @@ The tests prove the tools keep their contract; whether an agent uses them well i
 
 CI does not run an LLM. `tests/mcp/test_evaluation.py` proves every answer is reachable through the tools by making the calls a capable agent would make, including the two-step chain, and that no question contains its own answer.
 
-To run it with an LLM, build the fixture index once, then point a harness at the stdio server. With the harness in Anthropic's MCP builder skill (`scripts/evaluation.py`, which needs `anthropic` and `mcp` and an API key), and an absolute path to the fixtures:
+To run it with an LLM, build the fixture index once, then point a harness at the stdio server. With the harness in Anthropic's MCP builder skill (its `scripts/evaluation.py`, which needs `anthropic` and `mcp` and an API key), run from the repository root with an absolute path to the fixtures:
 
 ```sh
 export BRIDGE_MCP_DATA="$PWD/tests/mcp/fixtures/eval"
 docker compose -f docker/compose.yaml run --rm mcp-index /data/notes --out /data/index --chunk-chars 300 --overlap-chars 60
-python evaluation.py tests/mcp/evaluation.xml -t stdio -m <current model> -c sh -a scripts/mcp_stdio.sh \
-  -e BRIDGE_TOKEN="$BRIDGE_TOKEN" BRIDGE_MCP_DATA="$BRIDGE_MCP_DATA"
+python /path/to/mcp-builder/scripts/evaluation.py tests/mcp/evaluation.xml -t stdio -m <current model> \
+  -c sh -a scripts/mcp_stdio.sh -e BRIDGE_TOKEN="$BRIDGE_TOKEN" BRIDGE_MCP_DATA="$BRIDGE_MCP_DATA"
 ```
+
+On Linux the fixture directory must be writable by container UID 65532 for the build step, or the builder refuses with "cannot write". Under Git Bash on Windows, give `BRIDGE_MCP_DATA` as `E:/...` rather than `$PWD`'s `/e/...`, and set `MSYS_NO_PATHCONV=1` so the container paths `/data/...` are not rewritten into Windows paths.
 
 `scripts/mcp_stdio.sh` wraps the compose command, because the harness would read compose's own flags as its options; the evaluation file comes first because `-e` takes every argument after it. The fixture index is git-ignored. Pass `-m`: the harness's default model is old. The evaluation has not been run with an LLM as part of this repository's checks.
 
