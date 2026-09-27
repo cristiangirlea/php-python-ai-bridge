@@ -302,6 +302,18 @@ class BuildTests(unittest.TestCase):
                     self.assertIn("--timeout-s", completed.stderr)
                 self.assertNotIn(TOKEN, completed.stdout + completed.stderr)
 
+    def test_an_unwritable_output_is_a_refusal_not_a_traceback(self):
+        locked = self.data / "locked"
+        locked.mkdir()
+        locked.chmod(0o555)
+        try:
+            completed = self.cli(str(self.data / "a.txt"), "--out", str(locked / "idx"))
+        finally:
+            locked.chmod(0o755)
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn("bridge_mcp.index: cannot write", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
     def test_the_builder_does_not_import_the_mcp_sdk(self):
         completed = subprocess.run([sys.executable, "-c", "import sys, bridge_mcp.index; print(sorted(m for m in sys.modules "
                                     "if m == 'mcp' or m.startswith(('mcp.', 'anyio', 'pydantic'))))"],

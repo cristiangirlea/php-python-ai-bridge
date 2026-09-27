@@ -43,7 +43,7 @@ PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4
 | Layer | Scope and counting |
 | --- | --- |
 | Python worker | 72 tests: lifecycle, validation and HTTP, process crashes, cancellation, timeouts, retention, allocation/exit races, redaction rules, NER aggregation and batched cross-encoder scoring driven by stubs, progress bounds, and the model-name table every result reports from |
-| MCP server | 60 tests, offline with hash-pinned wheels: the protocol client against an in-process worker, every tool through the SDK's in-memory client with test tasks enabled, the entry point as a subprocess, result validators on synthetic data, the index builder (chunking, the format and each corruption it refuses, building against the worker, caching, its command line) and `bridge_search` (the model gate, path confinement, reloads, rerank on and off), a check that the server's model names match the worker's, and a check that every timing claim in a tool description is a measured median |
+| MCP server | 65 tests, offline with hash-pinned wheels: the protocol client against an in-process worker, every tool through the SDK's in-memory client with test tasks enabled, the entry point as a subprocess, result validators on synthetic data, the index builder (chunking, the format and each corruption it refuses, building against the worker, caching, its command line) `bridge_search` (the model gate, path confinement, reloads, rerank on and off), the reachability of every answer in the LLM evaluation, a check that the server's model names match the worker's, and a check that every timing claim in a tool description is a measured median |
 | PHP contracts + HTTP | 134 checks per PHP version; this **includes** the 101 contract checks, not 134 + 101 |
 | FrankenPHP | 12 jobs submitted by six concurrent test threads through a reused PHP worker, a 512-document `top_k` request, embedding and redaction round trips, and invalid-input, missing-job and multibyte boundary checks |
 | PHP syntax | All 12 PHP source/example/test files |
@@ -64,7 +64,7 @@ The original prototype was not entirely developed with TDD. Review corrections u
 - No fresh consumer Composer-install smoke test or Packagist release yet; repository examples use a small local autoloader.
 - No sustained load/soak benchmark, throughput claim, p95/p99 latency, warm-model latency, measured memory-per-job limit or CPU cost per inference; the only timing figures are the cold-job medians below.
 - No representative ranking-quality evaluation (for example NDCG/MRR), multilingual accuracy evaluation, measured NER precision/recall or GPU benchmark.
-- No evaluation of whether an LLM host uses the MCP tools well; the MCP tests prove the contract, the confinement and the honesty of descriptions, not agent behaviour.
+- No run of `tests/mcp/evaluation.xml` with an LLM; the MCP tests prove the contract, the confinement, the honesty of descriptions and that every evaluation answer is reachable through the tools, not how well a given model finds those calls.
 - No verified native Windows/macOS service execution or ARM runtime; Docker tests target Linux amd64/Python 3.12.
 - No durable delivery, restart recovery, automatic retry, idempotency or multi-instance result routing. Jobs and results live in memory.
 
