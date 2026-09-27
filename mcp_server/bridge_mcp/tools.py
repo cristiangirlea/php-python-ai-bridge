@@ -50,16 +50,18 @@ BACKENDS = {
     },
 }
 
-# Worker time from submission to a terminal state: medians of five cold jobs on one CPU, measured
-# 2026-09-27 on a GitHub-hosted runner. The table and how to reproduce it are in docs/testing.md.
-_COLD = "median of five cold jobs on one CPU, the model loaded afresh for each; docs/testing.md"
+# Worker time from submission to a terminal state: the p50 of five cold jobs on one CPU, as the range between
+# two GitHub-hosted runners measured 2026-09-27 (docs/testing.md's "Measured latency" table and the earlier run
+# it quotes): the lexical rows, and on onnx the 32- and 512-document rerank rows, the embed row and the redact
+# row. The same figures appear in docs/mcp.md's tool table; a re-measurement updates all three places.
+_COLD = "median of five cold jobs on one CPU on two runners, the model loaded afresh for each; docs/testing.md"
 TIMING = {
-    "lexical": {task: "about 0.4 s of worker time (median of five cold jobs on one CPU, almost all of it process "
-                      "start-up; docs/testing.md)" for task in ("rerank", "embed", "redact")},
+    "lexical": {task: "about 0.4 s of worker time (median of five cold jobs on one CPU on two runners, almost all "
+                      "of it process start-up; docs/testing.md)" for task in ("rerank", "embed", "redact")},
     "onnx": {
-        "rerank": f"about 0.9 s of worker time for 32 documents and 1.2 s for 512 ({_COLD})",
-        "embed": f"about 1.3 s of worker time for 32 texts ({_COLD})",
-        "redact": f"about 2.4 s of worker time for 2000 characters with all three entity kinds ({_COLD})",
+        "rerank": f"0.7-0.9 s of worker time for 32 documents and 1.0-1.2 s for 512 ({_COLD})",
+        "embed": f"1.1-1.3 s of worker time for 32 texts ({_COLD})",
+        "redact": f"1.6-2.4 s of worker time for 2000 characters with all three entity kinds ({_COLD})",
     },
 }
 
