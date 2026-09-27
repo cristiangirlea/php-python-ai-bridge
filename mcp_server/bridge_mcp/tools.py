@@ -50,6 +50,19 @@ BACKENDS = {
     },
 }
 
+# Worker time from submission to a terminal state: medians of five cold jobs on one CPU, measured
+# 2026-09-27 on a GitHub-hosted runner. The table and how to reproduce it are in docs/testing.md.
+_COLD = "median of five cold jobs on one CPU, the model loaded afresh for each; docs/testing.md"
+TIMING = {
+    "lexical": {task: "about 0.4 s of worker time (median of five cold jobs on one CPU, almost all of it process "
+                      "start-up; docs/testing.md)" for task in ("rerank", "embed", "redact")},
+    "onnx": {
+        "rerank": f"about 0.9 s of worker time for 32 documents and 1.2 s for 512 ({_COLD})",
+        "embed": f"about 1.3 s of worker time for 32 texts ({_COLD})",
+        "redact": f"about 2.4 s of worker time for 2000 characters with all three entity kinds ({_COLD})",
+    },
+}
+
 INSTRUCTIONS = """Tools for a private PHP-Python AI bridge worker. Every call submits a job over the bridge's HTTP
 protocol, polls it to completion and returns the finished result; the worker runs each job in its own process.
 
@@ -245,8 +258,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     described = {task: f"{name}: {explanation}" for task, (name, explanation) in BACKENDS[backend].items()}
     names = {task: name for task, (name, _) in BACKENDS[backend].items()}
     seconds = timeout_ms / 1000
-    timing = ("well under a second" if backend == "lexical"
-              else "one to ten seconds, as the model is loaded afresh for every call")
+    timing = TIMING[backend]
     mcp = MCPServer("bridge_mcp", title="PHP-Python AI bridge", version="0.1",
                     instructions=INSTRUCTIONS.format(backend=backend, **described))
 
@@ -280,7 +292,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
                     f"for a real candidate set write them to a file under the configured root and pass "
                     f"documents_path (a JSON array of strings, or one document per line, up to "
                     f"{BY_REFERENCE_DOCUMENTS}). If you have already read the documents, rank them yourself: this "
-                    f"tool earns its place on text you have not read. Takes {timing}. Backend: {described['rerank']}",
+                    f"tool earns its place on text you have not read. Takes {timing['rerank']}. Backend: {described['rerank']}",
         annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
     )
     async def bridge_rerank(
@@ -312,7 +324,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         name="bridge_embed_similarity", title="Semantic similarity between texts",
         description=f"Embed 2 to {MAX_TEXTS} texts and return their cosine similarity matrix and the most similar "
                     f"pairs, for grouping or deduplicating short texts. Vectors themselves are never returned: build "
-                    f"an index with the HTTP protocol from a script instead. Takes {timing}. "
+                    f"an index with the HTTP protocol from a script instead. Takes {timing['embed']}. "
                     f"Backend: {described['embed']}",
         annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
     )
@@ -333,7 +345,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         name="bridge_redact", title="Mask personal data in a text",
         description=f"Replace personal data in one text with [LABEL] placeholders and list every span found with "
                     f"the rule or model that found it. This protects whatever you send the text to next; the text "
-                    f"itself is already in this conversation. Assistive, not a compliance control. Takes {timing}. "
+                    f"itself is already in this conversation. Assistive, not a compliance control. Takes {timing['redact']}. "
                     f"Backend: {described['redact']}",
         annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
     )
