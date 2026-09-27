@@ -125,7 +125,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
 
 Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only in the test service with `BRIDGE_TEST_TASKS=1`.
 
-CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. The stable `deterministic` check succeeds only if every PHP matrix job and the offline MCP server suite succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table that never gates the run.
+CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. The stable `deterministic` check succeeds only if every PHP matrix job and the offline MCP server suite succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
 
 ## Important limits
 

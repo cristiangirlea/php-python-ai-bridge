@@ -72,22 +72,24 @@ Configured resources are **limits, not measurements**: ordinary services, includ
 
 ## Measured latency (informational)
 
-Measured 2026-09-27 UTC by the model smoke workflow on this repository's pull request #8 (GitHub's pull-request merge ref `807e179`, branch head `41393c0`), runner GitHub-hosted ubuntu-latest, CPU AMD EPYC 7763 64-Core Processor. Limits: model-worker cpus=1, mem_limit=1536m, BRIDGE_CONCURRENCY=1; worker cpus=1, mem_limit=512m. N=5 sequential jobs per row; wall time from `POST /v1/jobs` to the first `GET` showing a terminal state, polled every 0.05 s, so figures carry up to 0.05 s of polling.
+Measured 2026-09-27 UTC by the model smoke workflow on pull request #8 at branch head `c3c2706` (GitHub's pull-request merge ref `53e1f6f`), runner GitHub-hosted ubuntu-latest, CPU AMD EPYC 9V74 80-Core Processor. Limits: model-worker cpus=1, mem_limit=1536m, BRIDGE_CONCURRENCY=1; worker cpus=1, mem_limit=512m. N=5 sequential jobs per row; wall time from `POST /v1/jobs` to the first `GET` showing a terminal state, polled every 0.05 s, so figures carry up to 0.05 s of polling.
 
 | Backend | Case | N | min s | p50 s | max s | Note |
 | --- | --- | --- | --- | --- | --- | --- |
-| onnx | rerank 32 documents of ~40 words | 5 | 0.83 | 0.85 | 0.85 | cold; 1 batch of 32 |
-| onnx | rerank 512 documents of ~40 words | 5 | 1.20 | 1.20 | 1.25 | cold; 16 batches of 32 |
-| onnx | rerank 24 documents of 8000 characters | 5 | 1.15 | 1.15 | 1.20 | cold; 1 batch of 24 at the 512-token limit |
-| onnx | embed 32 texts of ~40 words | 5 | 1.30 | 1.30 | 1.31 | cold; 1 forward pass |
-| onnx | redact 2000 characters, PER+ORG+LOC | 5 | 2.38 | 2.40 | 2.40 | cold; rules plus windows of 512 |
-| lexical | rerank 32 documents of ~40 words | 5 | 0.41 | 0.41 | 0.60 | cold process, no model |
-| lexical | rerank 512 documents of ~40 words | 5 | 0.42 | 0.42 | 0.43 | cold process, no model |
-| lexical | rerank 24 documents of 8000 characters | 5 | 0.42 | 0.43 | 0.43 | cold process, no model |
-| lexical | embed 32 texts of ~40 words | 5 | 0.42 | 0.42 | 0.42 | cold process, no model |
-| lexical | redact 2000 characters, PER+ORG+LOC | 5 | 0.41 | 0.41 | 0.41 | cold process, no model |
+| onnx | rerank 32 documents of ~40 words | 5 | 0.70 | 0.74 | 0.75 | cold; 1 batch of 32 |
+| onnx | rerank 512 documents of ~40 words | 5 | 1.00 | 1.00 | 1.01 | cold; 16 batches of 32 |
+| onnx | rerank 32 documents of 6000 characters | 5 | 1.05 | 1.10 | 1.10 | cold; 1 full batch of 32 at the 512-token limit, the worst case |
+| onnx | embed 32 texts of ~40 words | 5 | 1.10 | 1.10 | 1.11 | cold; 1 forward pass |
+| onnx | redact 2000 characters, PER+ORG+LOC | 5 | 1.59 | 1.60 | 1.61 | cold; rules plus windows of 512 |
+| lexical | rerank 32 documents of ~40 words | 5 | 0.36 | 0.36 | 0.48 | cold process, no model |
+| lexical | rerank 512 documents of ~40 words | 5 | 0.36 | 0.37 | 0.37 | cold process, no model |
+| lexical | rerank 32 documents of 6000 characters | 5 | 0.37 | 0.37 | 0.37 | cold process, no model |
+| lexical | embed 32 texts of ~40 words | 5 | 0.37 | 0.37 | 0.37 | cold process, no model |
+| lexical | redact 2000 characters, PER+ORG+LOC | 5 | 0.36 | 0.36 | 0.36 | cold process, no model |
 
-Every job is cold by design: a fresh process imports its dependencies and, on the ONNX backend, loads the model before any work. The lexical rows are therefore the cost of that process alone, about 0.4 s, and most of each ONNX row is start-up and model loading rather than scoring: 512 documents take 0.35 s more than 32. There is no measurement from before batched reranking, because the benchmark was added with it, so these figures do not state a speed-up. They are worker time only; the PHP client, FrankenPHP and the MCP server add their own polling and HTTP overhead. Shared runners vary by tens of percent between runs, and the benchmark asserts correctness, never speed.
+The CPU a runner gets matters more than run-to-run noise. An earlier run on the same pull request, at `41393c0` on an AMD EPYC 7763, measured ONNX medians 15-50% higher: 0.85 s for 32 documents, 1.20 s for 512, 1.30 s for embedding and 2.40 s for redaction, and 0.41-0.43 s on the lexical rows. Its memory row used 24 documents of 8000 characters, not the worst case above. The ranges quoted in the MCP tool descriptions span both runs.
+
+Every job is cold by design: a fresh process imports its dependencies and, on the ONNX backend, loads the model before any work. The lexical rows are therefore the cost of that process alone, about 0.4 s, and most of each ONNX row is start-up and model loading rather than scoring: 512 documents take 0.26 s more than 32, and a full batch at the 512-token limit fits the model worker's memory limit. There is no measurement from before batched reranking, because the benchmark was added with it, so these figures do not state a speed-up. They are worker time only; the PHP client, FrankenPHP and the MCP server add their own polling and HTTP overhead. The benchmark asserts that every job succeeds with progress ending on the total, and a failure fails the smoke run; it asserts nothing about speed.
 
 Every model smoke run prints a fresh table to its job summary. To reproduce locally after acquiring the models:
 
