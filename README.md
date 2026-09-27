@@ -6,7 +6,7 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 
 ## What is implemented
 
-- PHP 8.2–8.5 client using cURL, with validated job objects and typed rerank, embedding and redaction results. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result.
+- PHP 8.2–8.5 client using cURL, with validated job objects and typed rerank, embedding and redaction results. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result; the ONNX backend scores them 32 pairs per forward pass.
 - Python 3.12 service with an explicit task allowlist and a separate process per task.
 - Text embedding: up to 32 texts per job return unit-length 384-dimensional vectors for an index the caller owns.
 - Redaction: checksum and pattern rules for card numbers, IBANs, emails, IPv4 addresses and phone numbers on every backend, plus named-entity masking with int8 `bert-base-NER` on the ONNX profile. Assistive, not a compliance control.
@@ -67,7 +67,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps model-test
 docker compose -f docker/compose.yaml run --rm --no-deps model-integration
 ```
 
-`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark. Model scores are relevance logits, not probabilities.
+`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured cold-job medians are in [the testing guide](docs/testing.md#measured-latency-informational). Model scores are relevance logits, not probabilities.
 
 Stop this project's containers when finished:
 
@@ -125,7 +125,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
 
 Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only in the test service with `BRIDGE_TEST_TASKS=1`.
 
-CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. The stable `deterministic` check succeeds only if every PHP matrix job and the offline MCP server suite succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, and it does not use paid APIs or GPUs.
+CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. The stable `deterministic` check succeeds only if every PHP matrix job and the offline MCP server suite succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table that never gates the run.
 
 ## Important limits
 
@@ -133,7 +133,7 @@ CI runs deterministic tests for pushes and pull requests across PHP 8.2–8.5, t
 - **Trusted services only:** one bearer token authorizes all jobs. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
 - **Private HTTP transport:** deploy behind an authenticated TLS boundary for cross-host use. The sample Python HTTP server is not an internet-facing production server.
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
-- **Cold model per job:** this prototype favors simple crash/cancellation containment over model pooling and throughput. It does not claim GPU support, automatic batching, multi-host scaling or stateful agents.
+- **Cold model per job:** this prototype favors simple crash/cancellation containment over model pooling and throughput. Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no model pooling, and no claim of GPU support, multi-host scaling or stateful agents.
 - **Cancellation cannot undo effects:** registered future tasks must manage their own external side effects. A transport failure during POST has an uncertain submission outcome; the client never retries POST automatically.
 - **No token streaming:** progress is polled by job ID. The MCP server forwards that progress to a host that asks for it; there is no SSE, framework plugin or chat SDK.
 
