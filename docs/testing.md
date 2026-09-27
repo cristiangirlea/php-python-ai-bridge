@@ -38,11 +38,11 @@ CI checks the actual PHP minor before testing so a misconfigured image cannot si
 
 ## What the tests establish
 
-PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4.25 and 8.5.10 with the pinned FrankenPHP 1.12.7 images, and CI has run every layer below on all four branches for every push and pull request since. The counts below were observed locally on 2026-09-27 on the default PHP 8.5.10 image; a local pass does not imply a hosted CI run, so consult the PR's Actions checks for remote results.
+PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4.25 and 8.5.10 with the pinned FrankenPHP 1.12.7 images. For every push and pull request, CI runs the Python worker, PHP contract/HTTP, FrankenPHP and syntax layers below on each of the four branches, and the MCP server layer once in its own job, which does not depend on PHP. The optional ONNX layer runs only on PHP 8.5, weekly, on pull requests that touch the model path, and on demand. The counts below were observed locally on 2026-09-27 on the default PHP 8.5.10 image; a local pass does not imply a hosted CI run, so consult the PR's Actions checks for remote results.
 
 | Layer | Scope and counting |
 | --- | --- |
-| Python worker | 63 tests: lifecycle, validation and HTTP, process crashes, cancellation, timeouts, retention, allocation/exit races, redaction rules, NER aggregation driven by a stub window, progress bounds, and the model-name table every result reports from |
+| Python worker | 64 tests: lifecycle, validation and HTTP, process crashes, cancellation, timeouts, retention, allocation/exit races, redaction rules, NER aggregation driven by a stub window, progress bounds, and the model-name table every result reports from |
 | MCP server | 30 tests, offline with hash-pinned wheels: the protocol client against an in-process worker, every tool through the SDK's in-memory client with test tasks enabled, the entry point as a subprocess, result validators on synthetic data, and a check that the server's model names match the worker's |
 | PHP contracts + HTTP | 134 checks per PHP version; this **includes** the 101 contract checks, not 134 + 101 |
 | FrankenPHP | 12 jobs submitted by six concurrent test threads through a reused PHP worker, a 512-document `top_k` request, embedding and redaction round trips, and invalid-input, missing-job and multibyte boundary checks |
@@ -51,7 +51,7 @@ PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4
 
 Test durations reported by the runners are suite durations, not inference latency or a reproducible performance benchmark.
 
-The optional real-model smoke tests run on the default PHP 8.5 image with cached dependencies and no internet access during inference. They were not rerun on every PHP minor. Three PHP documentation snippets passed syntax validation and the fenced JSON examples parsed successfully; that is not a framework boot test.
+The optional real-model smoke tests run on the default PHP 8.5 image with cached dependencies and no internet access during inference. They were not rerun on every PHP minor. On 2026-09-17, three PHP documentation snippets passed syntax validation and the fenced JSON examples parsed successfully; that check has not been repeated since, and it is not a framework boot test.
 
 The default backend is deterministic word overlap (`lexical-demo-not-a-model`). Passing its tests proves plumbing/lifecycle behavior, not AI quality. The embedding and redaction demos are `hashing-bow-not-a-model` and `rules-only-not-a-model`: the first proves the contract only, while the second runs the real checksum and pattern rules with no model. The optional ONNX checks use the three pinned, hash-verified models (the TinyBERT cross-encoder, MiniLM embeddings and the int8 BERT NER conversion) with local inference. The model workflow runs weekly, on pull requests that touch the model path, and on demand; it is not a required check.
 
