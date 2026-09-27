@@ -117,7 +117,8 @@ class FormatTests(unittest.TestCase):
         self.corrupt(lambda s: self.edit(s, vectors_file="../x"))
         self.corrupt(lambda s: self.edit(s, vectors_file="/etc/hostname"))
         self.corrupt(lambda s: vectors(s).write_bytes(vectors(s).read_bytes()[:-4]))
-        self.corrupt(lambda s: vectors(s).write_bytes(b"\x00" + vectors(s).read_bytes()[1:]))
+        # The last byte of the last value (0.0) flips from 0x00 to 0xff: same size, different content.
+        self.corrupt(lambda s: vectors(s).write_bytes(vectors(s).read_bytes()[:-1] + b"\xff"))
         self.corrupt(lambda s: s.write_text("{not json", encoding="utf-8"))
         self.corrupt(lambda s: self.edit(s, chunks=[{"source": 3, "start": 0, "end": 1, "text": "t"}] * 2))
         self.corrupt(lambda s: self.edit(s, chunks=[{"source": 0, "start": 2, "end": 1, "text": "t"}] * 2))
