@@ -68,6 +68,8 @@ python /path/to/mcp-builder/scripts/evaluation.py tests/mcp/evaluation.xml -t st
   -c sh -a scripts/mcp_stdio.sh -e BRIDGE_TOKEN="$BRIDGE_TOKEN" BRIDGE_MCP_DATA="$BRIDGE_MCP_DATA"
 ```
 
+With `--backend onnx`, the runner starts `mcp-model` instead, and refuses an index the other model built, naming the `mcp-model-index` command to rebuild it. A question's first answer is the demo worker's, and the one the builder's harness reads; a later `<answer backend="onnx">` replaces it for the models. Only the question about the redaction backend has one, since with the models that tool runs a model. An index is required only when a question names `index_path`. Questions that need meaning rather than shared words are not written yet.
+
 `scripts/mcp_stdio.sh` wraps the compose command, because the harness would read compose's own flags as its options; the evaluation file comes first because `-e` takes every argument after it. Pass `-m`: the harness's default model is old.
 
 On Linux the fixture directory must be writable by container UID 65532 for the build step, or the builder refuses with "cannot write". Under Git Bash on Windows, give `BRIDGE_MCP_DATA` as `E:/...` rather than `$PWD`'s `/e/...`, and set `MSYS_NO_PATHCONV=1` for the build step so the container paths `/data/...` are not rewritten into Windows paths. The fixture index is git-ignored. The latest recorded run is in [the testing notes](testing.md#llm-evaluation-informational).
@@ -93,7 +95,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher   # once: h
 docker compose -f docker/compose.yaml run --rm -i -T mcp
 ```
 
-Compose starts a dedicated `mcp-worker` alongside it, never the demo `worker` or one serving an application, and the server waits up to `BRIDGE_MCP_STARTUP_S` (default 10) for it to answer before giving up. The service installs its hash-pinned wheels into a tmpfs on every start, so the first response takes a few seconds longer than later ones. `run --rm` removes only the `mcp` container when the host ends the session: `mcp-worker` keeps running, with up to 300 seconds of retained results in memory, and later sessions reuse it. Stop it with `docker compose -f docker/compose.yaml --profile mcp down`. `/data` inside the container is the checkout by default; set `BRIDGE_MCP_DATA` to the **absolute** path of another directory to mount it there read-only (a relative value resolves against `docker/`, not your shell). A host that launches MCP servers from a JSON configuration would use, with the token supplied from its environment:
+Compose starts a dedicated `mcp-worker` alongside it, never the demo `worker` or one serving an application, and holds the server until the worker passes its health check; the server then waits up to `BRIDGE_MCP_STARTUP_S` (default 10) more for it to answer before giving up. The service installs its hash-pinned wheels into a tmpfs on every start, so the first response takes a few seconds longer than later ones. `run --rm` removes only the `mcp` container when the host ends the session: `mcp-worker` keeps running, with up to 300 seconds of retained results in memory, and later sessions reuse it. Stop it with `docker compose -f docker/compose.yaml --profile mcp down`. `/data` inside the container is the checkout by default; set `BRIDGE_MCP_DATA` to the **absolute** path of another directory to mount it there read-only (a relative value resolves against `docker/`, not your shell). A host that launches MCP servers from a JSON configuration would use, with the token supplied from its environment:
 
 ```json
 {"mcpServers": {"bridge": {
@@ -104,6 +106,18 @@ Compose starts a dedicated `mcp-worker` alongside it, never the demo `worker` or
 ```
 
 The server writes only JSON-RPC to stdout; everything else goes to stderr.
+
+### With the models
+
+The `mcp-model` service is the same server in front of the pinned ONNX models instead of the demo backend. Its tool descriptions then name the real models, because the server reads the backend from its worker. It needs the models and the model wheels once, from the network-enabled fetch phase, then runs offline:
+
+```sh
+docker compose -f docker/compose.yaml run --rm --no-deps fetcher        # once: models and model wheels, hash-checked
+docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher    # once: the MCP server's wheels
+docker compose -f docker/compose.yaml run --rm -i -T mcp-model
+```
+
+`mcp-model-worker` is its own worker, for the same reason as `mcp-worker`: one CPU, 1536 MiB and one job at a time, like the other model worker. It installs the model wheels into a tmpfs on every start, and compose holds the server until the worker passes the same health check as `mcp-worker`, for up to about five minutes, so the first session starts more slowly than later ones. Build indexes for it with `mcp-model-index`, which works like `mcp-index`; each server refuses an index that the other worker's embedding model built. For hosts that take a single command, `scripts/mcp_stdio_onnx.sh` starts `mcp-model` as `scripts/mcp_stdio.sh` starts `mcp`. Each launcher names its service, rather than reading it from the environment, so a variable cannot point a host at a service with network access. Stop both with `docker compose -f docker/compose.yaml --profile mcp-model down`.
 
 ## Trust model
 

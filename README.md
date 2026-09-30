@@ -13,7 +13,7 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 - Bounded concurrency, queue/result capacity, retention, request sizes and execution deadlines.
 - Cancellation, progress polling, crash detection and generic errors that omit internal exception text.
 - A FrankenPHP example that submits work and returns a job ID immediately.
-- A stdio MCP server with one tool per task, a second client of the same protocol beside the PHP client, plus an index builder over the protocol and a `bridge_search` tool that searches what it built, returning offsets and snippets rather than vectors, and a ten-question evaluation for LLM hosts with a runner for the Claude Code CLI; see [the MCP guide](docs/mcp.md).
+- A stdio MCP server with one tool per task, a second client of the same protocol beside the PHP client, plus an index builder over the protocol and a `bridge_search` tool that searches what it built, returning offsets and snippets rather than vectors, a compose service that puts the pinned ONNX models behind it, and a ten-question evaluation for LLM hosts with a runner for the Claude Code CLI; see [the MCP guide](docs/mcp.md).
 - CPU inference with `cross-encoder/ms-marco-TinyBERT-L2-v2`, `sentence-transformers/all-MiniLM-L6-v2` and int8 `dslim/bert-base-NER` through ONNX Runtime, using pinned model files and wheel hashes.
 
 The default backends are **`lexical-demo-not-a-model`** for reranking and **`hashing-bow-not-a-model`** for embedding, deterministic word overlap and feature hashing for testing the integration, and **`rules-only-not-a-model`** for redaction, which runs the real checksum and pattern rules but no model. None of them is described as AI. Enable the optional model profile below for real inference.

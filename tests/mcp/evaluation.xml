@@ -4,7 +4,8 @@
    compose mcp service uses, with BRIDGE_MCP_DATA set to the absolute path of tests/mcp/fixtures/eval and the
    index built into its index directory (see docs/mcp.md). The corpus is invented, so answers cannot come from
    memory.
-   tests/mcp/test_evaluation.py proves every answer is reachable through the tools.
+   tests/mcp/test_evaluation.py proves every answer is reachable through the tools. A pair's first answer is the
+   demo worker's; a later one naming a backend replaces it for that backend in scripts/mcp_evaluate.py.
    -->
    <qa_pair>
       <question>An index of the Gull Rock notes is available at index_path "index". After the lighthouse's restoration, what colour was the glass fitted in the lantern room? Answer with one lowercase word.</question>
@@ -37,6 +38,7 @@
    <qa_pair>
       <question>Does this server's redaction tool run a machine-learning model, or does it apply rules only? Answer with the single word "model" or "rules".</question>
       <answer>rules</answer>
+      <answer backend="onnx">model</answer>
    </qa_pair>
    <qa_pair>
       <question>Using the Gull Rock notes index at index_path "index", in which year did the light shine for the first time? Answer with a four-digit year.</question>
