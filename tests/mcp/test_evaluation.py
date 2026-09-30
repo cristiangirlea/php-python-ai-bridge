@@ -21,6 +21,7 @@ from ai_bridge.server import BridgeServer
 from bridge_mcp import index
 from bridge_mcp.protocol import Bridge
 from bridge_mcp.tools import build_server
+from semantic_reach import found, snippets
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
 HERE = Path(__file__).parent
@@ -31,13 +32,25 @@ CHUNK_CHARS, OVERLAP_CHARS = 300, 60
 BUILD_COMMAND = f"mcp-index /data/notes --out /data/index --chunk-chars {CHUNK_CHARS} --overlap-chars {OVERLAP_CHARS}"
 
 
-def snippets(body):
-    return " ".join(hit["snippet"] for hit in body["results"])
+def start_demo(cls):
+    """The demo worker in process, a copy of the fixtures with an index built the documented way, and a server."""
+    cls.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=64))
+    cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+    cls.thread.start()
+    cls.bridge = Bridge("http://127.0.0.1:%d" % cls.server.server_address[1], TOKEN)
+    cls.temp = tempfile.TemporaryDirectory()
+    cls.root = Path(cls.temp.name) / "eval"
+    shutil.copytree(FIXTURES, cls.root)
+    # The same command the docs give the operator, minus the container: small chunks, so a snippet holds a fact.
+    index.build(cls.bridge, [cls.root / "notes"], cls.root / "index", chars=CHUNK_CHARS, overlap=OVERLAP_CHARS)
+    cls.mcp = build_server(cls.bridge, backend="lexical", root=cls.root, timeout_ms=10000)
 
 
-def found(answer):
-    """For search questions: the answer is reachable if a returned snippet contains it."""
-    return lambda body: answer if answer in snippets(body) else None
+def stop_demo(cls):
+    cls.server.shutdown()
+    cls.thread.join()
+    cls.server.server_close()
+    cls.temp.cleanup()
 
 
 # One entry per question, in file order: the tool calls an agent needs, how the answer is read from the last
@@ -82,23 +95,11 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
     def setUpClass(cls):
         cls.pairs = [(pair.findtext("question"), pair.findtext("answer"))
                      for pair in ElementTree.parse(EVALUATION).getroot().iter("qa_pair")]
-        cls.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=64))
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-        cls.bridge = Bridge("http://127.0.0.1:%d" % cls.server.server_address[1], TOKEN)
-        cls.temp = tempfile.TemporaryDirectory()
-        cls.root = Path(cls.temp.name) / "eval"
-        shutil.copytree(FIXTURES, cls.root)
-        # The same command the docs give the operator, minus the container: small chunks, so a snippet holds a fact.
-        index.build(cls.bridge, [cls.root / "notes"], cls.root / "index", chars=CHUNK_CHARS, overlap=OVERLAP_CHARS)
-        cls.mcp = build_server(cls.bridge, backend="lexical", root=cls.root, timeout_ms=10000)
+        start_demo(cls)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.thread.join()
-        cls.server.server_close()
-        cls.temp.cleanup()
+        stop_demo(cls)
 
     def test_the_file_holds_ten_distinct_answerable_questions(self):
         self.assertEqual(len(self.pairs), 10)
