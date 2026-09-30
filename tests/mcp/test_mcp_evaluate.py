@@ -281,7 +281,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(written["runs"]["sonnet"]), 10)
 
     def test_a_wrong_answer_exits_one_and_still_writes_the_record(self):
-        code, _, _ = self.run_main(lambda n, expected: fake_record(expected, "wrong" if n == 3 else None),
+        code, _, _ = self.run_main(lambda n, expected: fake_record(expected, "wrong" if expected == "Merrow" else None),
                                    "--out", str(self.out))
         self.assertEqual(code, 1)
         self.assertEqual(sum(r["score"] for r in json.loads(self.out.read_text(encoding="utf-8"))["runs"]["sonnet"]), 9)
