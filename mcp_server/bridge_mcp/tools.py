@@ -3,6 +3,7 @@ the worker, and the test-only tasks cannot appear whatever BRIDGE_TEST_TASKS say
 
 import json
 import math
+import random
 import re
 import time
 from pathlib import Path
@@ -161,7 +162,6 @@ class Redaction(TypedDict):
 def _explain(error: BridgeError) -> str:
     hints = {
         "wait_timeout": "The job did not finish within the tool's deadline and was cancelled; try fewer documents.",
-        "capacity_exceeded": "The worker is at capacity (HTTP 429); retry shortly.",
         "invalid_request": "The worker rejected the request as out of contract (HTTP 400).",
         "unauthorized": "The worker did not accept BRIDGE_TOKEN (HTTP 401).",
         "transport_error": "Could not reach the worker at BRIDGE_URL; is it running on the same network?",
@@ -358,15 +358,16 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     mcp = MCPServer("bridge_mcp", title="PHP-Python AI bridge", version="0.1",
                     instructions=INSTRUCTIONS.format(backend=backend, **described))
 
-    async def run(task: str, payload: dict, ctx: Context) -> dict:
+    async def run(task: str, payload: dict, ctx: Context, deadline: float | None = None) -> dict:
+        """Run one job within the call's time budget; a tool that runs several jobs passes one deadline to all."""
         def on_progress(completed: int, total: int) -> None:
             # The SDK sends nothing when the host gave no progress token, so this is unconditional.
             anyio.from_thread.run(ctx.report_progress, completed, total, f"{task} {completed}/{total}")
 
         # A burst of calls can fill the worker; waiting inside the call's own deadline turns that into a delay rather
         # than an error the agent gives up on. Any other refusal comes back at once.
-        started = time.monotonic()
-        deadline, pause = started + seconds, CAPACITY_PAUSE_S
+        deadline = time.monotonic() + seconds if deadline is None else deadline
+        started, pause = deadline - seconds, CAPACITY_PAUSE_S
         while True:
             remaining = deadline - time.monotonic()
             try:
@@ -375,12 +376,15 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             except BridgeError as error:
                 if error.code != "capacity_exceeded":
                     raise ToolError(_explain(error)) from None
-            # The last retry comes when the final CAPACITY_LAST_S of the call is left for the job itself.
-            wait = min(pause, deadline - time.monotonic() - CAPACITY_LAST_S)
+            # The last retry comes when the final CAPACITY_LAST_S of the call is left for the job itself. The jitter
+            # keeps calls refused together from retrying together.
+            wait = min(pause * random.uniform(0.5, 1.0), deadline - time.monotonic() - CAPACITY_LAST_S)
             if wait <= 0:
                 raise ToolError(f"The worker stayed at capacity (HTTP 429) for the whole call; the tool waited "
                                 f"{time.monotonic() - started:.1f} s of its {seconds:g} s. Finished jobs hold capacity "
                                 f"until the worker's retention expires; try again shortly.")
+            # Nothing is sent to the host meanwhile: MCP logging is deprecated as of the 2026-07-28 specification,
+            # and progress must only increase while each job's own starts at zero.
             await anyio.sleep(wait)
             pause = min(pause * 2, CAPACITY_MAX_PAUSE_S)
 
@@ -503,7 +507,9 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         if loaded.model != names["embed"]:
             raise ToolError(f"The index at {index_path!r} was built with {loaded.model!r}; this worker embeds with "
                             f"{names['embed']!r} (bridge_health reports it). Rebuild the index against this worker.")
-        result = await run("embed", {"texts": [query]}, ctx)
+        # One budget for the whole call: the embed job and the rerank job share the deadline.
+        deadline = time.monotonic() + seconds
+        result = await run("embed", {"texts": [query]}, ctx, deadline)
         query_vector = _vectors(result, 1)[0]
         if (result["model"], result["dimensions"]) != (loaded.model, loaded.dimensions):
             raise ToolError(f"The worker embedded the query with {result['model']!r}, but the index was built with "
@@ -525,7 +531,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             candidates = kept
             texts = [loaded.chunks[number]["text"] for number, _ in candidates]
             wanted_k = min(top_k, len(candidates))
-            reranked = await run("rerank", {"query": query, "documents": texts, "top_k": wanted_k}, ctx)
+            reranked = await run("rerank", {"query": query, "documents": texts, "top_k": wanted_k}, ctx, deadline)
             rerank_model = reranked["model"]
             ordered = [(candidates[item["index"]][0], candidates[item["index"]][1], item["score"])
                        for item in _rankings(reranked, len(texts), wanted_k)]
