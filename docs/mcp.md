@@ -68,7 +68,13 @@ python /path/to/mcp-builder/scripts/evaluation.py tests/mcp/evaluation.xml -t st
   -c sh -a scripts/mcp_stdio.sh -e BRIDGE_TOKEN="$BRIDGE_TOKEN" BRIDGE_MCP_DATA="$BRIDGE_MCP_DATA"
 ```
 
-With `--backend onnx`, the runner starts `mcp-model` instead, and refuses an index the other model built, naming the `mcp-model-index` command to rebuild it. A question's first answer is the demo worker's, and the one the builder's harness reads; a later `<answer backend="onnx">` replaces it for the models. Only the question about the redaction backend has one, since with the models that tool runs a model. An index is required only when a question names `index_path`. Questions that need meaning rather than shared words are not written yet.
+With `--backend onnx`, the runner starts `mcp-model` instead, and refuses an index the other model built, naming the `mcp-model-index` command to rebuild it. A question's first answer is the demo worker's, and the one the builder's harness reads; a later `<answer backend="onnx">` replaces it for the models. Only the question about the redaction backend has one, since with the models that tool runs a model. An index is required only when a question names `index_path`.
+
+`tests/mcp/evaluation-semantic.xml` holds ten questions that need meaning rather than shared words, worded unlike the notes they need: searches, a rerank, a similarity ranking, a person's name to redact, and whether search compares meaning. They are for the models. `tests/mcp_model_probe.py` proves in the model workflow that the models reach every answer, and `tests/mcp/test_semantic_evaluation.py` proves offline that the demo worker's word matching reaches none with the same queries. An agent picks its own queries, though, and one that rewords a search toward the notes' words finds the six search answers with word matching too: the agent supplies the meaning. The rerank, similarity, redaction and backend questions separate the two backends whatever the agent does. The models are small, so these questions were kept only where the models' answer holds; many paraphrases a reader would call equivalent do not surface the answer with them. Build the index with `mcp-model-index` over a copy of the fixtures that also holds `tasks.txt`, then:
+
+```sh
+python scripts/mcp_evaluate.py --backend onnx --evaluation tests/mcp/evaluation-semantic.xml --model sonnet
+```
 
 `scripts/mcp_stdio.sh` wraps the compose command, because the harness would read compose's own flags as its options; the evaluation file comes first because `-e` takes every argument after it. Pass `-m`: the harness's default model is old.
 

@@ -1,0 +1,52 @@
+<evaluation>
+   <!--
+   Ten questions that need meaning rather than shared words, for an LLM host with only this repository's MCP
+   server in front of the pinned models: the compose mcp-model service, with BRIDGE_MCP_DATA set to the absolute
+   path of a directory holding the notes, tasks.txt and an index that mcp-model-index built from the notes as
+   index/ (see docs/mcp.md). The questions are worded unlike the invented notes they need. The answers are the
+   models'; tests/mcp_model_probe.py proves each is reachable with them, and tests/mcp/test_semantic_evaluation.py
+   proves the demo worker's word matching reaches none with the same queries. An agent that rewords its searches
+   toward the notes' words can still find the six search answers on the demo worker; the rerank, similarity,
+   redaction and backend questions separate the two backends whatever the agent does.
+   -->
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index": after the lighthouse was refurbished, what tint was chosen for the new glazing at the top of the tower? Answer with one lowercase word.</question>
+      <answer>amber</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index": once the old window panes were no longer needed, what did the keepers grow under them? Answer with one lowercase word.</question>
+      <answer>seedlings</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index": in which year did they fit the instrument that measures breeze speed? Answer with a four-digit year.</question>
+      <answer>1924</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index": where are the ropemakers located? Give the place name exactly as it is written in the notes.</question>
+      <answer>Wendle Quay</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index": which keeper fixed the horn used in poor visibility? Answer with the surname only.</question>
+      <answer>Merrow</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Using the Gull Rock notes index at index_path "index": how far upriver from the island is the boatyard? Answer with the distance exactly as it is written in the notes.</question>
+      <answer>two miles</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>The file tasks.txt under the server's root lists one maintenance task per line. Rank those lines against the query "grease the gears of the rotating optic mechanism" without reading the file yourself. What is the zero-based index of the best match? Answer with a number.</question>
+      <answer>3</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Compare these three sentences with the similarity tool: A is "The foghorn was broken, so someone fixed it.", B is "A lighthouse attendant repaired the fog signal.", C is "The price of the bread was fixed, so someone paid it." Which two does it rate most similar? Answer with the two letters in alphabetical order and no space.</question>
+      <answer>AB</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Mask the personal data in "Ada Merrow met the inspector at the harbour steps." with the redaction tool. Which placeholder label replaces the person's name? Answer with the label in capital letters and no brackets.</question>
+      <answer>PER</answer>
+   </qa_pair>
+   <qa_pair>
+      <question>Does this server's search tool compare meaning, or does it only match shared words? Answer with the single word "meaning" or "words".</question>
+      <answer>meaning</answer>
+   </qa_pair>
+</evaluation>

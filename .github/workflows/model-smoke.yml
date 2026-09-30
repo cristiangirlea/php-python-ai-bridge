@@ -30,7 +30,10 @@ on:
       - requirements-mcp.lock
       - scripts/mcp_stdio_onnx.sh
       - tests/mcp_model_probe.py
-      - tests/mcp/fixtures/eval/notes/**
+      - tests/mcp/fixtures/eval/**
+      - tests/mcp/semantic_reach.py
+      - tests/mcp/evaluation-semantic.xml
+      - tests/model_cases.py
       - docker/compose.yaml
       - .github/workflows/model-smoke.yml
 
@@ -70,7 +73,7 @@ jobs:
           docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
           export BRIDGE_MCP_DATA="$RUNNER_TEMP/mcp-data"
           mkdir -p "$BRIDGE_MCP_DATA"
-          cp -r tests/mcp/fixtures/eval/notes "$BRIDGE_MCP_DATA/"
+          cp -r tests/mcp/fixtures/eval/notes tests/mcp/fixtures/eval/tasks.txt "$BRIDGE_MCP_DATA/"
           chmod -R a+rwX "$BRIDGE_MCP_DATA"
           docker compose -f docker/compose.yaml run --rm mcp-model-index /data/notes --out /data/index --chunk-chars 300 --overlap-chars 60
           python3 tests/mcp_model_probe.py

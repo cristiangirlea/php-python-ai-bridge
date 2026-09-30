@@ -1,9 +1,10 @@
 """evaluation-semantic.xml asks questions that need meaning rather than shared words.
 
 Each answer must be reachable with the pinned models, which tests/mcp_model_probe.py proves over stdio in the model
-workflow, and with none of the demo worker's word matching, which this proves offline with the calls in
-semantic_reach.SEMANTIC_REACH. So a model that scores on this file used what the models understand, and a run on the
-demo worker shows what word matching misses.
+workflow, and with none of the demo worker's word matching, which this proves offline with the same calls in
+semantic_reach.SEMANTIC_REACH. An agent chooses its own queries, though: one that rewords a search toward the notes'
+words can find the search answers with word matching too, so only the rerank, similarity, redaction and backend
+questions separate the backends for any agent.
 """
 
 import json
