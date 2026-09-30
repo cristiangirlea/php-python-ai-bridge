@@ -138,7 +138,7 @@ services:
     volumes:
       - ..:/work:ro
       - ../.cache:/cache:ro
-    environment:
+    environment: &model-worker-env
       <<: *python-env
       PYTHONPATH: /work/worker:/deps
       BRIDGE_BACKEND: onnx
@@ -220,6 +220,11 @@ services:
     networks: [isolated]
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
     healthcheck: *worker-health
+    environment:
+      <<: *python-env
+      # The MCP server reads each result the moment its job ends, so finished jobs need not hold capacity for the
+      # default five minutes; an agent's burst of calls would otherwise fill the worker.
+      BRIDGE_RETENTION_SECONDS: "30"
 
   # A stdio MCP server for the host's agent: `docker compose -f docker/compose.yaml run --rm -i -T mcp`.
   # It reads files only under /data, which is the checkout unless BRIDGE_MCP_DATA holds an absolute path.
@@ -277,6 +282,9 @@ services:
     <<: *model-worker
     profiles: [mcp-model]
     healthcheck: *worker-health
+    environment:
+      <<: *model-worker-env
+      BRIDGE_RETENTION_SECONDS: "30"  # as for mcp-worker
 
   mcp-model:
     <<: *mcp

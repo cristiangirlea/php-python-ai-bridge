@@ -4,6 +4,7 @@ the worker, and the test-only tasks cannot appear whatever BRIDGE_TEST_TASKS say
 import json
 import math
 import re
+import time
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 
@@ -29,6 +30,9 @@ MAX_TOTAL_CHARACTERS = 200000
 REQUEST_BYTES = 262144 - 4096
 MAX_FILE_BYTES = 4 * 1024 * 1024
 SNIPPET_CHARACTERS = 160
+# A full worker refuses submissions until finished jobs age out of its retention; a tool waits within its own call,
+# pausing this long at first and doubling, and retries for the last time when the last amount of the call remains.
+CAPACITY_PAUSE_S, CAPACITY_MAX_PAUSE_S, CAPACITY_LAST_S = 0.25, 5.0, 1.0
 PAIRS = 10
 MAX_SEARCH_TOP_K = 50
 # bridge_search reranks the best max(4 x top_k, 20) chunks by dot product.
@@ -359,10 +363,26 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             # The SDK sends nothing when the host gave no progress token, so this is unconditional.
             anyio.from_thread.run(ctx.report_progress, completed, total, f"{task} {completed}/{total}")
 
-        try:
-            return await anyio.to_thread.run_sync(lambda: bridge.run(task, payload, seconds, on_progress, 0.1))
-        except BridgeError as error:
-            raise ToolError(_explain(error)) from None
+        # A burst of calls can fill the worker; waiting inside the call's own deadline turns that into a delay rather
+        # than an error the agent gives up on. Any other refusal comes back at once.
+        started = time.monotonic()
+        deadline, pause = started + seconds, CAPACITY_PAUSE_S
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                return await anyio.to_thread.run_sync(
+                    lambda remaining=remaining: bridge.run(task, payload, remaining, on_progress, 0.1))
+            except BridgeError as error:
+                if error.code != "capacity_exceeded":
+                    raise ToolError(_explain(error)) from None
+            # The last retry comes when the final CAPACITY_LAST_S of the call is left for the job itself.
+            wait = min(pause, deadline - time.monotonic() - CAPACITY_LAST_S)
+            if wait <= 0:
+                raise ToolError(f"The worker stayed at capacity (HTTP 429) for the whole call; the tool waited "
+                                f"{time.monotonic() - started:.1f} s of its {seconds:g} s. Finished jobs hold capacity "
+                                f"until the worker's retention expires; try again shortly.")
+            await anyio.sleep(wait)
+            pause = min(pause * 2, CAPACITY_MAX_PAUSE_S)
 
     @mcp.tool(
         name="bridge_health", title="Bridge worker health",
