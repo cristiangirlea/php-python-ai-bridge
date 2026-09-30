@@ -37,7 +37,8 @@ def exchange(messages, wanted):
     """Send every message, then read replies until each wanted id has one; kill the server on timeout."""
     process = subprocess.Popen(["sh", str(LAUNCHER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
                                encoding="utf-8")
-    timer = threading.Timer(TIMEOUT_S, process.kill)
+    expired = threading.Event()
+    timer = threading.Timer(TIMEOUT_S, lambda: (expired.set(), process.kill()))
     timer.start()
     replies = {}
     try:
@@ -51,9 +52,10 @@ def exchange(messages, wanted):
     finally:
         timer.cancel()
         process.stdin.close()
-        process.wait(timeout=60)
+        code = process.wait(timeout=60)
     missing = wanted - replies.keys()
-    assert not missing, f"no reply to {sorted(missing)} within {TIMEOUT_S} s"
+    assert not missing, (f"no reply to {sorted(missing)} within {TIMEOUT_S} s" if expired.is_set()
+                         else f"the server exited with {code} before replying to {sorted(missing)}")
     return replies
 
 

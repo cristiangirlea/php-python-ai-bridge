@@ -65,7 +65,7 @@ jobs:
       - name: Prepare disposable cache
         run: mkdir -p .cache && chmod 777 .cache
       - name: Inspect sandbox configuration
-        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch config
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model config
       - name: Acquire hash-pinned MCP wheels
         run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
       - name: Offline MCP server tests

@@ -5,7 +5,7 @@ MCP servers and the user's own settings are not loaded, and a run whose agent co
 count. Answers are scored by exact match on the last <response> tag, the format of the MCP builder's harness.
 It uses the CLI's own login, so no API key is needed; each question spends that account's usage.
 
-    BRIDGE_TOKEN=... python scripts/mcp_evaluate.py --model sonnet [--model haiku] [--jobs 4] [--out FILE]
+    BRIDGE_TOKEN=... python scripts/mcp_evaluate.py --model sonnet [--model haiku] [--backend onnx] [--out FILE]
 
 Build the fixture index first (docs/mcp.md). The report goes to stdout as Markdown, progress to stderr.
 Exit status: 0 when every answer is right, 1 when any is wrong or a run did not count, 2 on refusal.
@@ -32,6 +32,11 @@ SERVER = "bridge"
 PREFIX = f"mcp__{SERVER}__"
 BUILD = ("docker compose -f docker/compose.yaml run --rm mcp-index /data/notes --out /data/index "
          "--chunk-chars 300 --overlap-chars 60")
+# Per backend: the launcher that starts its MCP service, and the compose service that builds an index for it. Each
+# launcher names one service; nothing in the environment chooses it.
+BACKENDS = {"lexical": ("mcp_stdio.sh", "mcp-index"), "onnx": ("mcp_stdio_onnx.sh", "mcp-model-index")}
+sys.path.insert(0, str(REPO / "worker"))
+from ai_bridge.tasks import MODEL_NAMES  # noqa: E402  (standard library only at import)
 # Set by a Claude Code session for its children; a nested `claude` started with them believes it is inside one.
 NESTING = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 
@@ -50,19 +55,25 @@ def load_pairs(path: Path) -> list:
             for pair in root.iter("qa_pair")]
 
 
-def server_config(repo: Path = REPO) -> dict:
+def server_config(repo: Path = REPO, backend: str = "lexical") -> dict:
     # No env block: the server inherits the environment claude runs in (see child_env), so the token is never
     # written to the configuration file.
     return {"mcpServers": {SERVER: {"type": "stdio", "command": "sh",
-                                    "args": [(repo / "scripts" / "mcp_stdio.sh").as_posix()]}}}
+                                    "args": [(repo / "scripts" / BACKENDS[backend][0]).as_posix()]}}}
 
 
-def child_env(environ, data: Path) -> dict:
+def build_command(backend: str) -> str:
+    return BUILD.replace(" mcp-index ", f" {BACKENDS[backend][1]} ")
+
+
+def child_env(environ, data: Path, backend: str = "lexical") -> dict:
     if not environ.get("BRIDGE_TOKEN"):
         raise ValueError("BRIDGE_TOKEN is not set; the MCP server needs the worker's token")
     env = {key: value for key, value in environ.items() if key not in NESTING}
     env["BRIDGE_MCP_DATA"] = Path(data).resolve().as_posix()  # compose mounts it, and Docker wants it absolute
-    env.setdefault("MCP_TIMEOUT", "180000")  # the mcp container installs its wheels into a tmpfs on every start
+    # The mcp container installs its wheels into a tmpfs on every start; the ONNX worker it waits for installs the
+    # model wheels too, so its first session takes longer.
+    env.setdefault("MCP_TIMEOUT", "300000" if backend == "onnx" else "180000")
     return env
 
 
@@ -181,12 +192,20 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run the MCP evaluation through the Claude Code CLI.")
     parser.add_argument("--model", action="append", required=True,
                         help="a model name or alias the CLI accepts; repeat to evaluate several")
+    parser.add_argument("--backend", choices=sorted(BACKENDS), default="lexical",
+                        help="the worker behind the MCP server: the demo (lexical, default) or the pinned models (onnx)")
+    parser.add_argument("--evaluation", type=Path, default=EVALUATION, help="the questions, default tests/mcp/evaluation.xml")
     parser.add_argument("--jobs", type=int, default=4, help="questions run at once, default 4")
     parser.add_argument("--only", default="", help="comma-separated question numbers, counting from 1")
     parser.add_argument("--timeout", type=int, default=600, help="seconds per question, default 600")
     parser.add_argument("--out", type=Path, help="also write every session's record as JSON")
     arguments = parser.parse_args(argv)
-    pairs = load_pairs(EVALUATION)
+    try:
+        pairs = load_pairs(arguments.evaluation)
+    except (OSError, ElementTree.ParseError) as error:
+        return refuse(f"cannot read the evaluation {arguments.evaluation}: {error}")
+    if not pairs:
+        return refuse(f"{arguments.evaluation} holds no qa_pair")
     try:
         wanted = sorted({int(number) for number in arguments.only.split(",") if number.strip()}) or \
             list(range(1, len(pairs) + 1))
@@ -198,15 +217,26 @@ def main(argv=None) -> int:
         return refuse(f"--out must name a file in an existing, writable directory: {arguments.out}")
     data = Path(os.environ.get("BRIDGE_MCP_DATA") or FIXTURES).resolve()
     try:
-        env = child_env(os.environ, data)
+        env = child_env(os.environ, data, arguments.backend)
     except ValueError as error:
         return refuse(str(error))
     executable = shutil.which("claude")
     if not executable:
         return refuse("the Claude Code CLI (claude) is not on PATH")
-    if not (data / "index" / "index.json").is_file():
-        return refuse(f"no index at {(data / 'index').as_posix()}; build it first, from the repository root, "
-                      f"with BRIDGE_MCP_DATA set to that data directory:\n  {BUILD}")
+    sidecar = data / "index" / "index.json"
+    build = (f"build it, from the repository root, with BRIDGE_MCP_DATA set to that data directory:\n"
+             f"  {build_command(arguments.backend)}")
+    if not sidecar.is_file():
+        return refuse(f"no index at {sidecar.parent.as_posix()}; {build}")
+    try:
+        built_with = json.loads(sidecar.read_text(encoding="utf-8")).get("model")
+    except (OSError, ValueError, AttributeError) as error:
+        return refuse(f"cannot read {sidecar.as_posix()}: {type(error).__name__}")
+    # The server refuses an index from another model on every search; catch it before any session is spent.
+    expected = MODEL_NAMES[arguments.backend]["embed"]
+    if built_with != expected:
+        return refuse(f"the index at {sidecar.parent.as_posix()} was built with {built_with!r}, but the "
+                      f"{arguments.backend} worker embeds with {expected!r}; re{build}")
     if env.get("ANTHROPIC_API_KEY"):
         print("mcp_evaluate: ANTHROPIC_API_KEY is set, so claude authenticates with it and the sessions are billed "
               "to that key rather than the CLI's login; unset it to use the login", file=sys.stderr)
@@ -220,7 +250,7 @@ def main(argv=None) -> int:
     # Cleanup may fail on Windows while a timed-out session's server still runs there; the results do not depend on it.
     with tempfile.TemporaryDirectory(prefix="mcp-evaluate-", ignore_cleanup_errors=True) as scratch:
         config, cwd = Path(scratch) / "mcp.json", Path(scratch) / "cwd"
-        config.write_text(json.dumps(server_config()), encoding="utf-8")
+        config.write_text(json.dumps(server_config(REPO, arguments.backend)), encoding="utf-8")
         cwd.mkdir()  # empty: no project files, no CLAUDE.md, no local settings
         for model in arguments.model:
             def one(number, model=model):

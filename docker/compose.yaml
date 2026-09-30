@@ -117,7 +117,7 @@ services:
       - -ec
       - 'python -m pip download --require-hashes --only-binary=:all: --dest /cache/wheels -r requirements-model.lock && python scripts/fetch_model.py'
 
-  model-worker:
+  model-worker: &model-worker
     <<: *python
     profiles: [model]
     mem_limit: 1536m
@@ -213,7 +213,7 @@ services:
   # A stdio MCP server for the host's agent: `docker compose -f docker/compose.yaml run --rm -i -T mcp`.
   # It reads files only under /data, which is the checkout unless BRIDGE_MCP_DATA holds an absolute path.
   # The pinned wheels are installed into a tmpfs on every start, before the first JSON-RPC byte.
-  mcp:
+  mcp: &mcp
     <<: *python
     profiles: [mcp]
     networks: [isolated]
@@ -226,7 +226,7 @@ services:
       - ..:/work:ro
       - ../.cache:/cache:ro
       - ${BRIDGE_MCP_DATA:-..}:/data:ro
-    environment:
+    environment: &mcp-env
       <<: *python-env
       PYTHONPATH: /work/mcp_server:/deps
       BRIDGE_URL: http://mcp-worker:8090
@@ -241,7 +241,7 @@ services:
   # Operator-run index builder for bridge_search, e.g.
   # `docker compose -f docker/compose.yaml run --rm mcp-index /data/docs --out /data/artifacts/docs`.
   # The only service that can write to /data; it talks to mcp-worker over the protocol and needs no wheels.
-  mcp-index:
+  mcp-index: &mcp-index
     <<: *python
     profiles: [mcp]
     networks: [isolated]
@@ -249,11 +249,47 @@ services:
     volumes:
       - ..:/work:ro
       - ${BRIDGE_MCP_DATA:-..}:/data
-    environment:
+    environment: &mcp-index-env
       <<: *python-env
       PYTHONPATH: /work/mcp_server
       BRIDGE_URL: http://mcp-worker:8090
     entrypoint: [python, -m, bridge_mcp.index, build]
+
+  # The pinned ONNX models behind the MCP server, after the `fetcher` has run once. Its worker is its own, for
+  # the same reason as mcp-worker, and installs the model wheels on every start; the health check lets compose
+  # hold the server and the builder until it answers. Start with `run --rm -i -T mcp-model`.
+  mcp-model-worker:
+    <<: *model-worker
+    profiles: [mcp-model]
+    healthcheck:
+      # The token comes from the container's environment when the check runs; it is not in this file.
+      test: [CMD, python, -c, "import os, urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8090/healthz', headers={'Authorization': 'Bearer ' + os.environ['BRIDGE_TOKEN']}), timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+
+  mcp-model:
+    <<: *mcp
+    profiles: [mcp-model]
+    depends_on:
+      mcp-model-worker:
+        condition: service_healthy
+    environment:
+      <<: *mcp-env
+      BRIDGE_URL: http://mcp-model-worker:8090
+
+  # Builds an index with the models, e.g. `run --rm mcp-model-index /data/docs --out /data/artifacts/docs`. An index
+  # one worker built is refused by a server whose worker embeds with another model.
+  mcp-model-index:
+    <<: *mcp-index
+    profiles: [mcp-model]
+    depends_on:
+      mcp-model-worker:
+        condition: service_healthy
+    environment:
+      <<: *mcp-index-env
+      BRIDGE_URL: http://mcp-model-worker:8090
 
   mcp-tests:
     <<: *python

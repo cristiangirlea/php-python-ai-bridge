@@ -23,6 +23,12 @@ on:
       - examples/bootstrap.php
       - examples/frankenphp/**
       - scripts/run_frankenphp.sh
+      # The MCP server with the models behind it, and the probe that drives it over stdio.
+      - mcp_server/**
+      - requirements-mcp.lock
+      - scripts/mcp_stdio_onnx.sh
+      - tests/mcp_model_probe.py
+      - tests/mcp/fixtures/eval/notes/**
       - docker/compose.yaml
       - .github/workflows/model-smoke.yml
 
@@ -37,7 +43,7 @@ concurrency:
 jobs:
   model:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
     steps:
@@ -47,7 +53,7 @@ jobs:
       - name: Prepare disposable cache
         run: mkdir -p .cache && chmod 777 .cache
       - name: Inspect acquisition and execution limits
-        run: docker compose -f docker/compose.yaml --profile model-fetch --profile model config
+        run: docker compose -f docker/compose.yaml --profile model-fetch --profile model --profile mcp-fetch --profile mcp-model config
       - name: Acquire hash-pinned wheels and model files
         run: docker compose -f docker/compose.yaml run --rm --no-deps fetcher
       - name: Offline model tests
@@ -55,6 +61,17 @@ jobs:
           docker compose -f docker/compose.yaml up -d model-worker model-frankenphp
           docker compose -f docker/compose.yaml run --rm --no-deps model-test
           docker compose -f docker/compose.yaml run --rm --no-deps model-integration
+      # The MCP server a host starts with the models behind it, over stdio, including a search over an index the
+      # embedding model built. The builder writes as the containers' UID, so the data directory is world-writable.
+      - name: ONNX-backed MCP server end to end
+        run: |
+          docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
+          export BRIDGE_MCP_DATA="$RUNNER_TEMP/mcp-data"
+          mkdir -p "$BRIDGE_MCP_DATA"
+          cp -r tests/mcp/fixtures/eval/notes "$BRIDGE_MCP_DATA/"
+          chmod -R a+rwX "$BRIDGE_MCP_DATA"
+          docker compose -f docker/compose.yaml run --rm mcp-model-index /data/notes --out /data/index --chunk-chars 300 --overlap-chars 60
+          python3 tests/mcp_model_probe.py
       # Times never gate: the benchmark asserts nothing about speed. Its jobs must succeed, including the
       # worst-case batch, so bash's pipefail keeps tee from hiding a failure.
       - name: Latency benchmark (times informational, correctness gating)
@@ -68,7 +85,7 @@ jobs:
           { echo "## Measured latency (informational)"; echo; cat benchmark.md; } >> "$GITHUB_STEP_SUMMARY"
       - name: Service logs on failure
         if: failure()
-        run: docker compose -f docker/compose.yaml --profile model logs --tail 100
+        run: docker compose -f docker/compose.yaml --profile model --profile mcp-model logs --tail 100
       - name: Stop test containers
         if: always()
-        run: docker compose -f docker/compose.yaml --profile model down
+        run: docker compose -f docker/compose.yaml --profile model --profile mcp-model down
