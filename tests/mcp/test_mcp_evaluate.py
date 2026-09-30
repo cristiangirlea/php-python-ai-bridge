@@ -23,6 +23,7 @@ evaluate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evaluate)
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
+HASHING, MINILM = "hashing-bow-not-a-model", "sentence-transformers/all-MiniLM-L6-v2"
 TOOLS = [f"mcp__bridge__{name}" for name in
          ("bridge_embed_similarity", "bridge_health", "bridge_redact", "bridge_rerank", "bridge_search")]
 
@@ -78,6 +79,23 @@ class ConfigurationTests(unittest.TestCase):
         self.assertNotIn("\\", server["args"][0])
         self.assertNotIn(TOKEN, json.dumps(config))
         self.assertNotIn("env", server)
+
+    def test_each_backend_has_its_own_launcher_naming_a_fixed_service(self):
+        # A launcher that took its service from the environment could be pointed at a network-enabled one.
+        for backend, launcher, service in [("lexical", "mcp_stdio.sh", "mcp"), ("onnx", "mcp_stdio_onnx.sh", "mcp-model")]:
+            with self.subTest(backend=backend):
+                server = evaluate.server_config(REPO, backend)["mcpServers"]["bridge"]
+                self.assertEqual(Path(server["args"][0]), REPO / "scripts" / launcher)
+                lines = [line for line in (REPO / "scripts" / launcher).read_text(encoding="utf-8").splitlines()
+                         if line and not line.startswith("#")]
+                self.assertEqual(lines, ['exec docker compose -f "$(dirname "$0")/../docker/compose.yaml" run --rm -i -T '
+                                         + service])
+
+    def test_an_onnx_server_gets_longer_to_start(self):
+        # Its worker installs the model wheels before it answers, and compose waits for it to be healthy.
+        self.assertGreaterEqual(int(evaluate.child_env({"BRIDGE_TOKEN": TOKEN}, Path("/data"), "onnx")["MCP_TIMEOUT"]),
+                                300000)
+        self.assertEqual(evaluate.child_env({"BRIDGE_TOKEN": TOKEN}, Path("/data"))["MCP_TIMEOUT"], "180000")
 
     def test_the_child_environment_carries_the_token_and_drops_the_nesting_marker(self):
         environ = {"BRIDGE_TOKEN": TOKEN, "CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli", "PATH": "/bin"}
@@ -205,17 +223,23 @@ class RunTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.data = Path(self.temp.name) / "data"
         (self.data / "index").mkdir(parents=True)
-        (self.data / "index" / "index.json").write_text("{}", encoding="utf-8")
+        self.index_model(HASHING)
         self.out = Path(self.temp.name) / "results.json"
         self.environ = {"BRIDGE_TOKEN": TOKEN, "BRIDGE_MCP_DATA": str(self.data), "PATH": os.environ.get("PATH", "")}
-        self.calls = []
+        self.calls, self.launchers = [], []
 
     def tearDown(self):
         self.temp.cleanup()
 
+    def index_model(self, model):
+        (self.data / "index" / "index.json").write_text(json.dumps({"format": "bridge-index/1", "model": model}),
+                                                        encoding="utf-8")
+
     def run_main(self, fake, *arguments, environ=None):
         def ask(argv, expected, env, cwd, timeout):
             self.calls.append(argv[argv.index("-p") + 1])
+            config = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text(encoding="utf-8"))
+            self.launchers.append(config["mcpServers"]["bridge"]["args"][0])
             return fake(len(self.calls), expected)
 
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -267,6 +291,41 @@ class RunTests(unittest.TestCase):
         code, _, _ = self.run_main(fake, "--jobs", "4")
         self.assertEqual(code, 0)
         self.assertEqual(events[:2], [("start", 1), ("end", 1)])
+
+    def test_an_index_built_by_another_model_is_refused_with_the_matching_build_command(self):
+        code, _, stderr = self.run_main(lambda n, expected: fake_record(expected), "--backend", "onnx")
+        self.assertEqual(code, 2)
+        self.assertIn(HASHING, stderr)
+        self.assertIn("mcp-model-index /data/notes --out /data/index", stderr)
+        self.assertEqual(self.calls, [])
+        self.index_model(MINILM)
+        code, _, stderr = self.run_main(lambda n, expected: fake_record(expected))
+        self.assertEqual(code, 2)
+        self.assertIn("run --rm mcp-index /data/notes --out /data/index", stderr)
+
+    def test_an_unreadable_index_is_refused(self):
+        (self.data / "index" / "index.json").write_text("not json", encoding="utf-8")
+        code, _, stderr = self.run_main(lambda n, expected: fake_record(expected))
+        self.assertEqual(code, 2)
+        self.assertIn("index.json", stderr)
+
+    def test_each_backend_starts_its_own_launcher(self):
+        code, _, _ = self.run_main(lambda n, expected: fake_record(expected), "--only", "1")
+        self.assertEqual(code, 0)
+        self.index_model(MINILM)
+        code, _, _ = self.run_main(lambda n, expected: fake_record(expected), "--backend", "onnx", "--only", "1")
+        self.assertEqual(code, 0)
+        self.assertEqual([Path(launcher).name for launcher in self.launchers], ["mcp_stdio.sh", "mcp_stdio_onnx.sh"])
+
+    def test_another_evaluation_file_can_be_run(self):
+        evaluation = Path(self.temp.name) / "other.xml"
+        evaluation.write_text("<evaluation><qa_pair><question>First?</question><answer>1</answer></qa_pair>"
+                              "<qa_pair><question>Second?</question><answer>2</answer></qa_pair></evaluation>",
+                              encoding="utf-8")
+        code, stdout, _ = self.run_main(lambda n, expected: fake_record(expected), "--evaluation", str(evaluation))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.calls, ["First?", "Second?"])
+        self.assertIn("2/2 correct", stdout)
 
     def test_an_api_key_in_the_environment_is_announced(self):
         code, _, stderr = self.run_main(lambda n, expected: fake_record(expected), "--only", "1",
