@@ -38,7 +38,7 @@ SEMANTIC_REACH = [
     (*search("when did they fit the instrument that measures breeze speed", "1924"), False),
     (*search("where are the ropemakers located", "Wendle Quay"), False),
     (*search("who fixed the horn for poor visibility", "Merrow"), False),
-    (*search("how far upriver is the boatyard from the island", "two miles"), False),
+    (*search("how far upriver from the island is the marine firm's boatyard", "two miles"), False),
     ([("bridge_rerank", {"query": "grease the gears of the rotating optic mechanism", "documents_path": "tasks.txt",
                          "top_k": 1})], lambda body: str(body["results"][0]["index"]), False),
     ([("bridge_embed_similarity", {"texts": SIMILAR})],

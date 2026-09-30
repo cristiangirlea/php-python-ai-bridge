@@ -11,7 +11,6 @@ that mcp-model-index built from the notes as index/. Everything but the result g
 
 import json
 import subprocess
-import xml.etree.ElementTree as ElementTree
 import sys
 import threading
 from pathlib import Path
@@ -21,8 +20,10 @@ LAUNCHER = REPO / "scripts" / "mcp_stdio_onnx.sh"
 sys.path.insert(0, str(REPO / "worker"))
 sys.path.insert(0, str(REPO / "tests"))
 sys.path.insert(0, str(REPO / "tests" / "mcp"))
+sys.path.insert(0, str(REPO / "scripts"))
 from ai_bridge.tasks import MODEL_NAMES  # noqa: E402  (standard library only at import)
 from model_cases import REDACT_TEXT, RERANK_CASES, SIMILAR_TEXTS  # noqa: E402
+from mcp_evaluate import load_pairs  # noqa: E402  (the runner's rule for which answer a backend expects)
 from semantic_reach import SEMANTIC_REACH  # noqa: E402
 
 SEMANTIC = REPO / "tests" / "mcp" / "evaluation-semantic.xml"
@@ -119,7 +120,7 @@ def main():
     assert results["search"]["rerank_model"] == MODEL_NAMES["onnx"]["rerank"], results["search"]
     shown = " ".join(hit["snippet"] for hit in results["search"]["results"])
     assert "amber" in shown, results["search"]["results"]
-    answers = [pair.findtext("answer").strip() for pair in ElementTree.parse(SEMANTIC).getroot().iter("qa_pair")]
+    answers = [answer for _, answer in load_pairs(SEMANTIC, "onnx")]
     assert len(answers) == len(SEMANTIC_REACH), (len(answers), len(SEMANTIC_REACH))
     number = first
     for position, ((calls, read, _), answer) in enumerate(zip(SEMANTIC_REACH, answers), start=1):
