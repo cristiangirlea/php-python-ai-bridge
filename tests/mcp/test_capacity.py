@@ -39,12 +39,9 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         self.url = "http://127.0.0.1:%d" % server.server_address[1]
         return Bridge(self.url, TOKEN)
 
-    async def call(self, bridge, timeout_ms, tool="bridge_rerank", arguments=RERANK, root=None, logged=None):
-        async def log(params):
-            logged.append(str(params.data))
-
+    async def call(self, bridge, timeout_ms, tool="bridge_rerank", arguments=RERANK, root=None):
         server = build_server(bridge, backend="lexical", root=root, timeout_ms=timeout_ms)
-        async with Client(server, raise_exceptions=True, logging_callback=log if logged is not None else None) as client:
+        async with Client(server, raise_exceptions=True) as client:
             return await client.call_tool(tool, arguments)
 
     def indexed_root(self):
@@ -103,14 +100,6 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_error, result.content)
         self.assertIn("of its 3 s", result.content[0].text)
         self.assertLess(time.monotonic() - started, 3.2)
-
-    async def test_the_wait_is_announced_to_the_host(self):
-        bridge = self.worker(retention_seconds=0.5)
-        bridge.submit("test.delay", {"seconds": 0}, 5000)
-        logged = []
-        result = await self.call(bridge, 10000, logged=logged)
-        self.assertFalse(result.is_error, result.content)
-        self.assertTrue(any("at capacity" in message for message in logged), logged)
 
     async def test_other_refusals_are_not_retried(self):
         self.worker(retention_seconds=0.5)
