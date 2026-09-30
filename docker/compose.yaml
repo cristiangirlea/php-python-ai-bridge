@@ -287,6 +287,8 @@ services:
     environment:
       <<: *mcp-env
       BRIDGE_URL: http://mcp-model-worker:8090
+      # The worker runs one job at a time and loads a model for each, so calls an agent makes together queue.
+      BRIDGE_MCP_TIMEOUT_MS: "300000"
 
   # Builds an index with the models, e.g. `run --rm mcp-model-index /data/docs --out /data/artifacts/docs`. An index
   # one worker built is refused by a server whose worker embeds with another model.
