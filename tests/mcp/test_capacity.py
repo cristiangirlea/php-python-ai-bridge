@@ -55,14 +55,15 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         bridge = self.worker(retention_seconds=300)
         bridge.submit("test.delay", {"seconds": 0}, 5000)  # finished at once, then held for the whole test
         started = time.monotonic()
-        result = await self.call(bridge, timeout_ms=2000)
+        result = await self.call(bridge, timeout_ms=3000)
         elapsed = time.monotonic() - started
         self.assertTrue(result.is_error)
         text = result.content[0].text
         self.assertIn("at capacity", text)
         self.assertIn("waited", text)
-        self.assertGreater(elapsed, 0.9, "it gives up only once the call's time is nearly spent")
-        self.assertLess(elapsed, 4)
+        # The last retry comes with one second of the three left, so it gives up after about two.
+        self.assertGreater(elapsed, 1.8, "it gives up only once the call's time is nearly spent")
+        self.assertLess(elapsed, 5)
 
     async def test_other_refusals_are_not_retried(self):
         self.worker(retention_seconds=0.5)
