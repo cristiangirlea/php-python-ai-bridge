@@ -1,6 +1,7 @@
 """Small model smoke test, not a ranking-quality benchmark."""
 
 from integration import finished, request, wait_ready
+from model_cases import REDACT_TEXT, RERANK_CASES, SIMILAR_TEXTS
 
 
 FRANCE = ["Bananas are yellow fruit.", "Paris is the capital of France.", "A car has four wheels."]
@@ -25,11 +26,7 @@ def scores_by_index(rankings):
 
 def main():
     wait_ready()
-    cases = [
-        ("What is the capital of France?", ["Bananas are yellow.", "Paris is France's capital.", "Cars have wheels."], 1),
-        ("Which animal barks?", ["Dogs bark to communicate.", "Whales live in water.", "Paris is a city."], 0),
-    ]
-    for query, documents, expected in cases:
+    for query, documents, expected in RERANK_CASES:
         status, job, _ = request("/rerank", {"query": query, "documents": documents})
         assert status == 202
         done = finished(job["id"])
@@ -49,15 +46,14 @@ def main():
     for position, index in enumerate((5, 40, 66)):
         assert abs(alone[position] - together[index]) < 1e-3, (position, alone[position], together[index])
     assert sorted(range(3), key=lambda i: -alone[i]) == sorted(range(3), key=lambda i: -together[(5, 40, 66)[i]])
-    texts = ["A dog barks loudly.", "Puppies make barking noises.", "The stock market fell today."]
+    texts = SIMILAR_TEXTS
     status, job, _ = request("/embed", {"texts": texts})
     assert status == 202
     result = finished(job["id"])["result"]
     assert result["model"] == "sentence-transformers/all-MiniLM-L6-v2" and result["dimensions"] == 384
     dot = lambda a, b: sum(x * y for x, y in zip(a, b))
     assert dot(result["vectors"][0], result["vectors"][1]) > dot(result["vectors"][0], result["vectors"][2])
-    # The leading dash is one code point of three bytes: byte-based model offsets would misplace every mask.
-    status, job, _ = request("/redact", {"text": "\u2014 John Smith wrote to john@example.com about Berlin.", "entities": ["PER", "LOC"]})
+    status, job, _ = request("/redact", {"text": REDACT_TEXT, "entities": ["PER", "LOC"]})
     assert status == 202
     result = finished(job["id"])["result"]
     assert result["model"] == "Xenova/bert-base-NER:int8", result["model"]

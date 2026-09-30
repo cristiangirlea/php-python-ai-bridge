@@ -15,18 +15,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO / "scripts" / "mcp_stdio_onnx.sh"
 sys.path.insert(0, str(REPO / "worker"))
+sys.path.insert(0, str(REPO / "tests"))
 from ai_bridge.tasks import MODEL_NAMES  # noqa: E402  (standard library only at import)
+from model_cases import REDACT_TEXT, RERANK_CASES, SIMILAR_TEXTS  # noqa: E402
 
 TOOLS = ["bridge_embed_similarity", "bridge_health", "bridge_redact", "bridge_rerank", "bridge_search"]
 TIMEOUT_S = 600  # the model worker installs its wheels and the first calls load each model cold
 
 CALLS = {
     "health": ("bridge_health", {}),
-    "rerank": ("bridge_rerank", {"query": "What is the capital of France?",
-                                 "documents": ["Bananas are yellow.", "Paris is France's capital.", "Cars have wheels."]}),
-    "similarity": ("bridge_embed_similarity", {"texts": ["A dog barks loudly.", "Puppies make barking noises.",
-                                                         "The stock market fell today."]}),
-    "redact": ("bridge_redact", {"text": "John Smith wrote to john@example.com about Berlin.", "entities": ["PER", "LOC"]}),
+    "rerank": ("bridge_rerank", {"query": RERANK_CASES[0][0], "documents": RERANK_CASES[0][1]}),
+    "similarity": ("bridge_embed_similarity", {"texts": SIMILAR_TEXTS}),
+    "redact": ("bridge_redact", {"text": REDACT_TEXT, "entities": ["PER", "LOC"]}),
     # Worded unlike the note ("replaced with amber glass"), so word overlap alone would not rank it first.
     "search": ("bridge_search", {"query": "What colour is the glazing up in the lamp housing since it was restored?",
                                  "index_path": "index", "top_k": 3}),
@@ -45,14 +45,22 @@ def exchange(messages, wanted):
         process.stdin.write("".join(json.dumps(message) + "\n" for message in messages))
         process.stdin.flush()
         for line in process.stdout:
-            message = json.loads(line)
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"not JSON-RPC, ignored: {line.rstrip()[:200]}", file=sys.stderr)
+                continue
             replies[message.get("id")] = message
             if wanted <= replies.keys():
                 break
     finally:
         timer.cancel()
         process.stdin.close()
-        code = process.wait(timeout=60)
+        try:
+            code = process.wait(timeout=60)
+        except subprocess.TimeoutExpired:  # a server that ignores the end of its input must not hide the result
+            process.kill()
+            code = process.wait()
     missing = wanted - replies.keys()
     assert not missing, (f"no reply to {sorted(missing)} within {TIMEOUT_S} s" if expired.is_set()
                          else f"the server exited with {code} before replying to {sorted(missing)}")
@@ -88,7 +96,7 @@ def main():
     assert results["health"]["backend"] == "onnx", results["health"]
     assert results["health"]["models"] == MODEL_NAMES["onnx"], results["health"]["models"]
     assert results["rerank"]["model"] == MODEL_NAMES["onnx"]["rerank"]
-    assert results["rerank"]["results"][0]["index"] == 1, results["rerank"]["results"]
+    assert results["rerank"]["results"][0]["index"] == RERANK_CASES[0][2], results["rerank"]["results"]
     assert results["similarity"]["model"] == MODEL_NAMES["onnx"]["embed"]
     top = results["similarity"]["pairs"][0]
     assert (top["a"], top["b"]) == (0, 1), results["similarity"]["pairs"]

@@ -93,8 +93,9 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_an_onnx_server_gets_longer_to_start(self):
         # Its worker installs the model wheels before it answers, and compose waits for it to be healthy.
+        # Longer than compose's health budget for the model worker (a 10 s start period and 60 checks 5 s apart).
         self.assertGreaterEqual(int(evaluate.child_env({"BRIDGE_TOKEN": TOKEN}, Path("/data"), "onnx")["MCP_TIMEOUT"]),
-                                300000)
+                                600000)
         self.assertEqual(evaluate.child_env({"BRIDGE_TOKEN": TOKEN}, Path("/data"))["MCP_TIMEOUT"], "180000")
 
     def test_the_child_environment_carries_the_token_and_drops_the_nesting_marker(self):
@@ -116,6 +117,27 @@ class ConfigurationTests(unittest.TestCase):
     def test_a_missing_token_is_refused(self):
         with self.assertRaisesRegex(ValueError, "BRIDGE_TOKEN"):
             evaluate.child_env({"PATH": "/bin"}, Path("/data"))
+
+    def test_an_answer_can_differ_by_backend(self):
+        # The first answer is the demo worker's, which is also what the MCP builder's harness reads.
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "e.xml"
+            path.write_text('<evaluation><qa_pair><question>Q?</question><answer>rules</answer>'
+                            '<answer backend="onnx">model</answer></qa_pair></evaluation>', encoding="utf-8")
+            self.assertEqual(evaluate.load_pairs(path), [("Q?", "rules")])
+            self.assertEqual(evaluate.load_pairs(path, "lexical"), [("Q?", "rules")])
+            self.assertEqual(evaluate.load_pairs(path, "onnx"), [("Q?", "model")])
+        repository = REPO / "tests" / "mcp" / "evaluation.xml"
+        demo, models = evaluate.load_pairs(repository), evaluate.load_pairs(repository, "onnx")
+        self.assertEqual([answer for _, answer in demo].count("rules"), 1)
+        self.assertEqual([a for (_, a), (_, b) in zip(demo, models) if a != b], ["rules"])
+        self.assertIn(("model"), [answer for _, answer in models])
+
+    def test_the_builders_share_one_command(self):
+        self.assertIn("run --rm mcp-index /data/notes --out /data/index", evaluate.build_command("lexical"))
+        self.assertIn("run --rm mcp-model-index /data/notes --out /data/index", evaluate.build_command("onnx"))
+        self.assertEqual(evaluate.build_command("lexical").replace("mcp-index", "mcp-model-index"),
+                         evaluate.build_command("onnx"))
 
     def test_the_questions_are_read_from_the_evaluation_file(self):
         pairs = evaluate.load_pairs(REPO / "tests" / "mcp" / "evaluation.xml")
@@ -276,6 +298,21 @@ class RunTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(len(self.calls), 1)
         self.assertIn("mcp-fetcher", stderr)
+
+    def test_an_onnx_server_that_does_not_connect_points_at_its_worker(self):
+        self.index_model(MINILM)
+        code, _, stderr = self.run_main(lambda n, expected: fake_record(expected, connected=False), "--backend", "onnx")
+        self.assertEqual(code, 2)
+        self.assertIn("mcp-model-worker", stderr)
+
+    def test_an_evaluation_that_searches_no_index_needs_none(self):
+        (self.data / "index" / "index.json").unlink()
+        evaluation = Path(self.temp.name) / "no-index.xml"
+        evaluation.write_text("<evaluation><qa_pair><question>Rank tasks.txt for the gauge.</question><answer>5</answer>"
+                              "</qa_pair></evaluation>", encoding="utf-8")
+        code, _, _ = self.run_main(lambda n, expected: fake_record(expected), "--evaluation", str(evaluation))
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.calls), 1)
 
     def test_the_first_session_runs_alone_before_the_rest_start(self):
         events, lock = [], threading.Lock()

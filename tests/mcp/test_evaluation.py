@@ -5,6 +5,7 @@ checks that the answer can be read from what the tools return. It says nothing a
 finds those calls on its own; that is what running the evaluation with an LLM measures.
 """
 
+import importlib.util
 import json
 import shutil
 import tempfile
@@ -158,5 +159,15 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
     def test_the_documented_build_command_uses_the_tested_chunking(self):
         self.assertIn(BUILD_COMMAND, (DOCS / "mcp.md").read_text(encoding="utf-8"))
         # The runner prints the same command when the index is missing.
-        runner = HERE.parent.parent / "scripts" / "mcp_evaluate.py"
-        self.assertIn(BUILD_COMMAND, " ".join(runner.read_text(encoding="utf-8").replace('"', " ").split()))
+        spec = importlib.util.spec_from_file_location("mcp_evaluate", HERE.parent.parent / "scripts" / "mcp_evaluate.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        self.assertIn(BUILD_COMMAND, runner.build_command("lexical"))
+
+    def test_every_backend_answer_follows_a_default_one(self):
+        # The builder's harness reads a pair's first answer, so that one is the demo worker's and has no backend.
+        for pair in ElementTree.parse(EVALUATION).getroot().iter("qa_pair"):
+            answers = pair.findall("answer")
+            with self.subTest(question=pair.findtext("question")[:50]):
+                self.assertNotIn("backend", answers[0].attrib)
+                self.assertTrue(all(answer.get("backend") in {"lexical", "onnx"} for answer in answers[1:]))
