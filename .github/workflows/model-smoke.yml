@@ -14,6 +14,8 @@ on:
       - requirements-model.txt
       - requirements-model.lock
       - worker/ai_bridge/tasks.py
+      # The worker's HTTP handling, which every model test and the MCP workers' health check go through.
+      - worker/ai_bridge/server.py
       - scripts/benchmark.py
       - tests/php/model.php
       - tests/model_integration.py

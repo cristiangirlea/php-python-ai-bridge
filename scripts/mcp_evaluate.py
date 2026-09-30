@@ -30,7 +30,7 @@ EVALUATION = REPO / "tests" / "mcp" / "evaluation.xml"
 FIXTURES = REPO / "tests" / "mcp" / "fixtures" / "eval"
 SERVER = "bridge"
 PREFIX = f"mcp__{SERVER}__"
-BUILD = ("docker compose -f docker/compose.yaml run --rm mcp-index /data/notes --out /data/index "
+BUILD = ("docker compose -f docker/compose.yaml run --rm {builder} /data/notes --out /data/index "
          "--chunk-chars 300 --overlap-chars 60")
 # Per backend: the launcher that starts its MCP service, and the compose service that builds an index for it. Each
 # launcher names one service; nothing in the environment chooses it.
@@ -49,10 +49,16 @@ have made the task easier. Be specific.</feedback>
 in the source. If you could not find it, NOT_FOUND.</response>"""
 
 
-def load_pairs(path: Path) -> list:
-    root = ElementTree.parse(path).getroot()
-    return [(pair.findtext("question", "").strip(), pair.findtext("answer", "").strip())
-            for pair in root.iter("qa_pair")]
+def load_pairs(path: Path, backend: str | None = None) -> list:
+    """Each question with its answer: the one naming the backend if there is one, else the first, which is the
+    demo worker's and the one the MCP builder's harness reads."""
+    pairs = []
+    for pair in ElementTree.parse(path).getroot().iter("qa_pair"):
+        answers = pair.findall("answer")
+        chosen = next((answer for answer in answers if backend and answer.get("backend") == backend),
+                      answers[0] if answers else None)
+        pairs.append((pair.findtext("question", "").strip(), (chosen.text or "").strip() if chosen is not None else ""))
+    return pairs
 
 
 def server_config(repo: Path = REPO, backend: str = "lexical") -> dict:
@@ -63,7 +69,7 @@ def server_config(repo: Path = REPO, backend: str = "lexical") -> dict:
 
 
 def build_command(backend: str) -> str:
-    return BUILD.replace(" mcp-index ", f" {BACKENDS[backend][1]} ")
+    return BUILD.format(builder=BACKENDS[backend][1])
 
 
 def child_env(environ, data: Path, backend: str = "lexical") -> dict:
@@ -71,9 +77,9 @@ def child_env(environ, data: Path, backend: str = "lexical") -> dict:
         raise ValueError("BRIDGE_TOKEN is not set; the MCP server needs the worker's token")
     env = {key: value for key, value in environ.items() if key not in NESTING}
     env["BRIDGE_MCP_DATA"] = Path(data).resolve().as_posix()  # compose mounts it, and Docker wants it absolute
-    # The mcp container installs its wheels into a tmpfs on every start; the ONNX worker it waits for installs the
-    # model wheels too, so its first session takes longer.
-    env.setdefault("MCP_TIMEOUT", "300000" if backend == "onnx" else "180000")
+    # The mcp container installs its wheels into a tmpfs on every start. The ONNX worker it waits for installs the
+    # model wheels too, and compose gives it up to about 310 s to pass its health check, so allow for all of that.
+    env.setdefault("MCP_TIMEOUT", "600000" if backend == "onnx" else "180000")
     return env
 
 
@@ -201,7 +207,7 @@ def main(argv=None) -> int:
     parser.add_argument("--out", type=Path, help="also write every session's record as JSON")
     arguments = parser.parse_args(argv)
     try:
-        pairs = load_pairs(arguments.evaluation)
+        pairs = load_pairs(arguments.evaluation, arguments.backend)
     except (OSError, ElementTree.ParseError) as error:
         return refuse(f"cannot read the evaluation {arguments.evaluation}: {error}")
     if not pairs:
@@ -223,20 +229,22 @@ def main(argv=None) -> int:
     executable = shutil.which("claude")
     if not executable:
         return refuse("the Claude Code CLI (claude) is not on PATH")
-    sidecar = data / "index" / "index.json"
-    build = (f"build it, from the repository root, with BRIDGE_MCP_DATA set to that data directory:\n"
-             f"  {build_command(arguments.backend)}")
-    if not sidecar.is_file():
-        return refuse(f"no index at {sidecar.parent.as_posix()}; {build}")
-    try:
-        built_with = json.loads(sidecar.read_text(encoding="utf-8")).get("model")
-    except (OSError, ValueError, AttributeError) as error:
-        return refuse(f"cannot read {sidecar.as_posix()}: {type(error).__name__}")
-    # The server refuses an index from another model on every search; catch it before any session is spent.
-    expected = MODEL_NAMES[arguments.backend]["embed"]
-    if built_with != expected:
-        return refuse(f"the index at {sidecar.parent.as_posix()} was built with {built_with!r}, but the "
-                      f"{arguments.backend} worker embeds with {expected!r}; re{build}")
+    # Only an evaluation that searches needs the index; the server refuses one from another model on every search,
+    # so catch that before any session is spent.
+    if any("index_path" in question for question, _ in pairs):
+        sidecar = data / "index" / "index.json"
+        build = (f"build it, from the repository root, with BRIDGE_MCP_DATA set to that data directory:\n"
+                 f"  {build_command(arguments.backend)}")
+        if not sidecar.is_file():
+            return refuse(f"no index at {sidecar.parent.as_posix()}; {build}")
+        try:
+            built_with = json.loads(sidecar.read_text(encoding="utf-8")).get("model")
+        except (OSError, ValueError, AttributeError) as error:
+            return refuse(f"cannot read {sidecar.as_posix()}: {type(error).__name__}")
+        expected = MODEL_NAMES[arguments.backend]["embed"]
+        if built_with != expected:
+            return refuse(f"the index at {sidecar.parent.as_posix()} was built with {built_with!r}, but the "
+                          f"{arguments.backend} worker embeds with {expected!r}; re{build}")
     if env.get("ANTHROPIC_API_KEY"):
         print("mcp_evaluate: ANTHROPIC_API_KEY is set, so claude authenticates with it and the sessions are billed "
               "to that key rather than the CLI's login; unset it to use the login", file=sys.stderr)
@@ -264,9 +272,12 @@ def main(argv=None) -> int:
             records = [one(wanted[0])]
             if not records[0]["connected"]:
                 print(report(model, records) + "\n")
+                worker = ("; for the models, also that they were fetched with the fetcher service and that "
+                          "mcp-model-worker became healthy: `docker compose -f docker/compose.yaml --profile mcp-model "
+                          "logs mcp-model-worker`") if arguments.backend == "onnx" else ""
                 return refuse(f"the {SERVER} server did not connect ({'; '.join(records[0]['problems'])}). Check that "
                               "Docker is running, that the MCP wheels were fetched once with `docker compose -f "
-                              "docker/compose.yaml run --rm --no-deps mcp-fetcher`, and that sh is on PATH")
+                              f"docker/compose.yaml run --rm --no-deps mcp-fetcher`, and that sh is on PATH{worker}")
             with concurrent.futures.ThreadPoolExecutor(arguments.jobs) as pool:
                 records += list(pool.map(one, wanted[1:]))
             runs[model] = records
