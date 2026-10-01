@@ -14,6 +14,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 SAMPLE = REPO / "tests" / "fixtures" / "ner-sample.json"
+DEV = REPO / "tests" / "fixtures" / "ner-dev.json"
 spec = importlib.util.spec_from_file_location("ner_measure", REPO / "scripts" / "ner_measure.py")
 measure = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(measure)
@@ -44,6 +45,20 @@ class SampleTests(unittest.TestCase):
 
     def test_the_script_reads_this_sample(self):
         self.assertEqual(measure.SAMPLE, SAMPLE)
+
+    def test_another_sample_can_be_measured(self):
+        self.assertEqual(measure.sample_path({}), SAMPLE)
+        self.assertEqual(measure.sample_path({"NER_SAMPLE": "tests/fixtures/ner-dev.json"}), DEV)
+
+    def test_the_development_set_is_well_formed_and_apart_from_the_sample(self):
+        dev = json.loads(DEV.read_text(encoding="utf-8"))["items"]
+        self.assertEqual({item["text"] for item in dev} & {item["text"] for item in self.items}, set())
+        self.assertTrue(any(not item["entities"] for item in dev), "it must show false positives too")
+        for item in dev:
+            with self.subTest(text=item["text"][:40]):
+                for label, text in item["entities"]:
+                    self.assertIn(label, {"PER", "ORG", "LOC"})
+                    self.assertEqual(item["text"].count(text), 1)
 
     def test_importing_the_script_ignores_the_benchmark_s_settings(self):
         # It borrows the benchmark's protocol helpers; a malformed BENCH_TARGETS is the benchmark's business.

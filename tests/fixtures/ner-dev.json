@@ -1,0 +1,42 @@
+{
+  "about": "A development set for tuning the redact task's NER pass, kept apart from ner-sample.json, whose figures are the ones published. Invented like the sample; some sentences hold no entity at all, so that false positives show, and the acronyms are there for the same reason.",
+  "items": [
+    {"register": "lower case", "text": "can you tell oskar that the meeting moved to tuesday", "entities": [["PER", "oskar"]]},
+    {"register": "lower case", "text": "landed in dublin, heading to the hotel now", "entities": [["LOC", "dublin"]]},
+    {"register": "lower case", "text": "does anyone know if brightwave media is still hiring", "entities": [["ORG", "brightwave media"]]},
+    {"register": "lower case", "text": "say hi to farah and yusra for me", "entities": [["PER", "farah"], ["PER", "yusra"]]},
+    {"register": "lower case", "text": "we should visit kraków before the winter", "entities": [["LOC", "kraków"]]},
+    {"register": "lower case", "text": "my sister works at pinecrest bank in leeds", "entities": [["ORG", "pinecrest bank"], ["LOC", "leeds"]]},
+    {"register": "lower case", "text": "omg diego got the job at lumen studios!!", "entities": [["PER", "diego"], ["ORG", "lumen studios"]]},
+    {"register": "lower case", "text": "is the train to vienna on time", "entities": [["LOC", "vienna"]]},
+    {"register": "lower case", "text": "can you send me the report before friday", "entities": []},
+    {"register": "lower case", "text": "the printer on the second floor is jammed again", "entities": []},
+    {"register": "lower case", "text": "lol that was the best pizza ever", "entities": []},
+    {"register": "lower case", "text": "remind me to water the plants tomorrow", "entities": []},
+
+    {"register": "sentence case", "text": "The weather was lovely all weekend.", "entities": []},
+    {"register": "sentence case", "text": "Please bring the signed form to the front desk.", "entities": []},
+    {"register": "sentence case", "text": "Our team will review the proposal next week.", "entities": []},
+    {"register": "sentence case", "text": "The board approved the budget for the new year.", "entities": []},
+    {"register": "sentence case", "text": "Thanks again, see you at the station.", "entities": []},
+
+    {"register": "all capitals", "text": "PLEASE CALL MARCUS LINDQVIST BEFORE NOON", "entities": [["PER", "MARCUS LINDQVIST"]]},
+    {"register": "all capitals", "text": "URGENT: SHIPMENT FOR ORION FREIGHT IS DELAYED IN ROTTERDAM", "entities": [["ORG", "ORION FREIGHT"], ["LOC", "ROTTERDAM"]]},
+    {"register": "all capitals", "text": "DO NOT FORWARD THIS EMAIL", "entities": []},
+
+    {"register": "records", "text": "Approved by K. Watanabe on behalf of Fernhill Insurance.", "entities": [["PER", "K. Watanabe"], ["ORG", "Fernhill Insurance"]]},
+    {"register": "records", "text": "Patient: OYELARAN, Bisi. Ward: 4B.", "entities": [["PER", "OYELARAN"], ["PER", "Bisi"]]},
+    {"register": "records", "text": "Contact Jean-Luc Moreau in Marseille.", "entities": [["PER", "Jean-Luc Moreau"], ["LOC", "Marseille"]]},
+    {"register": "records", "text": "Signed: M. A. Delacroix, Lyon.", "entities": [["PER", "M. A. Delacroix"], ["LOC", "Lyon"]]},
+    {"register": "records", "text": "Owner: PETROV, Anya; city: Sofia.", "entities": [["PER", "PETROV"], ["PER", "Anya"], ["LOC", "Sofia"]]},
+
+    {"register": "acronyms", "text": "Send the IBAN and BIC to the HR team by Friday.", "entities": []},
+    {"register": "acronyms", "text": "The NATO summit in Brussels ended early.", "entities": [["ORG", "NATO"], ["LOC", "Brussels"]]},
+    {"register": "acronyms", "text": "Our CEO met the FDA inspectors yesterday.", "entities": [["ORG", "FDA"]]},
+
+    {"register": "news", "text": "Talia Brenner joined Greenfold Energy as chief engineer in Oslo.", "entities": [["PER", "Talia Brenner"], ["ORG", "Greenfold Energy"], ["LOC", "Oslo"]]},
+    {"register": "news", "text": "The museum in Seville reopened after repairs.", "entities": [["LOC", "Seville"]]},
+
+    {"register": "mixed case", "text": "meeting w/ Anil tmrw at the Kestrel office in bristol", "entities": [["PER", "Anil"], ["ORG", "Kestrel"], ["LOC", "bristol"]]}
+  ]
+}
