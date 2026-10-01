@@ -59,8 +59,9 @@ BACKENDS = {
         # The recall figures come from scripts/ner_measure.py's table in docs/testing.md; re-measure and update both.
         "redact": ("Xenova/bert-base-NER:int8", "checksum and pattern rules plus dslim/bert-base-NER (the "
                    "int8 ONNX conversion published as Xenova/bert-base-NER) for PER, ORG and LOC. Trained on "
-                   "English news: on an invented sample it found every entity in news-style sentences, about four in "
-                   "five in terse records and about one in eight in informal lower-case messages (docs/testing.md)."),
+                   "cased English news, so lower-case and all-capitals sentences are read again in title case: on an "
+                   "invented sample it masked every entity in news-style sentences, nearly every one in terse records "
+                   "and about three in five in informal messages (docs/testing.md)."),
     },
 }
 
