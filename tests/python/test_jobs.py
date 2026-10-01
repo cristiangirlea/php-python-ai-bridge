@@ -427,7 +427,8 @@ class RerankBatchingTests(unittest.TestCase):
 
 class NerJoinTests(unittest.TestCase):
     """Pieces of one name that touch, or meet at a hyphen, full stop or apostrophe, are one entity, joined before
-    the threshold, so a confident initial carries the surname the model was less sure of."""
+    the threshold and scored by their most confident piece: a confident initial carries the surname the model was
+    less sure of, and an unsure piece never hides a confident one."""
 
     Window = NerAggregationTests.Window
     rows = NerAggregationTests.rows
@@ -443,13 +444,23 @@ class NerJoinTests(unittest.TestCase):
         # "A. Okonkwo": the model starts a second entity at the full stop, less sure of it than of the initial.
         text = "A. Okonkwo"
         spans = self.spans(text, [(0, 1), (1, 2), (3, 10)], [("B-PER", 1.0), ("B-PER", 0.83), ("I-PER", 0.83)])
-        self.assertEqual(spans, [(0, 10, "PER", 0.8867)])
+        self.assertEqual(spans, [(0, 10, "PER", 1.0)])
 
     def test_pieces_meeting_at_a_hyphen_are_one_name(self):
         text = "Mei-Ling Chou"
         spans = self.spans(text, [(0, 3), (3, 4), (4, 8), (9, 13)],
                            [("B-PER", 0.9), ("O", 0.9), ("B-PER", 0.9), ("I-PER", 0.9)])
         self.assertEqual(spans, [(0, 13, "PER", 0.9)])
+
+    def test_an_unsure_piece_does_not_hide_a_confident_one(self):
+        # "Jean-Luc Moreau": averaged with "Luc Moreau" the name fell below the threshold and nothing was masked.
+        text = "Jean-Luc Moreau"
+        spans = self.spans(text, [(0, 4), (4, 5), (5, 8), (9, 15)],
+                           [("B-PER", 0.95), ("O", 0.9), ("B-PER", 0.6), ("I-PER", 0.6)])
+        self.assertEqual(spans, [(0, 15, "PER", 0.95)])
+        # Joined pieces that are all unsure stay below it.
+        self.assertEqual(self.spans(text, [(0, 4), (4, 5), (5, 8), (9, 15)],
+                                    [("B-PER", 0.6), ("O", 0.9), ("B-PER", 0.6), ("I-PER", 0.6)]), [])
 
     def test_entities_apart_or_of_another_kind_stay_apart(self):
         text = "Ines and Pedro in Lima"
