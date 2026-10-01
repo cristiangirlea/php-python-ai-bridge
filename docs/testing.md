@@ -101,27 +101,29 @@ docker compose -f docker/compose.yaml --profile model down
 
 ## Measured NER precision and recall (informational)
 
-`scripts/ner_measure.py` runs every sentence of `tests/fixtures/ner-sample.json` through the ONNX worker's redact task with PER, ORG and LOC, at the task's default threshold and a lower one, and compares the model's spans with the sample's labels; rule spans are not counted. The model workflow prints a fresh table to its job summary on every run, and fails only if a job fails, never on a score. The sample is invented and small, so these figures describe this pinned model on these three registers, not a quality guarantee.
+`scripts/ner_measure.py` runs every sentence of `tests/fixtures/ner-sample.json` through the ONNX worker's redact task with PER, ORG and LOC, at the task's default threshold and a lower one, and compares the model's spans with the sample's labels; rule spans are not counted. The model workflow prints a fresh table to its job summary on every run, and fails only if a job fails, never on a score. The table below is from that workflow, run 36856834447 on pull request #17 at branch head `f37290b`; the commit in its header is GitHub's merge ref. The sample is invented and small, so these figures describe this pinned model on these three registers, not a quality guarantee.
 
-Measured 2026-10-01 UTC, commit `unknown`, runner: local, unspecified, CPU: AMD Ryzen 9 9950X 16-Core Processor.
-Model `Xenova/bert-base-NER:int8`; 48 invented sentences with 104 labelled entities; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and any shared character.
+Measured 2026-10-01 UTC, commit `2d80a9f0a8c31ac78891dcde140f487a2259efd3`, runner: GitHub-hosted ubuntu-latest, CPU: AMD EPYC 7763 64-Core Processor.
+Model `Xenova/bert-base-NER:int8`; 48 invented sentences with 104 labelled entities; one redact job per sentence at threshold 0.5, entities PER, ORG and LOC, and a higher threshold keeps the spans whose score reaches it. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span.
 
 | Threshold | Register or label | Gold | Predicted | Precision, exact | Recall, exact | Precision, overlapping | Recall, overlapping |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0.85 | news | 38 | 38 | 1.00 | 1.00 | 1.00 | 1.00 |
-| 0.85 | records | 36 | 36 | 0.81 | 0.81 | 0.94 | 0.89 |
 | 0.85 | informal | 30 | 5 | 0.80 | 0.13 | 1.00 | 0.17 |
-| 0.85 | PER | 42 | 30 | 0.80 | 0.57 | 1.00 | 0.67 |
-| 0.85 | ORG | 24 | 19 | 0.95 | 0.75 | 0.95 | 0.75 |
+| 0.85 | records | 36 | 35 | 0.80 | 0.78 | 0.89 | 0.86 |
+| 0.85 | PER | 42 | 30 | 0.80 | 0.57 | 0.93 | 0.67 |
+| 0.85 | ORG | 24 | 18 | 0.94 | 0.71 | 0.94 | 0.71 |
 | 0.85 | LOC | 38 | 30 | 0.97 | 0.76 | 0.97 | 0.76 |
 | 0.5 | news | 38 | 38 | 1.00 | 1.00 | 1.00 | 1.00 |
-| 0.5 | records | 36 | 39 | 0.74 | 0.81 | 0.90 | 0.89 |
-| 0.5 | informal | 30 | 5 | 0.80 | 0.13 | 1.00 | 0.17 |
-| 0.5 | PER | 42 | 31 | 0.77 | 0.57 | 1.00 | 0.67 |
-| 0.5 | ORG | 24 | 19 | 0.95 | 0.75 | 0.95 | 0.75 |
-| 0.5 | LOC | 38 | 32 | 0.91 | 0.76 | 0.91 | 0.76 |
+| 0.5 | informal | 30 | 7 | 0.57 | 0.13 | 0.71 | 0.17 |
+| 0.5 | records | 36 | 38 | 0.79 | 0.83 | 0.87 | 0.92 |
+| 0.5 | PER | 42 | 32 | 0.78 | 0.60 | 0.91 | 0.69 |
+| 0.5 | ORG | 24 | 20 | 0.90 | 0.75 | 0.90 | 0.75 |
+| 0.5 | LOC | 38 | 31 | 0.94 | 0.76 | 0.94 | 0.76 |
 
-The model found every entity in news-style sentences, the register of its CoNLL-2003 training text. In terse records it missed a name written surname first in capitals (`WIERZBICKI, Tomasz`), cut names written with an initial or a hyphen into pieces, tagged only the initial of `A. Okonkwo` so the surname would stay visible, and swapped the labels of a clinic and a city. In informal messages it found only the capitalised names: every lower-case name, place and company was missed. Lowering the threshold does not bring those back, because the model labels them as no entity at all, so its confidence never comes into play; it only cost precision in records. To reproduce locally after acquiring the models:
+The model found every entity in news-style sentences, the register of its CoNLL-2003 training text. In informal messages it found only the capitalised names: every lower-case name, place and company was missed, and lowering the threshold to 0.5 added only wrong spans, because the model labels those words as no entity at all. In terse records it found about four in five, and 0.5 found a few more at a small cost in precision. In a local run the records it missed were a name written surname first in capitals (`WIERZBICKI, Tomasz`), names cut into pieces at an initial or a hyphen, `A. Okonkwo` with only its initial tagged, so the surname would stay visible, and a clinic and a city with each other's labels.
+
+int8 inference is not bit-identical across CPUs. A local run on an AMD Ryzen 9 9950X matched the news and informal rows at 0.85 but differed by a span or two in records and ORG, and at 0.5 it predicted two fewer wrong spans in informal messages, so read a difference of a span or two between runners as noise. The redact tool's description quotes these figures; re-measure and update both together. To reproduce locally after acquiring the models:
 
 ```sh
 docker compose -f docker/compose.yaml up -d model-worker
