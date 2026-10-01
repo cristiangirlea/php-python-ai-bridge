@@ -486,9 +486,16 @@ class CasedVariantTests(unittest.TestCase):
     def test_cased_and_sentence_case_text_needs_no_second_pass(self):
         # Title-casing "the board approved the budget" makes "Board" an organisation; sentence case stays as written.
         for text in ["Lena Okafor said the depot in Rotterdam would open.", "The board approved the budget.",
-                     "Customer: WIERZBICKI, Tomasz.", "12:30 - 14:00", ""]:
+                     "Send the IBAN and BIC to HR, finance and IT.", "12:30 - 14:00", ""]:
             with self.subTest(text=text):
                 self.assertIsNone(tasks._cased_variant(text))
+
+    def test_a_surname_first_in_capitals_before_a_given_name_is_title_cased(self):
+        # Records write "SURNAME, Given"; in capitals the model takes the surname for a place, or misses it.
+        self.assertEqual(tasks._cased_variant("Customer: WIERZBICKI, Tomasz. Delivery city: Gdansk."),
+                         "Customer: Wierzbicki, Tomasz. Delivery city: Gdansk.")
+        # Capitals before a comma and a lower-case word, or without a comma, are not that convention.
+        self.assertIsNone(tasks._cased_variant("Ask HR, finance or IT; the WHO report is due."))
 
     def test_only_the_sentences_that_need_it_change(self):
         self.assertEqual(tasks._cased_variant("Lena Okafor called. ask priya about lisbon!\nDO NOT REPLY"),
