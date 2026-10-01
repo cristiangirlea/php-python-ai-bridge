@@ -42,7 +42,7 @@ PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4
 
 | Layer | Scope and counting |
 | --- | --- |
-| Python worker | 80 tests: lifecycle, validation and HTTP, process crashes, cancellation, timeouts, retention, allocation/exit races, redaction rules including IPv6, lower-case IBANs and email addresses in any script and their speed on hostile input, NER aggregation and batched cross-encoder scoring driven by stubs, progress bounds, and the model-name table every result reports from |
+| Python worker | 88 tests: lifecycle, validation and HTTP, process crashes, cancellation, timeouts, retention, allocation/exit races, redaction rules including IPv6, lower-case IBANs and email addresses in any script and their speed on hostile input, NER aggregation and batched cross-encoder scoring driven by stubs, the NER measurement's sample and scoring, progress bounds, and the model-name table every result reports from |
 | MCP server | 119 tests, offline with hash-pinned wheels: the protocol client against an in-process worker, every tool through the SDK's in-memory client with test tasks enabled, the entry point as a subprocess, result validators on synthetic data, the index builder (chunking, the format and each corruption it refuses, building against the worker, caching, its command line) `bridge_search` (the model gate, path confinement, reloads, rerank on and off), the reachability of every answer in the LLM evaluation, that a default search sees only part of its corpus and that its two-step question takes two steps, that the demo worker reaches none of the semantic evaluation's answers, that a tool waits out a full worker, before each of a search's jobs and within one budget, and says so when it stays full, the evaluation runner's command, isolation checks, scoring and per-backend launcher and index check without starting `claude`, a check that the server's model names match the worker's, that every path parameter says where it resolves and every position in a result says what it counts, and a check that every timing claim in a tool description is a measured median |
 | PHP contracts + HTTP | 134 checks per PHP version; this **includes** the 101 contract checks, not 134 + 101 |
 | FrankenPHP | 12 jobs submitted by six concurrent test threads through a reused PHP worker, a 512-document `top_k` request, embedding and redaction round trips, and invalid-input, missing-job and multibyte boundary checks |
@@ -63,7 +63,7 @@ The original prototype was not entirely developed with TDD. Review corrections u
 - No full Symfony kernel or Laravel application/Octane integration test, including configuration caching and multi-user authorization.
 - No fresh consumer Composer-install smoke test or Packagist release yet; repository examples use a small local autoloader.
 - No sustained load/soak benchmark, throughput claim, p95/p99 latency, warm-model latency, measured memory-per-job limit or CPU cost per inference; the only timing figures are the cold-job medians below.
-- No representative ranking-quality evaluation (for example NDCG/MRR), multilingual accuracy evaluation, measured NER precision/recall or GPU benchmark.
+- No representative ranking-quality evaluation (for example NDCG/MRR), multilingual accuracy evaluation, NER quality on real data or GPU benchmark; the NER figures below come from 48 invented sentences.
 - No repeated or semantic LLM evaluation. The one recorded run below is a single session per question per model on the demo worker, so it shows that the tools can be used, not a success rate or retrieval quality.
 - No verified native Windows/macOS service execution or ARM runtime; Docker tests target Linux amd64/Python 3.12.
 - No durable delivery, restart recovery, automatic retry, idempotency or multi-instance result routing. Jobs and results live in memory.
@@ -97,6 +97,35 @@ Every model smoke run prints a fresh table to its job summary. To reproduce loca
 docker compose -f docker/compose.yaml up -d worker model-worker
 docker compose -f docker/compose.yaml run --rm --no-deps -T model-bench
 docker compose -f docker/compose.yaml --profile model down
+```
+
+## Measured NER precision and recall (informational)
+
+`scripts/ner_measure.py` runs every sentence of `tests/fixtures/ner-sample.json` through the ONNX worker's redact task with PER, ORG and LOC, at the task's default threshold and a lower one, and compares the model's spans with the sample's labels; rule spans are not counted. The model workflow prints a fresh table to its job summary on every run, and fails only if a job fails, never on a score. The sample is invented and small, so these figures describe this pinned model on these three registers, not a quality guarantee.
+
+Measured 2026-10-01 UTC, commit `unknown`, runner: local, unspecified, CPU: AMD Ryzen 9 9950X 16-Core Processor.
+Model `Xenova/bert-base-NER:int8`; 48 invented sentences with 104 labelled entities; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and any shared character.
+
+| Threshold | Register or label | Gold | Predicted | Precision, exact | Recall, exact | Precision, overlapping | Recall, overlapping |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.85 | news | 38 | 38 | 1.00 | 1.00 | 1.00 | 1.00 |
+| 0.85 | records | 36 | 36 | 0.81 | 0.81 | 0.94 | 0.89 |
+| 0.85 | informal | 30 | 5 | 0.80 | 0.13 | 1.00 | 0.17 |
+| 0.85 | PER | 42 | 30 | 0.80 | 0.57 | 1.00 | 0.67 |
+| 0.85 | ORG | 24 | 19 | 0.95 | 0.75 | 0.95 | 0.75 |
+| 0.85 | LOC | 38 | 30 | 0.97 | 0.76 | 0.97 | 0.76 |
+| 0.5 | news | 38 | 38 | 1.00 | 1.00 | 1.00 | 1.00 |
+| 0.5 | records | 36 | 39 | 0.74 | 0.81 | 0.90 | 0.89 |
+| 0.5 | informal | 30 | 5 | 0.80 | 0.13 | 1.00 | 0.17 |
+| 0.5 | PER | 42 | 31 | 0.77 | 0.57 | 1.00 | 0.67 |
+| 0.5 | ORG | 24 | 19 | 0.95 | 0.75 | 0.95 | 0.75 |
+| 0.5 | LOC | 38 | 32 | 0.91 | 0.76 | 0.91 | 0.76 |
+
+The model found every entity in news-style sentences, the register of its CoNLL-2003 training text. In terse records it missed a name written surname first in capitals (`WIERZBICKI, Tomasz`), cut names written with an initial or a hyphen into pieces, tagged only the initial of `A. Okonkwo` so the surname would stay visible, and swapped the labels of a clinic and a city. In informal messages it found only the capitalised names: every lower-case name, place and company was missed. Lowering the threshold does not bring those back, because the model labels them as no entity at all, so its confidence never comes into play; it only cost precision in records. To reproduce locally after acquiring the models:
+
+```sh
+docker compose -f docker/compose.yaml up -d model-worker
+docker compose -f docker/compose.yaml run --rm --no-deps -T model-ner
 ```
 
 ## LLM evaluation (informational)

@@ -58,7 +58,8 @@ BACKENDS = {
                   "256 word pieces; unit-length mean-pooled vectors."),
         "redact": ("Xenova/bert-base-NER:int8", "checksum and pattern rules plus dslim/bert-base-NER (the "
                    "int8 ONNX conversion published as Xenova/bert-base-NER) for PER, ORG and LOC. Trained on "
-                   "English news; recall on other text is lower and unmeasured."),
+                   "English news: on an invented sample it found every entity in news-style sentences, about four in "
+                   "five in terse records and about one in eight in informal lower-case messages (docs/testing.md)."),
     },
 }
 

@@ -196,6 +196,18 @@ services:
       BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
     command: [python, scripts/benchmark.py]
 
+  # Informational NER precision and recall on tests/fixtures/ner-sample.json, against model-worker.
+  model-ner:
+    <<: *python
+    profiles: [model]
+    networks: [isolated]
+    environment:
+      <<: *python-env
+      NER_TARGET: http://model-worker:8090
+      BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
+      BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
+    command: [python, scripts/ner_measure.py]
+
   mcp-fetcher:
     <<: *python
     profiles: [mcp-fetch]
