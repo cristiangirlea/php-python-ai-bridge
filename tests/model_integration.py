@@ -1,7 +1,7 @@
 """Small model smoke test, not a ranking-quality benchmark."""
 
 from integration import finished, request, wait_ready
-from model_cases import REDACT_TEXT, RERANK_CASES, SIMILAR_TEXTS
+from model_cases import REDACT_TEXT, RERANK_CASES, SIMILAR_TEXTS, UNCASED_MASKED, UNCASED_TEXT
 
 
 FRANCE = ["Bananas are yellow fruit.", "Paris is the capital of France.", "A car has four wheels."]
@@ -56,14 +56,19 @@ def main():
     status, job, _ = request("/redact", {"text": REDACT_TEXT, "entities": ["PER", "LOC"]})
     assert status == 202
     result = finished(job["id"])["result"]
-    assert result["model"] == "Xenova/bert-base-NER:int8", result["model"]
+    assert result["model"] == "Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncased:int8", result["model"]
     assert result["text"] == "\u2014 [PER] wrote to [EMAIL] about [LOC].", result["text"]
     assert [s["source"] for s in result["spans"]] == ["model:PER", "rule:email", "model:LOC"], result["spans"]
     assert all(0 < s["score"] <= 1 for s in result["spans"])
+    status, job, _ = request("/redact", {"text": UNCASED_TEXT, "entities": ["PER"], "min_score": 0.5})
+    assert status == 202
+    result = finished(job["id"])["result"]
+    assert result["text"] == UNCASED_MASKED, result
+    assert [s["source"] for s in result["spans"]] == ["model:PER"], result["spans"]
     # Precision guard: ordinary text must not grow spans.
     status, job, _ = request("/redact", {"text": "The weather is nice today and the meeting starts at noon."})
     assert finished(job["id"])["result"]["spans"] == []
-    print("PASS: 2 real ONNX ranking cases, a 70-document batched ranking with score parity, 1 embedding case and 2 redaction cases through HTTP -> FrankenPHP worker -> PHP client -> Python model")
+    print("PASS: 2 real ONNX ranking cases, a 70-document batched ranking with score parity, 1 embedding case and 3 redaction cases through HTTP -> FrankenPHP worker -> PHP client -> Python model")
 
 
 if __name__ == "__main__":

@@ -87,14 +87,22 @@ if ($embedding->model !== 'sentence-transformers/all-MiniLM-L6-v2' || $embedding
 $text = "\u{2014} John Smith wrote to john@example.com about Berlin.";
 $job = $client->submitRedact($text, ['PER', 'LOC'], timeoutMs: 60000);
 $redaction = RedactResult::fromJob($client->wait($job->id, 60000), $text);
-if ($redaction->model !== 'Xenova/bert-base-NER:int8' || $redaction->text !== "\u{2014} [PER] wrote to [EMAIL] about [LOC]."
+if ($redaction->model !== 'Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncased:int8'
+    || $redaction->text !== "\u{2014} [PER] wrote to [EMAIL] about [LOC]."
     || array_column($redaction->spans, 'source') !== ['model:PER', 'rule:email', 'model:LOC']
 ) {
     throw new RuntimeException('Real NER smoke case failed: ' . json_encode($redaction->spans));
+}
+// A lower-case name in a sentence that holds a capital: only the uncased model masks it (tests/model_cases.py).
+$text = 'I spoke with esperanza and she agreed.';
+$job = $client->submitRedact($text, ['PER'], 0.5, 60000);
+$redaction = RedactResult::fromJob($client->wait($job->id, 60000), $text);
+if ($redaction->text !== 'I spoke with [PER] and she agreed.' || array_column($redaction->spans, 'source') !== ['model:PER']) {
+    throw new RuntimeException('Uncased NER smoke case failed: ' . json_encode($redaction->spans));
 }
 $clean = 'The weather is nice today and the meeting starts at noon.';
 $job = $client->submitRedact($clean, timeoutMs: 60000);
 if (RedactResult::fromJob($client->wait($job->id, 60000), $clean)->spans !== []) {
     throw new RuntimeException('Real NER smoke case produced spans on clean text');
 }
-echo "PASS: 2 real ONNX ranking cases, a 70-document batched ranking with score parity, 1 embedding case and 2 redaction cases through the PHP client\n";
+echo "PASS: 2 real ONNX ranking cases, a 70-document batched ranking with score parity, 1 embedding case and 3 redaction cases through the PHP client\n";
