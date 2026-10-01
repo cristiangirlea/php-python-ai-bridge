@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 from urllib.request import urlopen
 
-# One directory per task under /cache/models. Hashes are SHA-256 of the exact files at the revision.
+# One directory per model under /cache/models, named for the task that loads it. Hashes are SHA-256 of the exact
+# files at the revision.
 MODELS = {
     "rerank": {
         "repository": "cross-encoder/ms-marco-TinyBERT-L2-v2",
@@ -39,8 +40,22 @@ MODELS = {
             "model.onnx": "7de0a4606c65b60da275a72f37b76a102c41e2b79c6463096a9d0cb800bf3f2c",
         },
     },
+    # The same author's uncased model, dslim/bert-base-NER-uncased, in the same converter's int8 conversion. The
+    # cased model finds almost no name written in lower case; this one reads "rahim" as it reads "Rahim". Both share
+    # dslim's label order, which NER_LABELS in the worker holds.
+    "redact-uncased": {
+        "repository": "Xenova/bert-base-NER-uncased",
+        "revision": "5e99d439d48710336764eea7b6f8ff87f2f40ae4",
+        "license": "MIT",
+        "files": {"tokenizer.json": "tokenizer.json", "onnx/model_int8.onnx": "model.onnx"},
+        "hashes": {
+            "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+            "model.onnx": "37103d2168679e618ebaaa672ad33bcb1167c1776f840e1506a83527cb48b5a7",
+        },
+    },
 }
-# Raised from 100 MiB for the 103.5 MiB int8 NER model; the fp32 and 4-bit variants were rejected.
+# Raised from 100 MiB for the int8 NER models, 103.5 MiB cased and 104.6 MiB uncased; the fp32 and 4-bit variants
+# were rejected.
 LIMIT = 128 * 1024 * 1024
 
 

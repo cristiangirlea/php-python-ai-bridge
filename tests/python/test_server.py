@@ -1,8 +1,13 @@
 import http.client
 import json
+import os
+import sys
+import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
+from ai_bridge import server, tasks
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
 
@@ -95,3 +100,50 @@ class HttpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartupTests(unittest.TestCase):
+    """An ONNX worker refuses to start without its model files, naming what is missing, rather than failing every job
+    as task_failed: a cache fetched before a model was added holds no directory for it."""
+
+    def models(self, root, complete):
+        for name in complete:
+            os.makedirs(os.path.join(root, name))
+            for file in ("tokenizer.json", "model.onnx"):
+                open(os.path.join(root, name, file), "w").close()
+
+    def start(self, backend, root):
+        environment = {"BRIDGE_BACKEND": backend, "BRIDGE_MODEL_DIR": root, "BRIDGE_TOKEN": TOKEN}
+        with patch.dict(os.environ, environment), patch.object(sys, "argv", ["ai_bridge.server", "--port", "0"]), \
+                patch.object(server, "BridgeServer") as bridge, patch.object(server.signal, "signal"):
+            server.main()
+        return bridge
+
+    def test_missing_models_names_each_directory_without_both_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.models(root, ["rerank", "embed", "redact"])
+            os.makedirs(os.path.join(root, "redact-uncased"))
+            open(os.path.join(root, "redact-uncased", "tokenizer.json"), "w").close()
+            self.assertEqual(tasks.missing_models(root), ["redact-uncased"])
+            self.assertEqual(tasks.missing_models(os.path.join(root, "absent")), list(tasks.MODEL_DIRECTORIES))
+
+    def test_an_onnx_worker_refuses_to_start_without_its_models(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.models(root, ["rerank", "embed", "redact"])
+            with self.assertRaises(SystemExit) as raised:
+                self.start("onnx", root)
+        message = str(raised.exception.code)
+        self.assertIn("redact-uncased", message)
+        self.assertIn("fetcher", message)
+        self.assertNotIn(TOKEN, message)
+
+    def test_an_onnx_worker_with_every_model_starts(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.models(root, tasks.MODEL_DIRECTORIES)
+            bridge = self.start("onnx", root)
+        bridge.assert_called_once()
+
+    def test_a_lexical_worker_needs_no_models(self):
+        with tempfile.TemporaryDirectory() as root:
+            bridge = self.start("lexical", root)
+        bridge.assert_called_once()

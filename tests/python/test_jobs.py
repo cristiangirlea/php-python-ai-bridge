@@ -524,8 +524,12 @@ class CasedVariantTests(unittest.TestCase):
 
 
 class NerPassesTests(unittest.TestCase):
-    """_ner runs the model on the text and, when a sentence is uncased, on its title-cased copy; spans from both
-    come back in the text's own offsets, the text's first. A stub model tags every capitalised word as a person."""
+    """_ner runs the cased model on the text and, when a sentence is uncased, on its title-cased copy, then the
+    uncased model on the text as written; spans from every reading come back in the text's own offsets. The stub
+    cased model tags every capitalised word as a person; the stub uncased model tags the names it knows whatever
+    their case, as the real one reads "rahim" and "Rahim" alike."""
+
+    UNCASED_NAMES = {"priya", "nadia", "rahim"}
 
     class Encoding:
         def __init__(self, text):
@@ -544,41 +548,80 @@ class NerPassesTests(unittest.TestCase):
 
     @staticmethod
     def probabilities(session, names, window):
+        # The session stands in as its model directory's name, so the stub knows which model it is.
         rows = []
         for position, word_id in enumerate(window.word_ids):
             row = [0.0] * len(tasks.NER_LABELS)
             start, end = window.offsets[position]
-            capitalised = word_id is not None and window.text[start:end][:1].isupper()
-            row[tasks.NER_LABELS.index("B-PER" if capitalised else "O")] = 0.99
+            word = window.text[start:end]
+            if session == "redact-uncased":
+                person = word_id is not None and word.lower() in NerPassesTests.UNCASED_NAMES
+            else:
+                person = word_id is not None and word[:1].isupper()
+            row[tasks.NER_LABELS.index("B-PER" if person else "O")] = 0.99
             rows.append(row)
         return rows
 
+    def stubs(self):
+        tokenizers = {}
+
+        def load(directory, max_length, stride=0):
+            name = Path(directory).name
+            tokenizers[name] = self.Tokenizer()
+            return tokenizers[name], name, set()
+
+        return tokenizers, patch.object(tasks, "_onnx", side_effect=load), \
+            patch.object(tasks, "_probabilities", self.probabilities)
+
     def run_ner(self, text):
-        tokenizer, events = self.Tokenizer(), []
-        with patch.object(tasks, "_onnx", return_value=(tokenizer, object(), set())), \
-                patch.object(tasks, "_probabilities", self.probabilities):
-            spans = tasks._ner(text, ["PER"], 0.85, "/unused", lambda completed, total: events.append((completed, total)))
-        return [(span["start"], span["end"]) for span in spans], tokenizer.texts, events
+        events = []
+        tokenizers, load, probabilities = self.stubs()
+        with load, probabilities:
+            spans = tasks._ner(text, ["PER"], 0.85, "/models", lambda completed, total: events.append((completed, total)))
+        texts = {name: tokenizer.texts for name, tokenizer in tokenizers.items()}
+        return [(span["start"], span["end"]) for span in spans], texts, events
 
     def test_an_uncased_sentence_is_read_again_in_title_case(self):
         spans, texts, events = self.run_ner("ask priya")
-        self.assertEqual(texts, ["ask priya", "Ask Priya"])
-        self.assertEqual(spans, [(0, 3), (4, 9)])  # offsets of the original text
-        self.assertEqual(events, [(0, 2), (1, 2), (2, 2)])
+        self.assertEqual(texts["redact"], ["ask priya", "Ask Priya"])
+        # "Ask" and "Priya" from the title-cased copy, in offsets of the original text; "priya" again from the uncased model.
+        self.assertEqual(sorted(spans), [(0, 3), (4, 9), (4, 9)])
+        self.assertEqual(events, [(0, 3), (1, 3), (2, 3), (3, 3)])
 
     def test_only_the_rewritten_sentences_are_read_again(self):
         # The cased sentence is read once; the second reading covers the lower-case one alone, so it costs one more
         # window rather than the whole text again, and its spans land at the original offsets.
         spans, texts, events = self.run_ner("Ask Priya now. ask nadia")
-        self.assertEqual(texts, ["Ask Priya now. ask nadia", " Ask Nadia"])
+        self.assertEqual(texts["redact"], ["Ask Priya now. ask nadia", " Ask Nadia"])
         self.assertIn((15, 18), spans)  # "ask"
         self.assertIn((19, 24), spans)  # "nadia"
-        self.assertEqual(events[-1], (2, 2))
+        self.assertEqual(events[-1], (3, 3))
 
-    def test_cased_text_is_read_once(self):
+    def test_cased_text_is_read_once_by_each_model(self):
         spans, texts, events = self.run_ner("Ask Priya.")
-        self.assertEqual(texts, ["Ask Priya."])
-        self.assertEqual(events, [(0, 1), (1, 1)])
+        self.assertEqual(texts, {"redact": ["Ask Priya."], "redact-uncased": ["Ask Priya."]})
+        self.assertEqual(events, [(0, 2), (1, 2), (2, 2)])
+
+    def test_the_uncased_model_reads_the_whole_text_as_written(self):
+        # Not the title-cased copy: case means nothing to it, and the cased sentences need it too.
+        spans, texts, events = self.run_ner("Ask Priya now. ask nadia")
+        self.assertEqual(texts["redact-uncased"], ["Ask Priya now. ask nadia"])
+
+    def test_a_lower_case_name_among_capitals_is_found_by_the_uncased_model(self):
+        # The sentence holds capitals, so it is not rewritten, and the cased model passes over "rahim".
+        spans, texts, events = self.run_ner("the 2PM call is with rahim")
+        self.assertEqual(texts["redact"], ["the 2PM call is with rahim"])
+        self.assertEqual(spans, [(21, 26)])
+
+    def test_redaction_masks_what_only_the_uncased_model_finds_and_names_both_models(self):
+        tokenizers, load, probabilities = self.stubs()
+        with load, probabilities:
+            result = execute("redact", {"text": "the 2PM call is with rahim"}, "onnx", "/models", lambda *_: None)
+        self.assertEqual(result["text"], "the 2PM call is with [PER]")
+        self.assertEqual([span["source"] for span in result["spans"]], ["model:PER"])
+        self.assertEqual(result["model"], tasks.MODEL_NAMES["onnx"]["redact"])
+        self.assertIn("Xenova/bert-base-NER:int8", result["model"])
+        self.assertIn("Xenova/bert-base-NER-uncased:int8", result["model"])
 
 
 class ModelNameTests(unittest.TestCase):
