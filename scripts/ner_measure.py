@@ -40,17 +40,23 @@ def predictions(spans: list, threshold: float) -> list:
             if span["source"].startswith("model:") and span["score"] >= threshold]
 
 
-def score(gold: list, predicted: list) -> dict:
-    """Exact: same label and boundaries. Overlapping: same label and a shared character, each predicted span matching
-    one gold span at most, so one span over two names finds one of them."""
-    unused, overlapping = list(predicted), 0
+def matched(gold: list, predicted: list, same_label: bool) -> int:
+    """Gold spans overlapped by a predicted span, each predicted span matching one gold span at most."""
+    unused, count = list(predicted), 0
     for start, end, label in gold:
-        match = next((p for p in unused if p[2] == label and p[0] < end and start < p[1]), None)
+        match = next((p for p in unused if (p[2] == label or not same_label) and p[0] < end and start < p[1]), None)
         if match is not None:
             unused.remove(match)
-            overlapping += 1
+            count += 1
+    return count
+
+
+def score(gold: list, predicted: list) -> dict:
+    """Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted
+    span, so one span over two names finds one of them. Masked: a shared character under any label, which is what a
+    redaction hides."""
     return {"gold": len(gold), "predicted": len(predicted), "exact": len(set(gold) & set(predicted)),
-            "overlapping": overlapping}
+            "overlapping": matched(gold, predicted, True), "masked": matched(gold, predicted, False)}
 
 
 def rate(part: int, whole: int) -> str:
@@ -108,14 +114,15 @@ def main() -> None:
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     entities = sum(len(item["entities"]) for item in items)
     print(f"""Measured {now} UTC, commit `{os.environ.get("BENCH_COMMIT", "unknown")}`, runner: {os.environ.get("BENCH_RUNNER", "unspecified")}, CPU: {cpu_model()}.
-Model {", ".join(f"`{model}`" for model in sorted(models))}; `{sample.relative_to(REPO).as_posix()}`, {len(items)} invented sentences with {entities} labelled entities; one redact job per sentence at threshold {min(THRESHOLDS)}, entities PER, ORG and LOC, and a higher threshold keeps the spans whose score reaches it. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span.
+Model {", ".join(f"`{model}`" for model in sorted(models))}; `{sample.relative_to(REPO).as_posix()}`, {len(items)} invented sentences with {entities} labelled entities; one redact job per sentence at threshold {min(THRESHOLDS)}, entities PER, ORG and LOC, and a higher threshold keeps the spans whose score reaches it. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: a shared character under any label, the share of entities a redaction hides.
 
-| Threshold | Register or label | Gold | Predicted | Precision, exact | Recall, exact | Precision, overlapping | Recall, overlapping |
-| --- | --- | --- | --- | --- | --- | --- | --- |""")
+| Threshold | Register or label | Gold | Predicted | Precision, exact | Recall, exact | Precision, overlapping | Recall, overlapping | Masked |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |""")
     for threshold, name, counts in tally(items, spans, THRESHOLDS):
         print(f"| {threshold} | {name} | {counts['gold']} | {counts['predicted']} | "
               f"{rate(counts['exact'], counts['predicted'])} | {rate(counts['exact'], counts['gold'])} | "
-              f"{rate(counts['overlapping'], counts['predicted'])} | {rate(counts['overlapping'], counts['gold'])} |")
+              f"{rate(counts['overlapping'], counts['predicted'])} | {rate(counts['overlapping'], counts['gold'])} | "
+              f"{rate(counts['masked'], counts['gold'])} |")
 
 
 if __name__ == "__main__":
