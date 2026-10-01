@@ -196,6 +196,54 @@ class RedactRulesTests(unittest.TestCase):
                 self.assertEqual(self.redact(text)["spans"], [])
         self.assertEqual(self.redact("tel 555-1234 or 5551234567")["text"], "tel [PHONE] or [PHONE]")
 
+    def masked(self, text):
+        result = self.redact(text)
+        return [(span["label"], text[span["start"]:span["end"]]) for span in result["spans"]]
+
+    def test_ipv6_addresses_are_masked_in_every_written_form(self):
+        for address in ["2001:db8::8a2e:370:7334", "fe80::1", "::1", "2001:0db8:0000:0000:0000:ff00:0042:8329",
+                        "FE80::0202:B3FF:FE1E:8329"]:
+            with self.subTest(address=address):
+                self.assertEqual(self.masked(f"host {address} is up"), [("IPV6", address)])
+        # One span for an IPv4-mapped address, not an IPv6 span with an IPv4 inside it.
+        self.assertEqual(self.masked("peer ::ffff:192.0.2.1 left"), [("IPV6", "::ffff:192.0.2.1")])
+        # A sentence's full stop is not part of the address.
+        self.assertEqual(self.redact("Reach it at fe80::1.")["text"], "Reach it at [IPV6].")
+        self.assertEqual(self.redact("x fe80::1 y")["spans"][0]["source"], "rule:ipv6")
+
+    def test_colon_runs_that_are_not_ipv6_addresses_are_left_alone(self):
+        for text in ["meet at 12:30:45 today", "ratio 3:2:1 holds", "mac 00:1A:2B:3C:4D:5E here",
+                     "use std::vector here", "see Note:: below", "a::b::c is not one"]:
+            with self.subTest(text=text):
+                self.assertEqual([label for label, _ in self.masked(text)], [])
+
+    def test_lower_case_ibans_are_masked_when_the_country_and_checksum_hold(self):
+        for iban in ["gb82 west 1234 5698 7654 32", "de89370400440532013000"]:
+            with self.subTest(iban=iban):
+                self.assertEqual(self.masked(f"iban {iban} ok"), [("IBAN", iban)])
+        # Mixed case is neither form, and a failed checksum is never an IBAN.
+        self.assertEqual([label for label, _ in self.masked("iban Gb82 West 1234 5698 7654 32 ok")
+                          if label == "IBAN"], [])
+        self.assertEqual([label for label, _ in self.masked("iban gb82 west 1234 5698 7654 33 ok")
+                          if label == "IBAN"], [])
+
+    def test_lower_case_prose_after_a_code_like_word_is_not_an_iban(self):
+        for text in ["ab12 the quick brown fox jumps over the lazy dog", "xx82 west 1234 5698 7654 32",
+                     "mp34 player sold with the original box and charger"]:
+            with self.subTest(text=text):
+                self.assertNotIn("IBAN", [label for label, _ in self.masked(text)])
+
+    def test_email_addresses_in_any_script_are_masked(self):
+        for address in ["josé@example.com", "user@bücher.de", "用户@例子.广告", "иван@пример.рф",
+                        "info@xn--bcher-kva.de", "a.b@example.xn--p1ai"]:
+            with self.subTest(address=address):
+                self.assertEqual(self.masked(f"write to {address}."), [("EMAIL", address)])
+
+    def test_strings_that_only_look_like_email_addresses_are_left_alone(self):
+        for text in ["ping @handle now", "a@b is short", "x@y without a domain", "name@host.c1 is no domain"]:
+            with self.subTest(text=text):
+                self.assertNotIn("EMAIL", [label for label, _ in self.masked(text)])
+
     def test_overlapping_candidates_are_merged_not_dropped(self):
         merged = _merge([
             {"start": 0, "end": 9, "label": "PER", "source": "model:PER", "score": 0.9, "priority": 5},
