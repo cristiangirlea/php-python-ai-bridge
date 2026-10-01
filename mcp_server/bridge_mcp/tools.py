@@ -57,11 +57,12 @@ BACKENDS = {
         "embed": ("sentence-transformers/all-MiniLM-L6-v2", "through ONNX Runtime on CPU; English, truncated at "
                   "256 word pieces; unit-length mean-pooled vectors."),
         # The recall figures come from scripts/ner_measure.py's table in docs/testing.md; re-measure and update both.
-        "redact": ("Xenova/bert-base-NER:int8", "checksum and pattern rules plus dslim/bert-base-NER (the "
-                   "int8 ONNX conversion published as Xenova/bert-base-NER) for PER, ORG and LOC. Trained on "
-                   "cased English news, so lower-case and all-capitals sentences are read again in title case: on an "
-                   "invented sample it masked every entity in news-style sentences, nearly every one in terse records "
-                   "and about three in five in informal messages (docs/testing.md)."),
+        "redact": ("Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncased:int8", "checksum and pattern rules plus "
+                   "dslim/bert-base-NER and dslim/bert-base-NER-uncased (the int8 ONNX conversions published as "
+                   "Xenova/bert-base-NER and Xenova/bert-base-NER-uncased) for PER, ORG and LOC, both trained on "
+                   "English news. The cased model reads the text, and again in title case where a sentence is all "
+                   "lower case or all capitals; the uncased model reads it once more ignoring case, so a lower-case "
+                   "name among capitals is found too. Measured recall on an invented sample: docs/testing.md."),
     },
 }
 
