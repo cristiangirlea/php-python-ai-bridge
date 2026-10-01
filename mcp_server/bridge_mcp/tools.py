@@ -61,15 +61,18 @@ BACKENDS = {
                    "dslim/bert-base-NER and dslim/bert-base-NER-uncased (the int8 ONNX conversions published as "
                    "Xenova/bert-base-NER and Xenova/bert-base-NER-uncased) for PER, ORG and LOC, both trained on "
                    "English news. The cased model reads the text, and again in title case where a sentence is all "
-                   "lower case or all capitals; the uncased model reads it once more ignoring case, so a lower-case "
-                   "name among capitals is found too. Measured recall on an invented sample: docs/testing.md."),
+                   "lower case or all capitals; the uncased model reads it once more ignoring case, which finds most "
+                   "lower-case names the cased model misses. On an invented sample they masked every entity in "
+                   "news-style sentences and terse records and four in five in informal messages (docs/testing.md)."),
     },
 }
 
 # Worker time from submission to a terminal state: the p50 of five cold jobs on one CPU, as the range between
 # two GitHub-hosted runners measured 2026-09-27 (docs/testing.md's "Measured latency" table and the earlier run
-# it quotes): the lexical rows, and on onnx the 32- and 512-document rerank rows, the embed row and the redact
-# row. The same figures appear in docs/mcp.md's tool table; a re-measurement updates all three places.
+# it quotes): the lexical rows, and on onnx the 32- and 512-document rerank rows and the embed row. Redaction runs
+# two models since pull request #19, so its range is that pull request's run on an EPYC 7763 runner and a local
+# Ryzen 9 9950X, measured 2026-10-01. The same figures appear in docs/mcp.md's tool table; a re-measurement updates
+# all three places.
 _COLD = "median of five cold jobs on one CPU on two runners, the model loaded afresh for each; docs/testing.md"
 TIMING = {
     "lexical": {task: "about 0.4 s of worker time (median of five cold jobs on one CPU on two runners, almost all "
@@ -77,7 +80,8 @@ TIMING = {
     "onnx": {
         "rerank": f"0.7-0.9 s of worker time for 32 documents and 1.0-1.2 s for 512 ({_COLD})",
         "embed": f"1.1-1.3 s of worker time for 32 texts ({_COLD})",
-        "redact": f"1.6-2.4 s of worker time for 2000 characters with all three entity kinds ({_COLD})",
+        "redact": "2.8-3.4 s of worker time for 2000 characters with all three entity kinds (median of five cold jobs "
+                  "on one CPU on two machines, both models loaded afresh for each; docs/testing.md)",
     },
 }
 

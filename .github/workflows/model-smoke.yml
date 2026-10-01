@@ -7,7 +7,7 @@ on:
   schedule:
     - cron: "17 6 * * 1"
   # Any change that can alter model acquisition or inference. Not a required check: it downloads
-  # about 215 MB and needs the network, which the deterministic gate deliberately does not.
+  # about 330 MB and needs the network, which the deterministic gate deliberately does not.
   pull_request:
     paths:
       - scripts/fetch_model.py

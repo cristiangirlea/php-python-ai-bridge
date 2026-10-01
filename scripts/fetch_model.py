@@ -54,7 +54,8 @@ MODELS = {
         },
     },
 }
-# Raised from 100 MiB for the 103.5 MiB int8 NER model; the fp32 and 4-bit variants were rejected.
+# Raised from 100 MiB for the int8 NER models, 103.5 MiB cased and 104.6 MiB uncased; the fp32 and 4-bit variants
+# were rejected.
 LIMIT = 128 * 1024 * 1024
 
 

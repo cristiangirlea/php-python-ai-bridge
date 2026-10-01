@@ -9,12 +9,12 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 - PHP 8.2–8.5 client using cURL, with validated job objects and typed rerank, embedding and redaction results. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result; the ONNX backend scores them 32 pairs per forward pass.
 - Python 3.12 service with an explicit task allowlist and a separate process per task.
 - Text embedding: up to 32 texts per job return unit-length 384-dimensional vectors for an index the caller owns.
-- Redaction: checksum and pattern rules for card numbers, IBANs, emails, IPv4 addresses and phone numbers on every backend, plus named-entity masking with int8 `bert-base-NER` on the ONNX profile. Assistive, not a compliance control.
+- Redaction: checksum and pattern rules for card numbers, IBANs, emails, IPv4 and IPv6 addresses and phone numbers on every backend, plus named-entity masking with the int8 cased and uncased `bert-base-NER` models on the ONNX profile. Assistive, not a compliance control.
 - Bounded concurrency, queue/result capacity, retention, request sizes and execution deadlines.
 - Cancellation, progress polling, crash detection and generic errors that omit internal exception text.
 - A FrankenPHP example that submits work and returns a job ID immediately.
 - A stdio MCP server with one tool per task, a second client of the same protocol beside the PHP client, plus an index builder over the protocol and a `bridge_search` tool that searches what it built, returning offsets and snippets rather than vectors, a compose service that puts the pinned ONNX models behind it, and a ten-question evaluation for LLM hosts with a runner for the Claude Code CLI; see [the MCP guide](docs/mcp.md).
-- CPU inference with `cross-encoder/ms-marco-TinyBERT-L2-v2`, `sentence-transformers/all-MiniLM-L6-v2` and int8 `dslim/bert-base-NER` through ONNX Runtime, using pinned model files and wheel hashes.
+- CPU inference with `cross-encoder/ms-marco-TinyBERT-L2-v2`, `sentence-transformers/all-MiniLM-L6-v2` and int8 `dslim/bert-base-NER` and `dslim/bert-base-NER-uncased` through ONNX Runtime, using pinned model files and wheel hashes.
 
 The default backends are **`lexical-demo-not-a-model`** for reranking and **`hashing-bow-not-a-model`** for embedding, deterministic word overlap and feature hashing for testing the integration, and **`rules-only-not-a-model`** for redaction, which runs the real checksum and pattern rules but no model. None of them is described as AI. Enable the optional model profile below for real inference.
 
@@ -57,7 +57,7 @@ Acquire dependencies and model data in the bounded, network-enabled fetcher:
 docker compose -f docker/compose.yaml run --rm --no-deps fetcher
 ```
 
-This downloads wheels and about 215 MB of model and tokenizer data into ignored `.cache/`, one directory per task under `models/`; the fetcher refuses any single artifact over 128 MiB. A cache created before the embed task used a flat layout that the fetcher does not delete: remove `.cache/models` and fetch again after upgrading. Wheels are checked against `requirements-model.lock`; the model revision and SHA-256 hashes are fixed in `scripts/fetch_model.py`. On Linux, ensure `.cache/` exists and is writable by container UID 65532 before acquisition. For a disposable local cache, `mkdir -p .cache && chmod 777 .cache` is sufficient; never apply that permission to the repository or another directory.
+This downloads wheels and about 330 MB of model and tokenizer data into ignored `.cache/`, one directory per model under `models/`; the fetcher refuses any single artifact over 128 MiB. Fetch again after an upgrade that adds a model: an ONNX worker refuses to start while a model directory lacks its files, and names it. A cache created before the embed task used a flat layout that the fetcher does not delete: remove `.cache/models` and fetch again after upgrading. Wheels are checked against `requirements-model.lock`; the model revision and SHA-256 hashes are fixed in `scripts/fetch_model.py`. On Linux, ensure `.cache/` exists and is writable by container UID 65532 before acquisition. For a disposable local cache, `mkdir -p .cache && chmod 777 .cache` is sufficient; never apply that permission to the repository or another directory.
 
 Then run **without internet access**:
 
@@ -141,4 +141,4 @@ See [the integration guide](docs/integration.md), [test evidence and limits](doc
 
 ## License
 
-Code: [MIT](LICENSE). The optional [TinyBERT reranker](https://huggingface.co/cross-encoder/ms-marco-TinyBERT-L2-v2) and [MiniLM embedding model](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) are Apache-2.0 at their pinned revisions; the [BERT NER model](https://huggingface.co/dslim/bert-base-NER) is MIT and is fetched as the int8 ONNX conversion published by [Xenova](https://huggingface.co/Xenova/bert-base-NER), pinned by revision and hash. Model weights and dependency wheels are downloaded separately and retain their own licenses.
+Code: [MIT](LICENSE). The optional [TinyBERT reranker](https://huggingface.co/cross-encoder/ms-marco-TinyBERT-L2-v2) and [MiniLM embedding model](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) are Apache-2.0 at their pinned revisions; the cased and uncased BERT NER models, [dslim/bert-base-NER](https://huggingface.co/dslim/bert-base-NER) and [dslim/bert-base-NER-uncased](https://huggingface.co/dslim/bert-base-NER-uncased), are MIT and are fetched as the int8 ONNX conversions published by Xenova ([cased](https://huggingface.co/Xenova/bert-base-NER), [uncased](https://huggingface.co/Xenova/bert-base-NER-uncased)), pinned by revision and hash. Model weights and dependency wheels are downloaded separately and retain their own licenses.
