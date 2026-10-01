@@ -56,9 +56,11 @@ BACKENDS = {
                    "cross-encoder. Its relevance judgement is well below your own on text you can already read."),
         "embed": ("sentence-transformers/all-MiniLM-L6-v2", "through ONNX Runtime on CPU; English, truncated at "
                   "256 word pieces; unit-length mean-pooled vectors."),
+        # The recall figures come from scripts/ner_measure.py's table in docs/testing.md; re-measure and update both.
         "redact": ("Xenova/bert-base-NER:int8", "checksum and pattern rules plus dslim/bert-base-NER (the "
                    "int8 ONNX conversion published as Xenova/bert-base-NER) for PER, ORG and LOC. Trained on "
-                   "English news; recall on other text is lower and unmeasured."),
+                   "English news: on an invented sample it found every entity in news-style sentences, about four in "
+                   "five in terse records and about one in eight in informal lower-case messages (docs/testing.md)."),
     },
 }
 

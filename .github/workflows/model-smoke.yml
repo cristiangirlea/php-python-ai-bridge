@@ -17,6 +17,8 @@ on:
       # The worker's HTTP handling, which every model test and the MCP workers' health check go through.
       - worker/ai_bridge/server.py
       - scripts/benchmark.py
+      - scripts/ner_measure.py
+      - tests/fixtures/ner-sample.json
       - tests/php/model.php
       - tests/model_integration.py
       # What those smoke tests run through: the shared HTTP helpers, the PHP client and the demo route.
@@ -88,6 +90,15 @@ jobs:
           docker compose -f docker/compose.yaml up -d worker
           docker compose -f docker/compose.yaml run --rm --no-deps -T model-bench | tee benchmark.md
           { echo "## Measured latency (informational)"; echo; cat benchmark.md; } >> "$GITHUB_STEP_SUMMARY"
+      # Scores never gate either: the sample is small and invented. Every job must succeed with spans inside its text.
+      - name: NER precision and recall (informational, correctness gating)
+        shell: bash
+        env:
+          BENCH_COMMIT: ${{ github.sha }}
+          BENCH_RUNNER: GitHub-hosted ubuntu-latest
+        run: |
+          docker compose -f docker/compose.yaml run --rm --no-deps -T model-ner | tee ner.md
+          { echo "## NER precision and recall (informational)"; echo; cat ner.md; } >> "$GITHUB_STEP_SUMMARY"
       - name: Service logs on failure
         if: failure()
         run: docker compose -f docker/compose.yaml --profile model --profile mcp-model logs --tail 100

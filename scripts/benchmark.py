@@ -16,10 +16,16 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 TOKEN = os.environ.get("BRIDGE_TOKEN", "")
-TARGETS = [target.split("=", 1) for target in
-           os.environ.get("BENCH_TARGETS", "onnx=http://model-worker:8090,lexical=http://worker:8090").split(",")]
-if any(len(target) != 2 or not all(target) for target in TARGETS):
-    raise SystemExit("BENCH_TARGETS entries must look like backend=http://host:port, separated by commas")
+
+
+def targets() -> list:
+    pairs = [target.split("=", 1) for target in
+             os.environ.get("BENCH_TARGETS", "onnx=http://model-worker:8090,lexical=http://worker:8090").split(",")]
+    if any(len(target) != 2 or not all(target) for target in pairs):
+        raise SystemExit("BENCH_TARGETS entries must look like backend=http://host:port, separated by commas")
+    return pairs
+
+
 RUNS = int(os.environ.get("BENCH_RUNS", "5"))
 POLL_S = 0.05
 TERMINAL = {"succeeded", "failed", "timed_out", "cancelled"}
@@ -97,7 +103,7 @@ def cpu_model() -> str:
 
 def main() -> None:
     rows = []
-    for backend, base in TARGETS:
+    for backend, base in targets():
         reported = wait_ready(base)["backend"]
         if reported != backend:
             raise SystemExit(f"{base} reports backend {reported!r}, expected {backend!r}")
