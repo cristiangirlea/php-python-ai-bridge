@@ -204,6 +204,7 @@ services:
     environment:
       <<: *python-env
       NER_TARGET: http://model-worker:8090
+      NER_SAMPLE: ${NER_SAMPLE:-}
       BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
       BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
     command: [python, scripts/ner_measure.py]

@@ -397,16 +397,12 @@ RULES = (
 )
 
 
-def _close(spans: list, current, entities: list, min_score: float) -> None:
-    if current is None:
-        return
-    score = sum(current["scores"]) / len(current["scores"])
-    if current["label"] in entities and score >= min_score:
-        spans.append({"start": current["start"], "end": current["end"], "label": current["label"],
-                      "source": "model:" + current["label"], "score": round(score, 4), "priority": len(RULES)})
+# What may sit between two pieces of one name: nothing, or a hyphen, full stop or apostrophe ("A. Okonkwo",
+# "Mei-Ling", "O'Neill"). A space is not one: two names side by side stay two entities.
+JOINERS = frozenset({"", "-", ".", "'", "\u2019"})
 
 
-def _entities(window, probabilities: list, entities: list, min_score: float) -> list:
+def _entities(window, probabilities: list, entities: list, min_score: float, text: str) -> list:
     # Each word takes its first word piece's label, the usual BERT aggregation; later pieces only extend it.
     words = []
     for position, word_id in enumerate(window.word_ids):
@@ -419,47 +415,111 @@ def _entities(window, probabilities: list, entities: list, min_score: float) -> 
         row = probabilities[position]
         label_id = max(range(len(row)), key=row.__getitem__)
         words.append([start, end, NER_LABELS[label_id], float(row[label_id]), word_id])
-    spans, current = [], None
+    pieces, current = [], None
     for start, end, label, score, _ in words:
         prefix, _, kind = label.partition("-")
         if prefix == "B" or (prefix == "I" and (current is None or current["label"] != kind)):
-            _close(spans, current, entities, min_score)
             current = {"start": start, "end": end, "label": kind, "scores": [score]}
+            pieces.append(current)
         elif prefix == "I":
             current["end"] = end
             current["scores"].append(score)
         else:
-            _close(spans, current, entities, min_score)
             current = None
-    _close(spans, current, entities, min_score)
-    return spans
+    # The model often starts a new entity at the full stop of an initial and is less sure of what follows, so touching
+    # pieces are joined before the threshold and scored by their most confident piece: the initial carries the
+    # surname, and an unsure piece never hides a confident one, as an average over "Jean-Luc Moreau" did.
+    joined = []
+    for piece in pieces:
+        score = sum(piece["scores"]) / len(piece["scores"])
+        if joined and joined[-1]["label"] == piece["label"] and text[joined[-1]["end"]:piece["start"]] in JOINERS:
+            joined[-1]["end"] = piece["end"]
+            joined[-1]["score"] = max(joined[-1]["score"], score)
+        else:
+            joined.append({"start": piece["start"], "end": piece["end"], "label": piece["label"], "score": score})
+    return [{"start": piece["start"], "end": piece["end"], "label": piece["label"], "source": "model:" + piece["label"],
+             "score": round(piece["score"], 4), "priority": len(RULES)}
+            for piece in joined if piece["label"] in entities and piece["score"] >= min_score]
+
+
+# A sentence ends at . ! or ? before whitespace, or at a line break.
+SENTENCE_END = re.compile(r"[.!?](?=\s)|\n")
+LETTERS = re.compile(r"[^\W\d_]+")
+# What follows a surname written first in capitals in records: a comma and a given name ("WIERZBICKI, Tomasz").
+GIVEN_NAME_AFTER = re.compile(r",\s+([^\W\d_]+)")
+
+
+def _cased_variant(text: str):
+    return _recase(text)[0]
+
+
+def _recase(text: str):
+    """(copy, ranges): a copy of text, offset for offset, with each sentence written all in lower case or all in
+    capitals in title case, or (None, []) when no sentence is. The model was trained on cased news and finds almost no lower-case name;
+    sentence case and mixed case are left alone, since title-casing "the board approved" makes "Board" an
+    organisation, except for a surname in capitals before a comma and a given name, the records convention, which
+    the model otherwise takes for a place or misses. A character whose case change would alter its length stays.
+    The ranges are the runs of rewritten sentences, the only part a second reading needs."""
+    chars, start, ranges = list(text), 0, []
+    for end in [match.end() for match in SENTENCE_END.finditer(text)] + [len(text)]:
+        cased = [char for char in text[start:end] if char.isupper() or char.islower()]
+        uncased = bool(cased) and not (any(char.isupper() for char in cased) and any(char.islower() for char in cased))
+        for word in LETTERS.finditer(text, start, end):
+            given = GIVEN_NAME_AFTER.match(text, word.end())
+            surname_first = (len(word.group()) > 1 and word.group().isupper() and given is not None
+                             and given.group(1)[0].isupper() and not given.group(1).isupper())
+            if uncased or surname_first:
+                for index in range(word.start(), word.end()):
+                    changed = text[index].upper() if index == word.start() else text[index].lower()
+                    if len(changed) == 1:
+                        chars[index] = changed
+        if chars[start:end] != list(text[start:end]):
+            if ranges and ranges[-1][1] == start:
+                ranges[-1] = (ranges[-1][0], end)
+            else:
+                ranges.append((start, end))
+        start = end
+    variant = "".join(chars)
+    return (variant, ranges) if variant != text else (None, [])
+
+
+def _probabilities(session, names, window) -> list:
+    import numpy as np
+
+    inputs = _tensors([window])
+    outputs = session.run(None, {key: value for key, value in inputs.items() if key in names})
+    logits = _output(session, outputs, "logits")[0]
+    shifted = np.exp(logits - logits.max(axis=-1, keepdims=True))
+    return (shifted / shifted.sum(axis=-1, keepdims=True)).tolist()
 
 
 def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) -> list:
-    import numpy as np
-
-    # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text.
+    # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text. Each run of uncased
+    # sentences is read again from its title-cased copy, and only that run, so a second reading costs a window or two
+    # and cannot relabel a sentence that needed no help; where both readings find the same span, _merge keeps the
+    # more confident.
     tokenizer, session, names = _onnx(Path(model_dir) / "redact", 512, stride=64)
-    encoding = tokenizer.encode(text)
-    windows = [encoding, *encoding.overflowing]
+    variant, ranges = _recase(text)
+    windows = []
+    for offset, reading in [(0, text)] + [(start, variant[start:end]) for start, end in ranges]:
+        encoding = tokenizer.encode(reading)
+        windows.extend((offset, reading, window) for window in [encoding, *encoding.overflowing])
     progress(0, len(windows))
     candidates = []
-    for index, window in enumerate(windows):
-        inputs = _tensors([window])
-        outputs = session.run(None, {key: value for key, value in inputs.items() if key in names})
-        logits = _output(session, outputs, "logits")[0]
-        shifted = np.exp(logits - logits.max(axis=-1, keepdims=True))
-        probabilities = (shifted / shifted.sum(axis=-1, keepdims=True)).tolist()
-        candidates.extend(_entities(window, probabilities, entities, min_score))
+    for index, (offset, reading, window) in enumerate(windows):
+        for span in _entities(window, _probabilities(session, names, window), entities, min_score, reading):
+            candidates.append({**span, "start": span["start"] + offset, "end": span["end"] + offset})
         progress(index + 1, len(windows))
     return candidates
 
 
 def _merge(candidates: list) -> list:
-    # Leftmost first, then longest, then the stronger source. A candidate overlapping the kept
+    # Leftmost first, then longest, then the stronger source, then the more confident: of the two readings of an
+    # uncased sentence, a sure "person" beats an unsure "place" for the same words. A candidate overlapping the kept
     # span extends it instead of being dropped, so no part of either stays visible.
     spans = []
-    for span in sorted(candidates, key=lambda span: (span["start"], span["start"] - span["end"], span["priority"])):
+    for span in sorted(candidates,
+                       key=lambda span: (span["start"], span["start"] - span["end"], span["priority"], -span["score"])):
         if spans and span["start"] < spans[-1]["end"]:
             spans[-1]["end"] = max(spans[-1]["end"], span["end"])
             continue

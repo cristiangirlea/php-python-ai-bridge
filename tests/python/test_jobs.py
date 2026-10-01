@@ -272,6 +272,20 @@ class RedactRulesTests(unittest.TestCase):
                          [(0, 21, "PER"), (30, 40, "IPV4")])
 
 
+    def test_of_two_model_readings_of_one_span_the_more_confident_is_kept(self):
+        # The text read as written calls "WIERZBICKI" a place at 0.71; its title-cased copy, a person at 0.998.
+        model = len(tasks.RULES)
+        merged = _merge([
+            {"start": 10, "end": 20, "label": "LOC", "source": "model:LOC", "score": 0.71, "priority": model},
+            {"start": 10, "end": 20, "label": "PER", "source": "model:PER", "score": 0.998, "priority": model}])
+        self.assertEqual([(span["label"], span["score"]) for span in merged], [("PER", 0.998)])
+        # A rule still outranks the model, however confident the model is.
+        merged = _merge([
+            {"start": 0, "end": 12, "label": "PER", "source": "model:PER", "score": 0.99, "priority": model},
+            {"start": 0, "end": 12, "label": "PHONE", "source": "rule:phone", "score": 0.8, "priority": 5}])
+        self.assertEqual([span["label"] for span in merged], ["PHONE"])
+
+
 class NerAggregationTests(unittest.TestCase):
     """Drives the BIO aggregation with a stub window so it is covered without the model."""
 
@@ -298,19 +312,20 @@ class NerAggregationTests(unittest.TestCase):
                                ("B-LOC", 0.9), ("I-LOC", 0.88), ("I-LOC", 0.7), ("O", 1.0))
 
     def test_first_piece_labels_words_and_the_threshold_uses_the_mean(self):
-        spans = _entities(self.window, self.rows_, ["PER", "LOC"], 0.85)
+        spans = _entities(self.window, self.rows_, ["PER", "LOC"], 0.85, "John Smithson lives in New York City")
         self.assertEqual(spans, [{"start": 0, "end": 13, "label": "PER", "source": "model:PER", "score": 0.925,
                                   "priority": len(tasks.RULES)}])
-        spans = _entities(self.window, self.rows_, ["PER", "LOC"], 0.8)
+        spans = _entities(self.window, self.rows_, ["PER", "LOC"], 0.8, "John Smithson lives in New York City")
         self.assertEqual([(span["start"], span["end"], span["label"], span["score"]) for span in spans],
                          [(0, 13, "PER", 0.925), (23, 36, "LOC", 0.8267)])
 
     def test_unwanted_and_misc_entities_are_dropped(self):
-        self.assertEqual([span["label"] for span in _entities(self.window, self.rows_, ["LOC"], 0.5)], ["LOC"])
+        self.assertEqual([span["label"] for span in _entities(self.window, self.rows_, ["LOC"], 0.5, "John Smithson lives in New York City")],
+                         ["LOC"])
         rows = self.rows(("O", 1.0), ("B-MISC", 0.99), ("I-MISC", 0.99), ("I-MISC", 0.99), ("O", 1.0), ("O", 1.0),
                          ("I-ORG", 0.9), ("I-ORG", 0.9), ("B-ORG", 0.9), ("O", 1.0))
-        spans = _entities(self.window, rows, ["PER", "ORG", "LOC"], 0.5)
-        # An inside tag without a beginning starts an entity; a fresh beginning closes it.
+        spans = _entities(self.window, rows, ["PER", "ORG", "LOC"], 0.5, "John Smithson lives in New York City")
+        # An inside tag without a beginning starts an entity; a fresh beginning after a space closes it.
         self.assertEqual([(span["start"], span["end"], span["label"]) for span in spans], [(23, 31, "ORG"), (32, 36, "ORG")])
 
 
@@ -422,6 +437,148 @@ class RerankBatchingTests(unittest.TestCase):
     def test_batch_size_must_be_positive(self):
         with self.assertRaises(ValueError):
             self.score(self.documents(5), batch_size=0)
+
+
+class NerJoinTests(unittest.TestCase):
+    """Pieces of one name that touch, or meet at a hyphen, full stop or apostrophe, are one entity, joined before
+    the threshold and scored by their most confident piece: a confident initial carries the surname the model was
+    less sure of, and an unsure piece never hides a confident one."""
+
+    Window = NerAggregationTests.Window
+    rows = NerAggregationTests.rows
+    LABELS = NerAggregationTests.LABELS
+
+    def spans(self, text, words, labels, min_score=0.85):
+        window = self.Window([None, *range(len(words)), None], [(0, 0), *words, (0, 0)])
+        rows = self.rows(("O", 1.0), *labels, ("O", 1.0))
+        return [(span["start"], span["end"], span["label"], span["score"])
+                for span in _entities(window, rows, ["PER", "LOC"], min_score, text)]
+
+    def test_an_initial_carries_the_surname_that_touches_it(self):
+        # "A. Okonkwo": the model starts a second entity at the full stop, less sure of it than of the initial.
+        text = "A. Okonkwo"
+        spans = self.spans(text, [(0, 1), (1, 2), (3, 10)], [("B-PER", 1.0), ("B-PER", 0.83), ("I-PER", 0.83)])
+        self.assertEqual(spans, [(0, 10, "PER", 1.0)])
+
+    def test_pieces_meeting_at_a_hyphen_are_one_name(self):
+        text = "Mei-Ling Chou"
+        spans = self.spans(text, [(0, 3), (3, 4), (4, 8), (9, 13)],
+                           [("B-PER", 0.9), ("O", 0.9), ("B-PER", 0.9), ("I-PER", 0.9)])
+        self.assertEqual(spans, [(0, 13, "PER", 0.9)])
+
+    def test_an_unsure_piece_does_not_hide_a_confident_one(self):
+        # "Jean-Luc Moreau": averaged with "Luc Moreau" the name fell below the threshold and nothing was masked.
+        text = "Jean-Luc Moreau"
+        spans = self.spans(text, [(0, 4), (4, 5), (5, 8), (9, 15)],
+                           [("B-PER", 0.95), ("O", 0.9), ("B-PER", 0.6), ("I-PER", 0.6)])
+        self.assertEqual(spans, [(0, 15, "PER", 0.95)])
+        # Joined pieces that are all unsure stay below it.
+        self.assertEqual(self.spans(text, [(0, 4), (4, 5), (5, 8), (9, 15)],
+                                    [("B-PER", 0.6), ("O", 0.9), ("B-PER", 0.6), ("I-PER", 0.6)]), [])
+
+    def test_entities_apart_or_of_another_kind_stay_apart(self):
+        text = "Ines and Pedro in Lima"
+        spans = self.spans(text, [(0, 4), (5, 8), (9, 14), (15, 17), (18, 22)],
+                           [("B-PER", 0.95), ("O", 1.0), ("B-PER", 0.95), ("O", 1.0), ("B-LOC", 0.95)])
+        self.assertEqual([(start, end, label) for start, end, label, _ in spans],
+                         [(0, 4, "PER"), (9, 14, "PER"), (18, 22, "LOC")])
+        touching = self.spans("ParisLondon", [(0, 5), (5, 11)], [("B-LOC", 0.95), ("B-PER", 0.95)])
+        self.assertEqual([(start, end, label) for start, end, label, _ in touching], [(0, 5, "LOC"), (5, 11, "PER")])
+
+
+class CasedVariantTests(unittest.TestCase):
+    """The NER model was trained on cased news, so a sentence written all in lower case or all in capitals gets a
+    second pass in title case. The copy keeps every offset, and other sentences are left alone."""
+
+    def test_a_lower_case_sentence_is_title_cased_letter_for_letter(self):
+        text = "can you tell oskar that the meeting moved to tuesday"
+        self.assertEqual(tasks._cased_variant(text), "Can You Tell Oskar That The Meeting Moved To Tuesday")
+
+    def test_an_all_capitals_sentence_is_title_cased(self):
+        self.assertEqual(tasks._cased_variant("PLEASE CALL MARCUS LINDQVIST"), "Please Call Marcus Lindqvist")
+
+    def test_cased_and_sentence_case_text_needs_no_second_pass(self):
+        # Title-casing "the board approved the budget" makes "Board" an organisation; sentence case stays as written.
+        for text in ["Lena Okafor said the depot in Rotterdam would open.", "The board approved the budget.",
+                     "Send the IBAN and BIC to HR, finance and IT.", "12:30 - 14:00", ""]:
+            with self.subTest(text=text):
+                self.assertIsNone(tasks._cased_variant(text))
+
+    def test_a_surname_first_in_capitals_before_a_given_name_is_title_cased(self):
+        # Records write "SURNAME, Given"; in capitals the model takes the surname for a place, or misses it.
+        self.assertEqual(tasks._cased_variant("Customer: WIERZBICKI, Tomasz. Delivery city: Gdansk."),
+                         "Customer: Wierzbicki, Tomasz. Delivery city: Gdansk.")
+        # Capitals before a comma and a lower-case word, or without a comma, are not that convention.
+        self.assertIsNone(tasks._cased_variant("Ask HR, finance or IT; the WHO report is due."))
+
+    def test_only_the_sentences_that_need_it_change(self):
+        self.assertEqual(tasks._cased_variant("Lena Okafor called. ask priya about lisbon!\nDO NOT REPLY"),
+                         "Lena Okafor called. Ask Priya About Lisbon!\nDo Not Reply")
+
+    def test_every_offset_is_kept_even_where_case_would_change_length(self):
+        # "ß" upper-cases to two letters; such a character stays as it is.
+        text = "ßtraße in münchen und istanbul"
+        variant = tasks._cased_variant(text)
+        self.assertEqual(variant, "ßtraße In München Und Istanbul")
+        self.assertEqual(len(variant), len(text))
+
+
+class NerPassesTests(unittest.TestCase):
+    """_ner runs the model on the text and, when a sentence is uncased, on its title-cased copy; spans from both
+    come back in the text's own offsets, the text's first. A stub model tags every capitalised word as a person."""
+
+    class Encoding:
+        def __init__(self, text):
+            import re as _re
+            words = [(match.start(), match.end()) for match in _re.finditer(r"\S+", text)]
+            self.text, self.overflowing = text, []
+            self.word_ids, self.offsets = [None, *range(len(words)), None], [(0, 0), *words, (0, 0)]
+
+    class Tokenizer:
+        def __init__(self):
+            self.texts = []
+
+        def encode(self, text):
+            self.texts.append(text)
+            return NerPassesTests.Encoding(text)
+
+    @staticmethod
+    def probabilities(session, names, window):
+        rows = []
+        for position, word_id in enumerate(window.word_ids):
+            row = [0.0] * len(tasks.NER_LABELS)
+            start, end = window.offsets[position]
+            capitalised = word_id is not None and window.text[start:end][:1].isupper()
+            row[tasks.NER_LABELS.index("B-PER" if capitalised else "O")] = 0.99
+            rows.append(row)
+        return rows
+
+    def run_ner(self, text):
+        tokenizer, events = self.Tokenizer(), []
+        with patch.object(tasks, "_onnx", return_value=(tokenizer, object(), set())), \
+                patch.object(tasks, "_probabilities", self.probabilities):
+            spans = tasks._ner(text, ["PER"], 0.85, "/unused", lambda completed, total: events.append((completed, total)))
+        return [(span["start"], span["end"]) for span in spans], tokenizer.texts, events
+
+    def test_an_uncased_sentence_is_read_again_in_title_case(self):
+        spans, texts, events = self.run_ner("ask priya")
+        self.assertEqual(texts, ["ask priya", "Ask Priya"])
+        self.assertEqual(spans, [(0, 3), (4, 9)])  # offsets of the original text
+        self.assertEqual(events, [(0, 2), (1, 2), (2, 2)])
+
+    def test_only_the_rewritten_sentences_are_read_again(self):
+        # The cased sentence is read once; the second reading covers the lower-case one alone, so it costs one more
+        # window rather than the whole text again, and its spans land at the original offsets.
+        spans, texts, events = self.run_ner("Ask Priya now. ask nadia")
+        self.assertEqual(texts, ["Ask Priya now. ask nadia", " Ask Nadia"])
+        self.assertIn((15, 18), spans)  # "ask"
+        self.assertIn((19, 24), spans)  # "nadia"
+        self.assertEqual(events[-1], (2, 2))
+
+    def test_cased_text_is_read_once(self):
+        spans, texts, events = self.run_ner("Ask Priya.")
+        self.assertEqual(texts, ["Ask Priya."])
+        self.assertEqual(events, [(0, 1), (1, 1)])
 
 
 class ModelNameTests(unittest.TestCase):
