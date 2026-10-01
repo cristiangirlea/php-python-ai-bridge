@@ -450,12 +450,17 @@ GIVEN_NAME_AFTER = re.compile(r",\s+([^\W\d_]+)")
 
 
 def _cased_variant(text: str):
-    """A copy of text, offset for offset, with each sentence written all in lower case or all in capitals in title
-    case, or None when no sentence is. The model was trained on cased news and finds almost no lower-case name;
+    return _recase(text)[0]
+
+
+def _recase(text: str):
+    """(copy, ranges): a copy of text, offset for offset, with each sentence written all in lower case or all in
+    capitals in title case, or (None, []) when no sentence is. The model was trained on cased news and finds almost no lower-case name;
     sentence case and mixed case are left alone, since title-casing "the board approved" makes "Board" an
     organisation, except for a surname in capitals before a comma and a given name, the records convention, which
-    the model otherwise takes for a place or misses. A character whose case change would alter its length stays."""
-    chars, start = list(text), 0
+    the model otherwise takes for a place or misses. A character whose case change would alter its length stays.
+    The ranges are the runs of rewritten sentences, the only part a second reading needs."""
+    chars, start, ranges = list(text), 0, []
     for end in [match.end() for match in SENTENCE_END.finditer(text)] + [len(text)]:
         cased = [char for char in text[start:end] if char.isupper() or char.islower()]
         uncased = bool(cased) and not (any(char.isupper() for char in cased) and any(char.islower() for char in cased))
@@ -468,9 +473,14 @@ def _cased_variant(text: str):
                     changed = text[index].upper() if index == word.start() else text[index].lower()
                     if len(changed) == 1:
                         chars[index] = changed
+        if chars[start:end] != list(text[start:end]):
+            if ranges and ranges[-1][1] == start:
+                ranges[-1] = (ranges[-1][0], end)
+            else:
+                ranges.append((start, end))
         start = end
     variant = "".join(chars)
-    return variant if variant != text else None
+    return (variant, ranges) if variant != text else (None, [])
 
 
 def _probabilities(session, names, window) -> list:
@@ -484,19 +494,21 @@ def _probabilities(session, names, window) -> list:
 
 
 def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) -> list:
-    # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text. An uncased sentence is
-    # read again from a title-cased copy with the same offsets; where both readings find the same span, _merge keeps
-    # the more confident.
+    # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text. Each run of uncased
+    # sentences is read again from its title-cased copy, and only that run, so a second reading costs a window or two
+    # and cannot relabel a sentence that needed no help; where both readings find the same span, _merge keeps the
+    # more confident.
     tokenizer, session, names = _onnx(Path(model_dir) / "redact", 512, stride=64)
-    variant = _cased_variant(text)
+    variant, ranges = _recase(text)
     windows = []
-    for reading in [text] if variant is None else [text, variant]:
+    for offset, reading in [(0, text)] + [(start, variant[start:end]) for start, end in ranges]:
         encoding = tokenizer.encode(reading)
-        windows.extend((reading, window) for window in [encoding, *encoding.overflowing])
+        windows.extend((offset, reading, window) for window in [encoding, *encoding.overflowing])
     progress(0, len(windows))
     candidates = []
-    for index, (reading, window) in enumerate(windows):
-        candidates.extend(_entities(window, _probabilities(session, names, window), entities, min_score, reading))
+    for index, (offset, reading, window) in enumerate(windows):
+        for span in _entities(window, _probabilities(session, names, window), entities, min_score, reading):
+            candidates.append({**span, "start": span["start"] + offset, "end": span["end"] + offset})
         progress(index + 1, len(windows))
     return candidates
 

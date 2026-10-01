@@ -16,6 +16,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark import POLL_S, TERMINAL, call, cpu_model, wait_ready  # noqa: E402  (the same protocol helpers)
@@ -23,6 +24,8 @@ from benchmark import POLL_S, TERMINAL, call, cpu_model, wait_ready  # noqa: E40
 REPO = Path(__file__).resolve().parents[1]
 SAMPLE = REPO / "tests" / "fixtures" / "ner-sample.json"
 LABELS = ("PER", "ORG", "LOC")
+# The worker counts finished jobs against its capacity for 300 s by default; wait that out rather than fail.
+CAPACITY_WAIT_S, CAPACITY_RETRIES = 10, 40
 THRESHOLDS = (0.85, 0.5)  # the task's default, and a lower one to show what it trades
 
 
@@ -63,8 +66,18 @@ def rate(part: int, whole: int) -> str:
 
 
 def redact(base: str, text: str, threshold: float) -> dict:
-    job = call(base, "POST", "/v1/jobs", {"task": "redact", "timeout_ms": 120000,
-                                          "input": {"text": text, "entities": list(LABELS), "min_score": threshold}})
+    body = {"task": "redact", "timeout_ms": 120000,
+            "input": {"text": text, "entities": list(LABELS), "min_score": threshold}}
+    for attempt in range(CAPACITY_RETRIES + 1):
+        try:
+            job = call(base, "POST", "/v1/jobs", body)
+            break
+        except HTTPError as error:
+            if error.code != 429:
+                raise
+            if attempt == CAPACITY_RETRIES:
+                raise SystemExit(f"the worker stayed at capacity for {CAPACITY_RETRIES * CAPACITY_WAIT_S} s")
+            time.sleep(CAPACITY_WAIT_S)
     while job["status"] not in TERMINAL:
         time.sleep(POLL_S)
         job = call(base, "GET", "/v1/jobs/" + job["id"])
