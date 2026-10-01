@@ -272,6 +272,20 @@ class RedactRulesTests(unittest.TestCase):
                          [(0, 21, "PER"), (30, 40, "IPV4")])
 
 
+    def test_of_two_model_readings_of_one_span_the_more_confident_is_kept(self):
+        # The text read as written calls "WIERZBICKI" a place at 0.71; its title-cased copy, a person at 0.998.
+        model = len(tasks.RULES)
+        merged = _merge([
+            {"start": 10, "end": 20, "label": "LOC", "source": "model:LOC", "score": 0.71, "priority": model},
+            {"start": 10, "end": 20, "label": "PER", "source": "model:PER", "score": 0.998, "priority": model}])
+        self.assertEqual([(span["label"], span["score"]) for span in merged], [("PER", 0.998)])
+        # A rule still outranks the model, however confident the model is.
+        merged = _merge([
+            {"start": 0, "end": 12, "label": "PER", "source": "model:PER", "score": 0.99, "priority": model},
+            {"start": 0, "end": 12, "label": "PHONE", "source": "rule:phone", "score": 0.8, "priority": 5}])
+        self.assertEqual([span["label"] for span in merged], ["PHONE"])
+
+
 class NerAggregationTests(unittest.TestCase):
     """Drives the BIO aggregation with a stub window so it is covered without the model."""
 

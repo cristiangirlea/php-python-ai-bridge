@@ -89,20 +89,21 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(measure.score([(0, 5, "PER")], [(0, 5, "ORG")]),
                          {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 1})
 
-    def test_only_the_model_s_spans_at_the_threshold_are_predictions(self):
+    def test_only_the_model_s_spans_are_predictions(self):
         spans = [{"start": 0, "end": 3, "label": "PER", "source": "model:PER", "score": 0.9},
                  {"start": 4, "end": 7, "label": "LOC", "source": "model:LOC", "score": 0.6},
                  {"start": 9, "end": 13, "label": "EMAIL", "source": "rule:email", "score": 1.0}]
-        self.assertEqual(measure.predictions(spans, 0.85), [(0, 3, "PER")])
-        self.assertEqual(measure.predictions(spans, 0.5), [(0, 3, "PER"), (4, 7, "LOC")])
+        self.assertEqual(measure.predictions(spans), [(0, 3, "PER"), (4, 7, "LOC")])
 
     def test_rows_add_up_by_register_and_by_label_for_each_threshold(self):
         items = [{"register": "informal", "text": "ada in rome", "entities": [["PER", "ada"], ["LOC", "rome"]]},
                  {"register": "news", "text": "Bo joined Acme.", "entities": [["PER", "Bo"], ["ORG", "Acme"]]}]
-        spans = [[{"start": 7, "end": 11, "label": "LOC", "source": "model:LOC", "score": 0.6}],
-                 [{"start": 0, "end": 2, "label": "PER", "source": "model:PER", "score": 0.99},
-                  {"start": 10, "end": 14, "label": "LOC", "source": "model:LOC", "score": 0.9}]]
-        rows = measure.tally(items, spans, (0.85, 0.5))
+        # Each threshold is its own job: a lower one lets weaker spans into the worker's merge, where they can
+        # displace stronger ones, so filtering one low-threshold job's spans is not the same as asking at 0.85.
+        news = [{"start": 0, "end": 2, "label": "PER", "source": "model:PER", "score": 0.99},
+                {"start": 10, "end": 14, "label": "LOC", "source": "model:LOC", "score": 0.9}]
+        spans = {0.85: [[], news], 0.5: [[{"start": 7, "end": 11, "label": "LOC", "source": "model:LOC", "score": 0.6}], news]}
+        rows = measure.tally(items, spans)
         # Registers keep the sample's order, then the labels follow.
         self.assertEqual([name for threshold, name, _ in rows if threshold == 0.85],
                          ["informal", "news", "PER", "ORG", "LOC"])
