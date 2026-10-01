@@ -213,9 +213,17 @@ class RedactRulesTests(unittest.TestCase):
 
     def test_colon_runs_that_are_not_ipv6_addresses_are_left_alone(self):
         for text in ["meet at 12:30:45 today", "ratio 3:2:1 holds", "mac 00:1A:2B:3C:4D:5E here",
-                     "use std::vector here", "see Note:: below", "a::b::c is not one"]:
+                     "use std::vector here", "see Note:: below", "a::b::c is not one",
+                     # A bare double colon parses as the unspecified address, but holds no digit to hide.
+                     "f :: Int -> Int", "a :: b", "IPv6: ::"]:
             with self.subTest(text=text):
                 self.assertEqual([label for label, _ in self.masked(text)], [])
+
+    def test_an_ipv6_address_before_a_colon_or_with_its_zone_is_masked_whole(self):
+        # The log shape "address: message", and a zone identifier that names the host's interface.
+        self.assertEqual(self.redact("fe80::1: connection refused")["text"], "[IPV6]: connection refused")
+        self.assertEqual(self.redact("host fe80::1%eth0 up")["text"], "host [IPV6] up")
+        self.assertEqual(self.redact("route 2001:db8::: done")["text"], "route [IPV6]: done")
 
     def test_lower_case_ibans_are_masked_when_the_country_and_checksum_hold(self):
         for iban in ["gb82 west 1234 5698 7654 32", "de89370400440532013000"]:
@@ -235,7 +243,7 @@ class RedactRulesTests(unittest.TestCase):
 
     def test_email_addresses_in_any_script_are_masked(self):
         for address in ["josé@example.com", "user@bücher.de", "用户@例子.广告", "иван@пример.рф",
-                        "info@xn--bcher-kva.de", "a.b@example.xn--p1ai"]:
+                        "info@xn--bcher-kva.de", "a.b@example.xn--p1ai", "a.b@example.XN--P1AI"]:
             with self.subTest(address=address):
                 self.assertEqual(self.masked(f"write to {address}."), [("EMAIL", address)])
 
