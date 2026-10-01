@@ -301,7 +301,9 @@ def _iban(candidate: str) -> bool:
 
 IBAN_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b")
 LOWER_IBAN_PATTERN = re.compile(r"\b[a-z]{2}\d{2}(?: ?[a-z0-9]){11,30}\b")
-# The countries of the IBAN registry. A lower-case candidate needs one, since lower-case prose after a code-like word
+# The countries of the SWIFT IBAN Registry, release 99 of December 2024 (checked against its published country list on
+# 2026-10-01; the experimental national formats outside it are not included). A lower-case candidate needs one, since
+# lower-case prose after a code-like word
 # such as "ab12" is far more common than a written-out IBAN in lower case and would otherwise pass mod 97 one time
 # in 97; upper-case candidates need only the checksum, as before.
 IBAN_COUNTRIES = frozenset(
@@ -342,28 +344,37 @@ def _phone(candidate: str) -> bool:
     return digits >= 10 or candidate[0] == "+" or not candidate.isdigit()
 
 
-# Hex digits, colons and dots that do not start inside a word: an IPv6 address in any written form, an IPv4-mapped
-# tail included, and also times, ratios and MAC addresses, which the standard parser then rejects.
-IPV6_CANDIDATE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:][0-9A-Fa-f:.]*")
+# Runs of hex digits, colons and dots that hold a colon and do not start inside a word: an IPv6 address in any written
+# form, an IPv4-mapped tail included, and also times, ratios and MAC addresses, which the standard parser then rejects.
+IPV6_CANDIDATE = re.compile(r"(?<![\w:.])(?=[0-9A-Fa-f.]*:)[0-9A-Fa-f:][0-9A-Fa-f:.]*")
+IPV6_ZONE = re.compile(r"%[\w.-]+")
+
+
+def _is_ipv6(candidate: str) -> bool:
+    try:
+        ipaddress.IPv6Address(candidate)
+    except ValueError:
+        return False
+    return True
 
 
 def _ipv6s(text: str):
     for match in IPV6_CANDIDATE.finditer(text):
         candidate = match.group().rstrip(".")  # a sentence's full stop is not part of the address
+        if candidate.endswith(":") and not _is_ipv6(candidate):
+            candidate = candidate[:-1]  # nor is the colon of "address: message" in a log line
         end = match.start() + len(candidate)
-        if candidate.count(":") < 2 or (end < len(text) and (text[end].isalnum() or text[end] == "_")):
+        if (candidate.count(":") < 2 or not candidate.strip(":.")  # a bare "::" hides nothing
+                or (end < len(text) and (text[end].isalnum() or text[end] == "_")) or not _is_ipv6(candidate)):
             continue
-        try:
-            ipaddress.IPv6Address(candidate)
-        except ValueError:
-            continue
-        yield match.start(), end
+        zone = IPV6_ZONE.match(text, end)  # a zone identifier names the host's interface, so it goes too
+        yield match.start(), zone.end() if zone else end
 
 
 # Letters of any script in the local part and the domain labels, and a top-level label of letters or punycode,
 # tried first so that "xn--p1ai" is not cut to "xn".
 EMAIL_PATTERN = re.compile(r"(?<![\w.%+-])[\w.%+-]+@[^\W_](?:[\w-]*[^\W_])?(?:\.[^\W_](?:[\w-]*[^\W_])?)*"
-                           r"\.(?:xn--[a-z0-9-]+|[^\W\d_]{2,})")
+                           r"\.(?:[Xx][Nn]--[A-Za-z0-9-]+|[^\W\d_]{2,})")
 
 
 def _matches(pattern, accept=None):
