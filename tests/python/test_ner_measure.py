@@ -118,6 +118,24 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(counts[(0.85, "LOC")], {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts[(0.85, "PER")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
 
+    def test_a_full_worker_is_waited_out(self):
+        # Two thresholds over the sample and a development-set run within five minutes exceed the worker's 128 slots.
+        from urllib.error import HTTPError
+
+        full = HTTPError("http://worker/v1/jobs", 429, "Too Many Requests", {}, None)
+        done = {"id": "a" * 32, "status": "succeeded", "result": {"model": "m", "text": "x", "spans": []}}
+        with mock.patch.object(measure, "call", side_effect=[full, full, done]) as call,                 mock.patch.object(measure.time, "sleep") as sleep:
+            self.assertEqual(measure.redact("http://worker", "x", 0.85)["spans"], [])
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_a_worker_that_stays_full_ends_the_run(self):
+        from urllib.error import HTTPError
+
+        full = HTTPError("http://worker/v1/jobs", 429, "Too Many Requests", {}, None)
+        with mock.patch.object(measure, "call", side_effect=full), mock.patch.object(measure.time, "sleep"),                 self.assertRaises(SystemExit):
+            measure.redact("http://worker", "x", 0.85)
+
     def test_rates_have_two_decimals_and_an_empty_denominator_is_not_a_number(self):
         self.assertEqual(measure.rate(1, 4), "0.25")
         self.assertEqual(measure.rate(2, 3), "0.67")

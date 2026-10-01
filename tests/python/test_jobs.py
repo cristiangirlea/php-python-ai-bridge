@@ -566,6 +566,15 @@ class NerPassesTests(unittest.TestCase):
         self.assertEqual(spans, [(0, 3), (4, 9)])  # offsets of the original text
         self.assertEqual(events, [(0, 2), (1, 2), (2, 2)])
 
+    def test_only_the_rewritten_sentences_are_read_again(self):
+        # The cased sentence is read once; the second reading covers the lower-case one alone, so it costs one more
+        # window rather than the whole text again, and its spans land at the original offsets.
+        spans, texts, events = self.run_ner("Ask Priya now. ask nadia")
+        self.assertEqual(texts, ["Ask Priya now. ask nadia", " Ask Nadia"])
+        self.assertIn((15, 18), spans)  # "ask"
+        self.assertIn((19, 24), spans)  # "nadia"
+        self.assertEqual(events[-1], (2, 2))
+
     def test_cased_text_is_read_once(self):
         spans, texts, events = self.run_ner("Ask Priya.")
         self.assertEqual(texts, ["Ask Priya."])
