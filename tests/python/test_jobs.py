@@ -244,6 +244,16 @@ class RedactRulesTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertNotIn("EMAIL", [label for label, _ in self.masked(text)])
 
+    def test_the_rules_stay_fast_on_hostile_input_of_the_largest_size(self):
+        # Each pattern starts only where its run starts, so no input makes it backtrack quadratically.
+        hostile = ["a@" + "b" * 8190, "a@" + "b." * 4094 + "1", "a@" + "b-" * 4094 + "!", "1:" * 4096,
+                   "ab:" * 2730, "gb12 " + "a " * 4093, "x@y" * 2730, "." * 8000 + "@"]
+        for text in hostile:
+            with self.subTest(text=text[:12]):
+                started = time.monotonic()
+                self.redact(text[:8192])
+                self.assertLess(time.monotonic() - started, 1.0)
+
     def test_overlapping_candidates_are_merged_not_dropped(self):
         merged = _merge([
             {"start": 0, "end": 9, "label": "PER", "source": "model:PER", "score": 0.9, "priority": len(tasks.RULES)},
