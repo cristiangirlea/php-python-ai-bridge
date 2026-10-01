@@ -1,8 +1,8 @@
 """Informational precision and recall of the redact task's NER pass on an invented, labelled sample.
 
-Runs every sentence in tests/fixtures/ner-sample.json through the ONNX worker's redact task once, with PER, ORG and
-LOC at the lower threshold, and compares the model's spans (rule spans are not NER) with the sample's labels at each
-threshold; a threshold only filters spans by their score, so one job per sentence serves both. It asserts
+Runs every sentence in tests/fixtures/ner-sample.json through the ONNX worker's redact task with PER, ORG and LOC,
+once per threshold, and compares the model's spans (rule spans are not NER) with the sample's labels. Each threshold
+is its own job: a lower one lets weaker spans into the worker's merge, where they can displace stronger ones. It asserts
 only that every job succeeds with spans inside its text, never a score: this is a small invented sample, so the
 figures describe this model on these registers, not a quality guarantee. The output is a Markdown block for
 docs/testing.md; progress goes to stderr.
@@ -35,9 +35,8 @@ def gold_spans(item: dict) -> list:
     return [(item["text"].index(text), item["text"].index(text) + len(text), label) for label, text in item["entities"]]
 
 
-def predictions(spans: list, threshold: float) -> list:
-    return [(span["start"], span["end"], span["label"]) for span in spans
-            if span["source"].startswith("model:") and span["score"] >= threshold]
+def predictions(spans: list) -> list:
+    return [(span["start"], span["end"], span["label"]) for span in spans if span["source"].startswith("model:")]
 
 
 def matched(gold: list, predicted: list, same_label: bool) -> int:
@@ -82,15 +81,15 @@ def add(total: dict, counts: dict) -> None:
         total[key] = total.get(key, 0) + value
 
 
-def tally(items: list, spans: list, thresholds: tuple) -> list:
-    """Rows of (threshold, register or label, counts): each register in the sample's order, then each label, whose
-    rows count only that label's gold and predicted spans."""
+def tally(items: list, spans: dict) -> list:
+    """Rows of (threshold, register or label, counts) from each threshold's spans per item: each register in the
+    sample's order, then each label, whose rows count only that label's gold and predicted spans."""
     registers = list(dict.fromkeys(item["register"] for item in items))
     rows = []
-    for threshold in thresholds:
+    for threshold, found_per_item in spans.items():
         totals = {name: {} for name in registers + list(LABELS)}
-        for item, found in zip(items, spans):
-            gold, predicted = gold_spans(item), predictions(found, threshold)
+        for item, found in zip(items, found_per_item):
+            gold, predicted = gold_spans(item), predictions(found)
             add(totals[item["register"]], score(gold, predicted))
             for label in LABELS:
                 add(totals[label], score([g for g in gold if g[2] == label], [p for p in predicted if p[2] == label]))
@@ -105,20 +104,21 @@ def main() -> None:
         raise SystemExit(f"{base} reports backend {health['backend']!r}; NER needs the onnx worker")
     sample = sample_path(os.environ)
     items = json.loads(sample.read_text(encoding="utf-8"))["items"]
-    spans, models = [], set()
-    for number, item in enumerate(items, start=1):
-        result = redact(base, item["text"], min(THRESHOLDS))
-        models.add(result["model"])
-        spans.append(result["spans"])
-        print(f"sentence {number}/{len(items)}", file=sys.stderr)
+    spans, models = {threshold: [] for threshold in THRESHOLDS}, set()
+    for threshold in THRESHOLDS:
+        for number, item in enumerate(items, start=1):
+            result = redact(base, item["text"], threshold)
+            models.add(result["model"])
+            spans[threshold].append(result["spans"])
+            print(f"threshold {threshold} sentence {number}/{len(items)}", file=sys.stderr)
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     entities = sum(len(item["entities"]) for item in items)
     print(f"""Measured {now} UTC, commit `{os.environ.get("BENCH_COMMIT", "unknown")}`, runner: {os.environ.get("BENCH_RUNNER", "unspecified")}, CPU: {cpu_model()}.
-Model {", ".join(f"`{model}`" for model in sorted(models))}; `{sample.relative_to(REPO).as_posix()}`, {len(items)} invented sentences with {entities} labelled entities; one redact job per sentence at threshold {min(THRESHOLDS)}, entities PER, ORG and LOC, and a higher threshold keeps the spans whose score reaches it. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: a shared character under any label, the share of entities a redaction hides.
+Model {", ".join(f"`{model}`" for model in sorted(models))}; `{sample.relative_to(REPO).as_posix()}`, {len(items)} invented sentences with {entities} labelled entities; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: a shared character under any label, the share of entities a redaction hides.
 
 | Threshold | Register or label | Gold | Predicted | Precision, exact | Recall, exact | Precision, overlapping | Recall, overlapping | Masked |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |""")
-    for threshold, name, counts in tally(items, spans, THRESHOLDS):
+    for threshold, name, counts in tally(items, spans):
         print(f"| {threshold} | {name} | {counts['gold']} | {counts['predicted']} | "
               f"{rate(counts['exact'], counts['predicted'])} | {rate(counts['exact'], counts['gold'])} | "
               f"{rate(counts['overlapping'], counts['predicted'])} | {rate(counts['overlapping'], counts['gold'])} | "

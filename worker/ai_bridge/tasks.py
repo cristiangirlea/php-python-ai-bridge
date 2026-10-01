@@ -445,18 +445,25 @@ def _entities(window, probabilities: list, entities: list, min_score: float, tex
 # A sentence ends at . ! or ? before whitespace, or at a line break.
 SENTENCE_END = re.compile(r"[.!?](?=\s)|\n")
 LETTERS = re.compile(r"[^\W\d_]+")
+# What follows a surname written first in capitals in records: a comma and a given name ("WIERZBICKI, Tomasz").
+GIVEN_NAME_AFTER = re.compile(r",\s+([^\W\d_]+)")
 
 
 def _cased_variant(text: str):
     """A copy of text, offset for offset, with each sentence written all in lower case or all in capitals in title
     case, or None when no sentence is. The model was trained on cased news and finds almost no lower-case name;
     sentence case and mixed case are left alone, since title-casing "the board approved" makes "Board" an
-    organisation. A character whose case change would alter its length stays as it is."""
+    organisation, except for a surname in capitals before a comma and a given name, the records convention, which
+    the model otherwise takes for a place or misses. A character whose case change would alter its length stays."""
     chars, start = list(text), 0
     for end in [match.end() for match in SENTENCE_END.finditer(text)] + [len(text)]:
         cased = [char for char in text[start:end] if char.isupper() or char.islower()]
-        if cased and not (any(char.isupper() for char in cased) and any(char.islower() for char in cased)):
-            for word in LETTERS.finditer(text, start, end):
+        uncased = bool(cased) and not (any(char.isupper() for char in cased) and any(char.islower() for char in cased))
+        for word in LETTERS.finditer(text, start, end):
+            given = GIVEN_NAME_AFTER.match(text, word.end())
+            surname_first = (len(word.group()) > 1 and word.group().isupper() and given is not None
+                             and given.group(1)[0].isupper() and not given.group(1).isupper())
+            if uncased or surname_first:
                 for index in range(word.start(), word.end()):
                     changed = text[index].upper() if index == word.start() else text[index].lower()
                     if len(changed) == 1:
@@ -478,8 +485,8 @@ def _probabilities(session, names, window) -> list:
 
 def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) -> list:
     # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text. An uncased sentence is
-    # read again from a title-cased copy with the same offsets; the text's own reading comes first, so it wins where
-    # both find the same span.
+    # read again from a title-cased copy with the same offsets; where both readings find the same span, _merge keeps
+    # the more confident.
     tokenizer, session, names = _onnx(Path(model_dir) / "redact", 512, stride=64)
     variant = _cased_variant(text)
     windows = []
@@ -495,10 +502,12 @@ def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) 
 
 
 def _merge(candidates: list) -> list:
-    # Leftmost first, then longest, then the stronger source. A candidate overlapping the kept
+    # Leftmost first, then longest, then the stronger source, then the more confident: of the two readings of an
+    # uncased sentence, a sure "person" beats an unsure "place" for the same words. A candidate overlapping the kept
     # span extends it instead of being dropped, so no part of either stays visible.
     spans = []
-    for span in sorted(candidates, key=lambda span: (span["start"], span["start"] - span["end"], span["priority"])):
+    for span in sorted(candidates,
+                       key=lambda span: (span["start"], span["start"] - span["end"], span["priority"], -span["score"])):
         if spans and span["start"] < spans[-1]["end"]:
             spans[-1]["end"] = max(spans[-1]["end"], span["end"])
             continue
