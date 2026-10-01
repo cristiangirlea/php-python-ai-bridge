@@ -1,5 +1,5 @@
 {
-  "about": "A development set for tuning the redact task's NER pass, kept apart from ner-sample.json, whose figures are the ones published. Invented like the sample; some sentences hold no entity at all, so that false positives show, and the acronyms are there for the same reason.",
+  "about": "A development set for tuning the redact task's NER pass, kept apart from ner-sample.json, whose figures are the ones published. Invented like the sample; some sentences hold no entity at all, so that false positives show, and the acronyms and the common words that are also names (bill, rose, Will) are there for the same reason.",
   "items": [
     {"register": "lower case", "text": "can you tell oskar that the meeting moved to tuesday", "entities": [["PER", "oskar"]]},
     {"register": "lower case", "text": "landed in dublin, heading to the hotel now", "entities": [["LOC", "dublin"]]},
@@ -37,6 +37,27 @@
     {"register": "news", "text": "Talia Brenner joined Greenfold Energy as chief engineer in Oslo.", "entities": [["PER", "Talia Brenner"], ["ORG", "Greenfold Energy"], ["LOC", "Oslo"]]},
     {"register": "news", "text": "The museum in Seville reopened after repairs.", "entities": [["LOC", "Seville"]]},
 
-    {"register": "mixed case", "text": "meeting w/ Anil tmrw at the Kestrel office in bristol", "entities": [["PER", "Anil"], ["ORG", "Kestrel"], ["LOC", "bristol"]]}
+    {"register": "mixed case", "text": "meeting w/ Anil tmrw at the Kestrel office in bristol", "entities": [["PER", "Anil"], ["ORG", "Kestrel"], ["LOC", "bristol"]]},
+
+    {"register": "name-like words", "text": "can you pay the bill and mark the invoice as done", "entities": []},
+    {"register": "name-like words", "text": "may i bring a rose for the table", "entities": []},
+    {"register": "name-like words", "text": "jack up the car before you change the tyre", "entities": []},
+    {"register": "name-like words", "text": "the turkey needs another hour in the oven", "entities": []},
+    {"register": "name-like words", "text": "i ate an apple and a handful of dates", "entities": []},
+    {"register": "name-like words", "text": "Will the courier arrive before noon?", "entities": []},
+    {"register": "name-like words", "text": "Bill the client for the extra hours.", "entities": []},
+    {"register": "name-like words", "text": "Mark the boxes that need to go upstairs.", "entities": []},
+    {"register": "mixed case", "text": "Cheers, rahim", "entities": [["PER", "rahim"]]},
+    {"register": "mixed case", "text": "Hi team, soren is out today and back on Monday", "entities": [["PER", "soren"]]},
+    {"register": "mixed case", "text": "I'll meet nkechi and mara at the café", "entities": [["PER", "nkechi"], ["PER", "mara"]]},
+    {"register": "mixed case", "text": "Flight to tbilisi leaves at 9, gate 12, OK?", "entities": [["LOC", "tbilisi"]]},
+    {"register": "mixed case", "text": "Thanks @lindiwe, the slides look great", "entities": [["PER", "lindiwe"]]},
+    {"register": "mixed case", "text": "Ask haruto whether Quillon Labs sent the contract", "entities": [["PER", "haruto"], ["ORG", "Quillon Labs"]]},
+    {"register": "news", "text": "Ministers from Chile and Peru met in Quito on Tuesday.", "entities": [["LOC", "Chile"], ["LOC", "Peru"], ["LOC", "Quito"]]},
+    {"register": "news", "text": "Harbourline Logistics appointed Dana Okafor as its new chief executive.", "entities": [["ORG", "Harbourline Logistics"], ["PER", "Dana Okafor"]]},
+    {"register": "news", "text": "Rain delayed the final in Auckland, said organiser Petra Novak.", "entities": [["LOC", "Auckland"], ["PER", "Petra Novak"]]},
+    {"register": "news", "text": "Shares in Copperleaf Mining fell after the report from Toronto.", "entities": [["ORG", "Copperleaf Mining"], ["LOC", "Toronto"]]},
+    {"register": "all capitals", "text": "MEETING WITH HELGA BRANDT MOVED TO ROOM 3", "entities": [["PER", "HELGA BRANDT"]]},
+    {"register": "records", "text": "Account holder: Luis Santos, Faro.", "entities": [["PER", "Luis Santos"], ["LOC", "Faro"]]}
   ]
 }
