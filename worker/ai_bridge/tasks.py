@@ -1,6 +1,7 @@
 """Explicit task allowlist. Requests never select imports or executable code."""
 
 import hashlib
+import ipaddress
 import math
 import os
 import re
@@ -299,10 +300,25 @@ def _iban(candidate: str) -> bool:
 
 
 IBAN_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b")
+LOWER_IBAN_PATTERN = re.compile(r"\b[a-z]{2}\d{2}(?: ?[a-z0-9]){11,30}\b")
+# The countries of the IBAN registry. A lower-case candidate needs one, since lower-case prose after a code-like word
+# such as "ab12" is far more common than a written-out IBAN in lower case and would otherwise pass mod 97 one time
+# in 97; upper-case candidates need only the checksum, as before.
+IBAN_COUNTRIES = frozenset(
+    "AD AE AL AT AZ BA BE BG BH BI BR BY CH CR CY CZ DE DJ DK DO EE EG ES FI FK FO FR GB GE GI GL GR GT HN HR HU IE "
+    "IL IQ IS IT JO KW KZ LB LC LI LT LU LV LY MC MD ME MK MN MR MT MU NI NL NO OM PK PL PS PT QA RO RS RU SA SC SD SE "
+    "SI SK SM SO ST SV TL TN TR UA VA VG XK YE".split())
+
+
+def _iban_matches(text: str):
+    yield from IBAN_PATTERN.finditer(text)
+    for match in LOWER_IBAN_PATTERN.finditer(text):
+        if match.group()[:2].upper() in IBAN_COUNTRIES:
+            yield match
 
 
 def _ibans(text: str):
-    for match in IBAN_PATTERN.finditer(text):
+    for match in _iban_matches(text):
         candidate = match.group()
         # The greedy match can swallow following upper-case tokens; drop trailing groups until it checks.
         while len(candidate.replace(" ", "")) >= 15:
@@ -326,6 +342,30 @@ def _phone(candidate: str) -> bool:
     return digits >= 10 or candidate[0] == "+" or not candidate.isdigit()
 
 
+# Hex digits, colons and dots that do not start inside a word: an IPv6 address in any written form, an IPv4-mapped
+# tail included, and also times, ratios and MAC addresses, which the standard parser then rejects.
+IPV6_CANDIDATE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:][0-9A-Fa-f:.]*")
+
+
+def _ipv6s(text: str):
+    for match in IPV6_CANDIDATE.finditer(text):
+        candidate = match.group().rstrip(".")  # a sentence's full stop is not part of the address
+        end = match.start() + len(candidate)
+        if candidate.count(":") < 2 or (end < len(text) and (text[end].isalnum() or text[end] == "_")):
+            continue
+        try:
+            ipaddress.IPv6Address(candidate)
+        except ValueError:
+            continue
+        yield match.start(), end
+
+
+# Letters of any script in the local part and the domain labels, and a top-level label of letters or punycode,
+# tried first so that "xn--p1ai" is not cut to "xn".
+EMAIL_PATTERN = re.compile(r"(?<![\w.%+-])[\w.%+-]+@[^\W_](?:[\w-]*[^\W_])?(?:\.[^\W_](?:[\w-]*[^\W_])?)*"
+                           r"\.(?:xn--[a-z0-9-]+|[^\W\d_]{2,})")
+
+
 def _matches(pattern, accept=None):
     def find(text: str):
         for match in pattern.finditer(text):
@@ -339,8 +379,9 @@ def _matches(pattern, accept=None):
 RULES = (
     ("CARD", _cards, 1.0),
     ("IBAN", _ibans, 1.0),
-    ("EMAIL", _matches(re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")), 1.0),
+    ("EMAIL", _matches(EMAIL_PATTERN), 1.0),
     ("IPV4", _matches(re.compile(r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b")), 1.0),
+    ("IPV6", _ipv6s, 1.0),
     ("PHONE", _matches(re.compile(r"(?<!\w)\+?\d[\d ().-]{5,}\d(?!\w)"), _phone), 0.8),
 )
 

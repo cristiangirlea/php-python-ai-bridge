@@ -49,7 +49,7 @@ BACKENDS = {
         "embed": ("hashing-bow-not-a-model", "a signed hash of word tokens, NOT a model; similarity reflects "
                   "shared words only."),
         "redact": ("rules-only-not-a-model", "checksum and pattern rules only (card numbers, IBANs, emails, IPv4 "
-                   "addresses, phone numbers). No model runs, so names, organisations and places are not found."),
+                   "and IPv6 addresses, phone numbers). No model runs, so names, organisations and places are not found."),
     },
     "onnx": {
         "rerank": ("cross-encoder/ms-marco-TinyBERT-L2-v2", "through ONNX Runtime on one CPU thread, a two-layer "

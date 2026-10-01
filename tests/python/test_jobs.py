@@ -246,9 +246,9 @@ class RedactRulesTests(unittest.TestCase):
 
     def test_overlapping_candidates_are_merged_not_dropped(self):
         merged = _merge([
-            {"start": 0, "end": 9, "label": "PER", "source": "model:PER", "score": 0.9, "priority": 5},
+            {"start": 0, "end": 9, "label": "PER", "source": "model:PER", "score": 0.9, "priority": len(tasks.RULES)},
             {"start": 5, "end": 21, "label": "EMAIL", "source": "rule:email", "score": 1.0, "priority": 2},
-            {"start": 30, "end": 34, "label": "LOC", "source": "model:LOC", "score": 0.9, "priority": 5},
+            {"start": 30, "end": 34, "label": "LOC", "source": "model:LOC", "score": 0.9, "priority": len(tasks.RULES)},
             {"start": 30, "end": 40, "label": "IPV4", "source": "rule:ipv4", "score": 1.0, "priority": 3}])
         self.assertEqual([(span["start"], span["end"], span["label"]) for span in merged],
                          [(0, 21, "PER"), (30, 40, "IPV4")])
@@ -281,7 +281,8 @@ class NerAggregationTests(unittest.TestCase):
 
     def test_first_piece_labels_words_and_the_threshold_uses_the_mean(self):
         spans = _entities(self.window, self.rows_, ["PER", "LOC"], 0.85)
-        self.assertEqual(spans, [{"start": 0, "end": 13, "label": "PER", "source": "model:PER", "score": 0.925, "priority": 5}])
+        self.assertEqual(spans, [{"start": 0, "end": 13, "label": "PER", "source": "model:PER", "score": 0.925,
+                                  "priority": len(tasks.RULES)}])
         spans = _entities(self.window, self.rows_, ["PER", "LOC"], 0.8)
         self.assertEqual([(span["start"], span["end"], span["label"], span["score"]) for span in spans],
                          [(0, 13, "PER", 0.925), (23, 36, "LOC", 0.8267)])
