@@ -76,16 +76,18 @@ class ScoringTests(unittest.TestCase):
     def test_exact_and_overlapping_matches_are_counted_separately(self):
         gold = [(0, 11, "PER"), (20, 27, "LOC")]
         predicted = [(0, 4, "PER"), (20, 27, "LOC"), (30, 35, "ORG")]
-        self.assertEqual(measure.score(gold, predicted), {"gold": 2, "predicted": 3, "exact": 1, "overlapping": 2})
+        self.assertEqual(measure.score(gold, predicted),
+                         {"gold": 2, "predicted": 3, "exact": 1, "overlapping": 2, "masked": 2})
 
     def test_one_predicted_span_matches_one_gold_span_at_most(self):
         # One PER span over "ines and pedro" found one name, not both.
         self.assertEqual(measure.score([(0, 4, "PER"), (9, 14, "PER")], [(0, 14, "PER")]),
-                         {"gold": 2, "predicted": 1, "exact": 0, "overlapping": 1})
+                         {"gold": 2, "predicted": 1, "exact": 0, "overlapping": 1, "masked": 1})
 
-    def test_a_wrong_label_is_neither_exact_nor_overlapping(self):
+    def test_a_wrong_label_is_neither_exact_nor_overlapping_but_still_masks(self):
+        # For redaction what matters is that the name is hidden; the label it is hidden under is secondary.
         self.assertEqual(measure.score([(0, 5, "PER")], [(0, 5, "ORG")]),
-                         {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0})
+                         {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 1})
 
     def test_only_the_model_s_spans_at_the_threshold_are_predictions(self):
         spans = [{"start": 0, "end": 3, "label": "PER", "source": "model:PER", "score": 0.9},
@@ -105,12 +107,15 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual([name for threshold, name, _ in rows if threshold == 0.85],
                          ["informal", "news", "PER", "ORG", "LOC"])
         counts = {(threshold, name): value for threshold, name, value in rows}
-        self.assertEqual(counts[(0.85, "informal")], {"gold": 2, "predicted": 0, "exact": 0, "overlapping": 0})
-        self.assertEqual(counts[(0.5, "informal")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1})
-        # Acme predicted as a place is an ORG missed and a LOC that is wrong, in each label's own row.
-        self.assertEqual(counts[(0.85, "ORG")], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0})
-        self.assertEqual(counts[(0.85, "LOC")], {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0})
-        self.assertEqual(counts[(0.85, "PER")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1})
+        self.assertEqual(counts[(0.85, "informal")],
+                         {"gold": 2, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts[(0.5, "informal")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
+        # Acme predicted as a place is an ORG missed and a LOC that is wrong, in each label's own row; in the
+        # register's row it is still a name masked.
+        self.assertEqual(counts[(0.85, "news")], {"gold": 2, "predicted": 2, "exact": 1, "overlapping": 1, "masked": 2})
+        self.assertEqual(counts[(0.85, "ORG")], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts[(0.85, "LOC")], {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts[(0.85, "PER")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
 
     def test_rates_have_two_decimals_and_an_empty_denominator_is_not_a_number(self):
         self.assertEqual(measure.rate(1, 4), "0.25")
