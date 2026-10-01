@@ -93,11 +93,14 @@ if ($redaction->model !== 'Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncase
 ) {
     throw new RuntimeException('Real NER smoke case failed: ' . json_encode($redaction->spans));
 }
-// A lower-case name in a sentence that holds a capital: only the uncased model masks it (tests/model_cases.py).
-$text = 'I spoke with esperanza and she agreed.';
-$job = $client->submitRedact($text, ['PER'], 0.5, 60000);
+// Lower-case names in a sentence that holds a capital: only the uncased model masks them, and only if it reads each
+// of its labels in the right order (tests/model_cases.py).
+$text = 'I spoke with esperanza in lisbon, she works for brightline insurance.';
+$job = $client->submitRedact($text, ['PER', 'ORG', 'LOC'], 0.5, 60000);
 $redaction = RedactResult::fromJob($client->wait($job->id, 60000), $text);
-if ($redaction->text !== 'I spoke with [PER] and she agreed.' || array_column($redaction->spans, 'source') !== ['model:PER']) {
+if ($redaction->text !== 'I spoke with [PER] in [LOC], she works for [ORG].'
+    || array_column($redaction->spans, 'source') !== ['model:PER', 'model:LOC', 'model:ORG']
+) {
     throw new RuntimeException('Uncased NER smoke case failed: ' . json_encode($redaction->spans));
 }
 $clean = 'The weather is nice today and the meeting starts at noon.';

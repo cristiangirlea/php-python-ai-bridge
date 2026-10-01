@@ -584,8 +584,8 @@ class NerPassesTests(unittest.TestCase):
     def test_an_uncased_sentence_is_read_again_in_title_case(self):
         spans, texts, events = self.run_ner("ask priya")
         self.assertEqual(texts["redact"], ["ask priya", "Ask Priya"])
-        self.assertIn((0, 3), spans)  # "Ask", in offsets of the original text
-        self.assertIn((4, 9), spans)
+        # "Ask" and "Priya" from the title-cased copy, in offsets of the original text; "priya" again from the uncased model.
+        self.assertEqual(sorted(spans), [(0, 3), (4, 9), (4, 9)])
         self.assertEqual(events, [(0, 3), (1, 3), (2, 3), (3, 3)])
 
     def test_only_the_rewritten_sentences_are_read_again(self):

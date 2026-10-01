@@ -60,11 +60,11 @@ def main():
     assert result["text"] == "\u2014 [PER] wrote to [EMAIL] about [LOC].", result["text"]
     assert [s["source"] for s in result["spans"]] == ["model:PER", "rule:email", "model:LOC"], result["spans"]
     assert all(0 < s["score"] <= 1 for s in result["spans"])
-    status, job, _ = request("/redact", {"text": UNCASED_TEXT, "entities": ["PER"], "min_score": 0.5})
+    status, job, _ = request("/redact", {"text": UNCASED_TEXT, "entities": ["PER", "ORG", "LOC"], "min_score": 0.5})
     assert status == 202
     result = finished(job["id"])["result"]
     assert result["text"] == UNCASED_MASKED, result
-    assert [s["source"] for s in result["spans"]] == ["model:PER"], result["spans"]
+    assert [s["source"] for s in result["spans"]] == ["model:PER", "model:LOC", "model:ORG"], result["spans"]
     # Precision guard: ordinary text must not grow spans.
     status, job, _ = request("/redact", {"text": "The weather is nice today and the meeting starts at noon."})
     assert finished(job["id"])["result"]["spans"] == []

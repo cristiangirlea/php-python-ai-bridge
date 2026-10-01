@@ -53,6 +53,9 @@ class PinTests(unittest.TestCase):
         self.assertEqual(sorted(loaded), ["redact", "redact-uncased"])
         self.assertLessEqual(set(loaded), set(fetch_model.MODELS))
 
+    def test_the_worker_checks_at_start_for_exactly_the_directories_the_fetcher_fills(self):
+        self.assertEqual(sorted(tasks.MODEL_DIRECTORIES), sorted(fetch_model.MODELS))
+
 
 if __name__ == "__main__":
     unittest.main()
