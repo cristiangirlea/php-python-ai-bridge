@@ -20,9 +20,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark import POLL_S, TERMINAL, call, cpu_model, wait_ready  # noqa: E402  (the same protocol helpers)
 
-SAMPLE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "ner-sample.json"
+REPO = Path(__file__).resolve().parents[1]
+SAMPLE = REPO / "tests" / "fixtures" / "ner-sample.json"
 LABELS = ("PER", "ORG", "LOC")
 THRESHOLDS = (0.85, 0.5)  # the task's default, and a lower one to show what it trades
+
+
+def sample_path(environ) -> Path:
+    """The published sample, or NER_SAMPLE, such as the development set, relative to the repository."""
+    return REPO / environ["NER_SAMPLE"] if environ.get("NER_SAMPLE") else SAMPLE
 
 
 def gold_spans(item: dict) -> list:
@@ -91,7 +97,8 @@ def main() -> None:
     health = wait_ready(base)
     if health["backend"] != "onnx":
         raise SystemExit(f"{base} reports backend {health['backend']!r}; NER needs the onnx worker")
-    items = json.loads(SAMPLE.read_text(encoding="utf-8"))["items"]
+    sample = sample_path(os.environ)
+    items = json.loads(sample.read_text(encoding="utf-8"))["items"]
     spans, models = [], set()
     for number, item in enumerate(items, start=1):
         result = redact(base, item["text"], min(THRESHOLDS))
@@ -101,7 +108,7 @@ def main() -> None:
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     entities = sum(len(item["entities"]) for item in items)
     print(f"""Measured {now} UTC, commit `{os.environ.get("BENCH_COMMIT", "unknown")}`, runner: {os.environ.get("BENCH_RUNNER", "unspecified")}, CPU: {cpu_model()}.
-Model {", ".join(f"`{model}`" for model in sorted(models))}; {len(items)} invented sentences with {entities} labelled entities; one redact job per sentence at threshold {min(THRESHOLDS)}, entities PER, ORG and LOC, and a higher threshold keeps the spans whose score reaches it. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span.
+Model {", ".join(f"`{model}`" for model in sorted(models))}; `{sample.relative_to(REPO).as_posix()}`, {len(items)} invented sentences with {entities} labelled entities; one redact job per sentence at threshold {min(THRESHOLDS)}, entities PER, ORG and LOC, and a higher threshold keeps the spans whose score reaches it. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span.
 
 | Threshold | Register or label | Gold | Predicted | Precision, exact | Recall, exact | Precision, overlapping | Recall, overlapping |
 | --- | --- | --- | --- | --- | --- | --- | --- |""")
