@@ -35,6 +35,9 @@ REDACT_DEFAULTS = {"entities": ["PER"], "min_score": 0.85}
 # Label order of dslim/bert-base-NER and dslim/bert-base-NER-uncased, which share it; the smoke tests fail loudly if a
 # re-pinned model changes it.
 NER_LABELS = ("O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC")
+# What the ONNX backend loads from its model directory: one directory per model, each holding the tokenizer.json and
+# model.onnx that scripts/fetch_model.py writes. tests/python/test_fetch_model.py keeps the two lists in step.
+MODEL_DIRECTORIES = ("rerank", "embed", "redact", "redact-uncased")
 
 
 class InvalidInput(ValueError):
@@ -197,6 +200,12 @@ def _onnx(directory: Path, max_length: int, stride: int = 0):
         str(directory / "model.onnx"), options, providers=["CPUExecutionProvider"]
     )
     return tokenizer, session, {item.name for item in session.get_inputs()}
+
+
+def missing_models(model_dir: str) -> list:
+    """The model directories under model_dir that lack either file, in MODEL_DIRECTORIES order."""
+    return [name for name in MODEL_DIRECTORIES
+            if not all((Path(model_dir) / name / file).is_file() for file in ("tokenizer.json", "model.onnx"))]
 
 
 def _signed_counts(words: list) -> list:

@@ -11,6 +11,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .jobs import CapacityError, JobStore, Settings
+from .tasks import missing_models
 
 MAX_BODY = 262144
 
@@ -170,6 +171,12 @@ def main():
         model_dir=os.environ.get("BRIDGE_MODEL_DIR", "/models"),
         test_tasks=os.environ.get("BRIDGE_TEST_TASKS") == "1",
     )
+    # Without its files every job needing a model would fail as task_failed, which cannot say why: a cache fetched
+    # before a model was added has no directory for it.
+    missing = missing_models(settings.model_dir) if settings.backend == "onnx" else []
+    if missing:
+        raise SystemExit(f"{settings.model_dir} lacks the model files for {', '.join(missing)}; acquire them with "
+                         "the fetcher: docker compose -f docker/compose.yaml run --rm --no-deps fetcher")
     with BridgeServer((args.host, args.port), os.environ.get("BRIDGE_TOKEN", ""), settings) as server:
         def stop(*_):
             threading.Thread(target=server.shutdown, daemon=True).start()
