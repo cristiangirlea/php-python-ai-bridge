@@ -1,9 +1,10 @@
-"""The workflows run on the lab's self-hosted runner, never for a fork's pull request, and every job that drives
-Docker Compose gets the same pinned, hash-checked plugin wherever the runner lacks one.
+"""The workflows run on the lab's self-hosted runner, as written here never for a fork's pull request, and every job
+that drives Docker Compose gets the same pinned, hash-checked plugin wherever the runner lacks one.
 
-The repository is public, so a fork's pull request would run its own code on the runner it is routed to: those go to
-GitHub's disposable runners. Read as text, since the standard library has no YAML parser; the workflows keep their
-jobs two spaces in under `jobs:`.
+The repository is public, so a fork's pull request would run its own code on the runner it is routed to: these
+workflows send it to GitHub's disposable runners. A fork can edit them in its pull request, though, so the boundary
+that holds is the repository's fork approval policy, not this routing (docs/security.md). Read as text, since the
+standard library has no YAML parser; the workflows keep their jobs two spaces in under `jobs:`.
 """
 
 import re
@@ -68,6 +69,15 @@ class WorkflowTests(unittest.TestCase):
         # A push to a pull request's branch would otherwise run every job twice on a one-runner lab.
         text = (REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         self.assertIn("on:\n  push:\n    branches: [main]\n  pull_request:\n", text)
+
+    def test_the_model_workflow_runs_when_the_compose_action_changes(self):
+        text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
+        self.assertIn("      - .github/actions/compose/**\n", text)
+
+    def test_a_runner_on_another_architecture_is_told_why_it_fails(self):
+        text = ACTION.read_text(encoding="utf-8")
+        self.assertIn("::error::", text)
+        self.assertNotIn('\n          test "$(uname -m)" = x86_64\n', text)
 
     def test_measurements_name_the_runner_they_ran_on(self):
         text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
