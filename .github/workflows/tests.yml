@@ -10,8 +10,9 @@ permissions:
   contents: read
 
 # Every job runs on the lab's self-hosted runner scale set that the CI_RUNNER repository variable names, or on
-# GitHub's when it is unset. A fork's pull request always goes to GitHub's disposable runners: the repository is
-# public, and its code would otherwise run on the lab's.
+# GitHub's when it is unset. As written here, a fork's pull request goes to GitHub's disposable runners, since the
+# repository is public; a fork can edit this file in its pull request, so the fork approval policy is what keeps
+# its code off the lab's runner (docs/security.md).
 jobs:
   php:
     name: PHP ${{ matrix.php }}

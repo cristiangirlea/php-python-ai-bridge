@@ -38,6 +38,7 @@ on:
       - tests/model_cases.py
       - docker/compose.yaml
       - .github/workflows/model-smoke.yml
+      - .github/actions/compose/**
 
 permissions:
   contents: read
@@ -47,8 +48,9 @@ concurrency:
   group: model-smoke-${{ github.ref }}
   cancel-in-progress: true
 
-# The lab's self-hosted runner scale set that the CI_RUNNER repository variable names, or GitHub's when it is unset;
-# a fork's pull request always goes to GitHub's disposable runners, since the repository is public.
+# The lab's self-hosted runner scale set that the CI_RUNNER repository variable names, or GitHub's when it is unset.
+# As written here, a fork's pull request goes to GitHub's disposable runners; a fork can edit this file, so the fork
+# approval policy is what keeps its code off the lab's runner (docs/security.md).
 jobs:
   model:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}

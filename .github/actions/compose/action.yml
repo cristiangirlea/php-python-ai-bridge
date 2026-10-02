@@ -12,7 +12,10 @@ runs:
         COMPOSE_SHA256: db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576
       run: |
         if ! docker compose version >/dev/null 2>&1; then
-          test "$(uname -m)" = x86_64
+          if [ "$(uname -m)" != x86_64 ]; then
+            echo "::error::Docker Compose is missing and only the x86_64 release is pinned; this runner is $(uname -m)"
+            exit 1
+          fi
           plugins="$HOME/.docker/cli-plugins"
           mkdir -p "$plugins"
           curl -fsSL --retry 3 -o "$plugins/docker-compose" \
