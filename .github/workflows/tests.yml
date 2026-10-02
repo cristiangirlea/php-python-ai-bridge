@@ -1,16 +1,21 @@
 name: Tests
 
+# Pushes to main and every pull request; a push to a pull request's branch would otherwise run every job twice.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
+# Every job runs on the lab's self-hosted runner scale set that the CI_RUNNER repository variable names, or on
+# GitHub's when it is unset. A fork's pull request always goes to GitHub's disposable runners: the repository is
+# public, and its code would otherwise run on the lab's.
 jobs:
   php:
     name: PHP ${{ matrix.php }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 12
     strategy:
       fail-fast: false
@@ -32,6 +37,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - uses: ./.github/actions/compose
       - name: Inspect sandbox configuration
         run: docker compose -f docker/compose.yaml --profile test config
       - name: Unit and syntax tests
@@ -54,7 +60,7 @@ jobs:
 
   mcp:
     name: MCP server
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 12
     env:
       BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
@@ -62,6 +68,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - uses: ./.github/actions/compose
       - name: Prepare disposable cache
         run: mkdir -p .cache && chmod 777 .cache
       - name: Inspect sandbox configuration
@@ -78,7 +85,7 @@ jobs:
   deterministic:
     if: always()
     needs: [php, mcp]
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 1
     steps:
       - name: Require every supported PHP version and the MCP server to pass
