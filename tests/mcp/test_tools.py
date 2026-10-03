@@ -73,7 +73,8 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(TOKEN, text)
         onnx = build_server(self.bridge, backend="onnx", root=None, timeout_ms=10000)
         text = " ".join(tool.description or "" for tool in await self.tools(onnx))
-        for model in ["cross-encoder/ms-marco-TinyBERT-L2-v2", "sentence-transformers/all-MiniLM-L6-v2", "bert-base-NER"]:
+        for model in ["cross-encoder/ms-marco-TinyBERT-L2-v2", "sentence-transformers/all-MiniLM-L6-v2", "bert-base-NER",
+                      "bert-base-NER-uncased"]:
             self.assertIn(model, text)
         self.assertNotIn("not-a-model", text)
         self.assertNotIn(TOKEN, text)

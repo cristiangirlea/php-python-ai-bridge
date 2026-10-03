@@ -27,13 +27,17 @@ MODEL_NAMES = {
     "lexical": {"rerank": "lexical-demo-not-a-model", "embed": "hashing-bow-not-a-model",
                 "redact": "rules-only-not-a-model"},
     "onnx": {"rerank": "cross-encoder/ms-marco-TinyBERT-L2-v2", "embed": "sentence-transformers/all-MiniLM-L6-v2",
-             "redact": "Xenova/bert-base-NER:int8"},
+             "redact": "Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncased:int8"},
 }
 # MISC (nationalities, events, products) is deliberately not offered: it is the noisiest class and rarely personal data.
 REDACT_ENTITIES = ("PER", "ORG", "LOC")
 REDACT_DEFAULTS = {"entities": ["PER"], "min_score": 0.85}
-# Label order of dslim/bert-base-NER; the smoke test fails loudly if a re-pinned model changes it.
+# Label order of dslim/bert-base-NER and dslim/bert-base-NER-uncased, which share it; the smoke tests fail loudly if a
+# re-pinned model changes it.
 NER_LABELS = ("O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC")
+# What the ONNX backend loads from its model directory: one directory per model, each holding the tokenizer.json and
+# model.onnx that scripts/fetch_model.py writes. tests/python/test_fetch_model.py keeps the two lists in step.
+MODEL_DIRECTORIES = ("rerank", "embed", "redact", "redact-uncased")
 
 
 class InvalidInput(ValueError):
@@ -196,6 +200,12 @@ def _onnx(directory: Path, max_length: int, stride: int = 0):
         str(directory / "model.onnx"), options, providers=["CPUExecutionProvider"]
     )
     return tokenizer, session, {item.name for item in session.get_inputs()}
+
+
+def missing_models(model_dir: str) -> list:
+    """The model directories under model_dir that lack either file, in MODEL_DIRECTORIES order."""
+    return [name for name in MODEL_DIRECTORIES
+            if not all((Path(model_dir) / name / file).is_file() for file in ("tokenizer.json", "model.onnx"))]
 
 
 def _signed_counts(words: list) -> list:
@@ -494,19 +504,23 @@ def _probabilities(session, names, window) -> list:
 
 
 def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) -> list:
-    # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text. Each run of uncased
-    # sentences is read again from its title-cased copy, and only that run, so a second reading costs a window or two
-    # and cannot relabel a sentence that needed no help; where both readings find the same span, _merge keeps the
-    # more confident.
-    tokenizer, session, names = _onnx(Path(model_dir) / "redact", 512, stride=64)
+    # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text. The cased model reads the
+    # text, and each run of uncased sentences again from its title-cased copy, and only that run, so a second reading
+    # costs a window or two and cannot relabel a sentence that needed no help. The uncased model then reads the whole
+    # text as written: case means nothing to it, so it finds a lower-case name in a sentence that holds a capital,
+    # which neither cased reading can, while the cased model keeps what capitals tell in news and records. Where
+    # readings find the same span, _merge keeps the more confident.
+    cased = _onnx(Path(model_dir) / "redact", 512, stride=64)
+    uncased = _onnx(Path(model_dir) / "redact-uncased", 512, stride=64)
     variant, ranges = _recase(text)
+    readings = [(cased, 0, text)] + [(cased, start, variant[start:end]) for start, end in ranges] + [(uncased, 0, text)]
     windows = []
-    for offset, reading in [(0, text)] + [(start, variant[start:end]) for start, end in ranges]:
+    for (tokenizer, session, names), offset, reading in readings:
         encoding = tokenizer.encode(reading)
-        windows.extend((offset, reading, window) for window in [encoding, *encoding.overflowing])
+        windows.extend((session, names, offset, reading, window) for window in [encoding, *encoding.overflowing])
     progress(0, len(windows))
     candidates = []
-    for index, (offset, reading, window) in enumerate(windows):
+    for index, (session, names, offset, reading, window) in enumerate(windows):
         for span in _entities(window, _probabilities(session, names, window), entities, min_score, reading):
             candidates.append({**span, "start": span["start"] + offset, "end": span["end"] + offset})
         progress(index + 1, len(windows))
@@ -514,9 +528,9 @@ def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) 
 
 
 def _merge(candidates: list) -> list:
-    # Leftmost first, then longest, then the stronger source, then the more confident: of the two readings of an
-    # uncased sentence, a sure "person" beats an unsure "place" for the same words. A candidate overlapping the kept
-    # span extends it instead of being dropped, so no part of either stays visible.
+    # Leftmost first, then longest, then the stronger source, then the more confident: of two model readings of the
+    # same words, a sure "person" beats an unsure "place". A candidate overlapping the kept span extends it instead of
+    # being dropped, so no part of either stays visible.
     spans = []
     for span in sorted(candidates,
                        key=lambda span: (span["start"], span["start"] - span["end"], span["priority"], -span["score"])):
