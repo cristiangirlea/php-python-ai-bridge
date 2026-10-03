@@ -1,0 +1,26 @@
+name: Docker Compose
+description: >-
+  Ensure the Docker Compose v2 plugin. GitHub's runner images ship it; the lab's self-hosted runner image has only the
+  Docker CLI, so there a pinned release is installed for the runner user and checked against its published SHA-256.
+runs:
+  using: composite
+  steps:
+    - name: Ensure the Docker Compose plugin
+      shell: bash
+      env:
+        COMPOSE_VERSION: v5.5.1
+        COMPOSE_SHA256: db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576
+      run: |
+        if ! docker compose version >/dev/null 2>&1; then
+          if [ "$(uname -m)" != x86_64 ]; then
+            echo "::error::Docker Compose is missing and only the x86_64 release is pinned; this runner is $(uname -m)"
+            exit 1
+          fi
+          plugins="$HOME/.docker/cli-plugins"
+          mkdir -p "$plugins"
+          curl -fsSL --retry 3 -o "$plugins/docker-compose" \
+            "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-linux-x86_64"
+          echo "$COMPOSE_SHA256  $plugins/docker-compose" | sha256sum -c -
+          chmod +x "$plugins/docker-compose"
+        fi
+        docker compose version
