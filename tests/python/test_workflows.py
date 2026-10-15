@@ -52,8 +52,10 @@ class WorkflowTests(unittest.TestCase):
                 self.assertNotIn("runner.environment", text)
                 self.assertNotRegex(text, r"runs-on: *\$\{\{")
                 self.assertNotRegex(text, r"runs-on: *\[")
+                # Every runs-on line in the file, whatever jobs() made of the job around it: a block form
+                # (`runs-on:` followed by `- self-hosted`) is a bare `runs-on:` line, which is not RUNS_ON.
                 for line in re.findall(r"^\s*runs-on:.*$", text, re.MULTILINE):
-                    self.assertNotIn("self-hosted", line.lower(), line)
+                    self.assertEqual(line.strip(), RUNS_ON, line)
 
     def test_no_step_uses_a_local_action(self):
         # GitHub's runner images ship the Docker Compose plugin; the lab-only install action is gone with the lab.
@@ -61,7 +63,8 @@ class WorkflowTests(unittest.TestCase):
         for path in WORKFLOWS:
             for name, lines in jobs(path.read_text(encoding="utf-8")).items():
                 with self.subTest(workflow=path.name, job=name):
-                    self.assertEqual([line for line in lines if re.match(r"- uses: *\./", line)], [])
+                    # A step's `uses:` may follow its `name:` (no dash once stripped) and may quote the path.
+                    self.assertEqual([line for line in lines if re.match(r"""(?:-\s+)?uses:\s*['"]?\./""", line)], [])
 
     def test_every_job_that_runs_compose_checks_the_repository_out_first(self):
         for path in WORKFLOWS:
