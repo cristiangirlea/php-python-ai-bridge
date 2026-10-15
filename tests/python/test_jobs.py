@@ -1,21 +1,25 @@
 import hashlib
 import json
 import math
+import multiprocessing
+import os
 import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ai_bridge import tasks
+from ai_bridge import jobs, tasks
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
+from ai_bridge.server import BridgeServer
 from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, _entities, _merge, execute, validate
 
 
 class ValidationTests(unittest.TestCase):
     def test_invalid_worker_limits(self):
-        for name in ["concurrency", "capacity"]:
-            for value in [True, 0, -1, 1.5, "1", 1025]:
+        for name in ["concurrency", "capacity", "max_jobs"]:
+            for value in [True, 0, -1, 1.5, "1", 1000001]:
                 with self.subTest(name=name, value=value), self.assertRaises(ValueError):
                     JobStore(Settings(**{name: value}))
 
@@ -99,6 +103,16 @@ class ValidationTests(unittest.TestCase):
         for value in [float("nan"), float("inf"), True, -1, 11, "1"]:
             with self.subTest(value=value), self.assertRaises(InvalidInput):
                 validate("test.delay", {"seconds": value}, True)
+
+    def test_inspect_takes_only_a_list_of_strings(self):
+        for payload in [{}, {"value": []}, {"value": ["a", "b"]}]:
+            with self.subTest(payload=payload):
+                self.assertEqual(validate("test.inspect", payload, True), payload)
+        for payload in [{"value": "ab"}, {"value": [1]}, {"value": ["a", None]}, {"value": None}, {"other": 1}]:
+            with self.subTest(payload=payload), self.assertRaises(InvalidInput):
+                validate("test.inspect", payload, True)
+        with self.assertRaises(InvalidInput):
+            validate("test.inspect", {}, False)
 
 
 class EmbedBackendTests(unittest.TestCase):
@@ -729,9 +743,18 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(done["progress"], {"completed": 4, "total": 4})
 
     def test_hashing_embed_is_stable_across_processes(self):
-        # Each job runs in a fresh spawned process; salted hash() would differ between them.
+        # Two stores have two different spawned children; salted hash() would differ between them.
         first = self.wait(self.store.submit("embed", {"texts": ["red apple"]})["id"])
-        second = self.wait(self.store.submit("embed", {"texts": ["red apple"]})["id"])
+        other = JobStore(Settings(concurrency=1, test_tasks=True))
+        try:
+            job = other.submit("embed", {"texts": ["red apple"]})
+            deadline = time.monotonic() + 5
+            while other.get(job["id"])["status"] not in TERMINAL and time.monotonic() < deadline:
+                time.sleep(0.01)
+            second = other.get(job["id"])
+        finally:
+            other.close()
+        self.assertEqual(second["status"], "succeeded")
         self.assertEqual(first["result"]["vectors"], second["result"]["vectors"])
 
     def test_redact_through_the_store_reports_progress(self):
@@ -792,38 +815,89 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(self.wait(next_job["id"])["result"]["value"], "recovered")
 
     def test_pipe_allocation_failure_does_not_stop_coordination(self):
-        real_pipe = self.store._context.Pipe
-        calls = 0
-
-        def transient_failure(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise OSError(24, "Too many open files")
-            return real_pipe(*args, **kwargs)
-
-        with patch.object(self.store._context, "Pipe", side_effect=transient_failure):
+        # The pool's one child is already running, so the failure must bite when a replacement is needed.
+        with patch.object(self.store._context, "Pipe", side_effect=OSError(24, "Too many open files")) as pipe:
+            crashed = self.store.submit("test.crash", {})
+            self.assertEqual(self.wait(crashed["id"])["error"]["code"], "worker_crashed")
             job = self.store.submit("test.delay", {"seconds": 0})
-            done = self.wait(job["id"], timeout=1)
+            # The failed refill set a backoff; the job is tried once it ends, and told then.
+            done = self.wait(job["id"], timeout=3)
             self.assertEqual(done["error"]["code"], "worker_start_failed")
-            recovery = self.store.submit("test.delay", {"seconds": 0, "value": "recovered"})
-            self.assertEqual(self.wait(recovery["id"])["result"]["value"], "recovered")
+            self.assertGreater(pipe.call_count, 0)
             self.assertTrue(self.store._thread.is_alive())
+        recovery = self.store.submit("test.delay", {"seconds": 0, "value": "recovered"})
+        self.assertEqual(self.wait(recovery["id"])["result"]["value"], "recovered")
 
     def test_result_arriving_between_poll_and_exit_check_is_drained(self):
-        receive, send, process = Mock(), Mock(), Mock()
-        # The first poll misses the result; the child exits before is_alive().
-        receive.poll.side_effect = [False, True, False]
-        receive.recv.return_value = ("result", {"value": "completed-before-exit"})
-        process.is_alive.return_value = False
-        with patch.object(self.store._context, "Pipe", return_value=(receive, send)), \
-                patch.object(self.store._context, "Process", return_value=process):
+        self.store.close()
+
+        class Connection:
+            """A pipe end to a child that says it is ready, then answers the job it is sent at once; the parent's
+            first poll after sending misses the result that is already there."""
+
+            def __init__(self):
+                self.sent, self.queue, self.missed, self.closed = [], [(None, "ready", None)], False, False
+
+            def send(self, message):
+                if message is None:  # the stop the store sends on close
+                    return
+                self.sent.append(message)
+                self.queue.append((message[0], "result", {"value": "completed-before-exit"}))
+
+            def poll(self):
+                if self.sent and not self.missed:
+                    self.missed = True
+                    return False
+                return bool(self.queue)
+
+            def recv(self):
+                return self.queue.pop(0)
+
+            def close(self):
+                self.closed = True
+
+        class Process:
+            """A child that exits right after its first job; later ones stay up so the pool stops churning."""
+
+            def __init__(self, connection, exits):
+                self.connection, self.exits, self.closed = connection, exits, False
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                return not (self.exits and self.connection.sent)
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        connection, child = Connection(), Mock()
+        processes = []
+
+        def factory(*_, **__):
+            processes.append(Process(connection, exits=not processes))
+            return processes[-1]
+
+        with patch.object(self.store._context, "Pipe", return_value=(connection, child)), \
+                patch.object(self.store._context, "Process", factory):
+            self.store = JobStore(Settings(concurrency=1, test_tasks=True))
             job = self.store.submit("test.delay", {"seconds": 0})
             done = self.wait(job["id"])
             self.assertEqual(done["status"], "succeeded")
             self.assertEqual(done["result"]["value"], "completed-before-exit")
-            receive.recv.assert_called_once()
-            receive.close.assert_called_once()
+            self.assertEqual(len(connection.sent), 1)
+            self.assertTrue(connection.closed)
+            self.assertTrue(processes[0].closed)
+            self.assertEqual(len(processes), 2)
 
     def test_process_initialization_failures_close_allocated_resources(self):
         for stage in ["constructor", "start"]:
@@ -836,14 +910,18 @@ class JobsTests(unittest.TestCase):
                     process.start.side_effect = OSError("process startup failed")
                 # A failed cleanup must not prevent cleanup of the other handles.
                 send.close.side_effect = OSError("close failed")
-                with patch.object(self.store._context, "Pipe", return_value=(receive, send)), \
+                with patch.object(self.store._context, "Pipe", return_value=(receive, send)) as pipe, \
                         patch.object(self.store._context, "Process", factory):
+                    crashed = self.store.submit("test.crash", {})
+                    self.assertEqual(self.wait(crashed["id"])["error"]["code"], "worker_crashed")
                     job = self.store.submit("test.delay", {"seconds": 0})
                     self.assertEqual(self.wait(job["id"])["error"]["code"], "worker_start_failed")
-                    send.close.assert_called_once()
-                    receive.close.assert_called_once()
+                    # The pool is refilled on every tick, so each attempt closes everything it allocated.
+                    self.assertGreater(pipe.call_count, 0)
+                    self.assertEqual(send.close.call_count, pipe.call_count)
+                    self.assertEqual(receive.close.call_count, pipe.call_count)
                     if stage == "start":
-                        process.close.assert_called_once()
+                        self.assertEqual(process.close.call_count, pipe.call_count)
                 recovery = self.store.submit("test.delay", {"seconds": 0})
                 self.assertEqual(self.wait(recovery["id"])["status"], "succeeded")
 
@@ -885,6 +963,257 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(self.store.get(job["id"])["status"], "cancelled")
         with self.assertRaises(CapacityError):
             self.store.submit("test.delay", {})
+
+
+class WarmPoolTests(unittest.TestCase):
+    """The children are started once and kept; what a test may ask one through test.inspect is its process id,
+    whether the service token reached it, and whether any container of its memory still holds a given text."""
+
+    def setUp(self):
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+
+    def tearDown(self):
+        self.store.close()
+
+    def wait(self, job_id, states=TERMINAL, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = self.store.get(job_id)
+            if job["status"] in states:
+                return job
+            time.sleep(0.01)
+        self.fail(f"job did not reach {states}")
+
+    def inspect(self, needle=""):
+        parts = [needle[:len(needle) // 2], needle[len(needle) // 2:]] if needle else []
+        done = self.wait(self.store.submit("test.inspect", {"value": parts})["id"])
+        self.assertEqual(done["status"], "succeeded", done)
+        return done["result"]
+
+    def test_the_pool_is_started_at_construction_and_drained_on_close(self):
+        children = [worker.process for worker in self.store._pool]
+        self.assertEqual(len(children), 1)
+        self.assertTrue(all(child.is_alive() for child in children))
+        self.store.close()
+        self.assertFalse(self.store._pool)
+        self.assertFalse(self.store._retiring)
+        for child in children:
+            # A closed Process object stands for a child that was joined; is_alive() is refused on it.
+            with self.assertRaises(ValueError):
+                child.is_alive()
+
+    def test_successive_jobs_run_on_the_same_child(self):
+        first = self.inspect()
+        second = self.inspect()
+        self.assertEqual(first["pid"], second["pid"])
+        self.assertNotEqual(first["pid"], os.getpid())
+
+    def test_a_second_job_on_the_same_child_does_not_see_the_first_input_or_result(self):
+        # The needle travels in a list: the collector tracks a list, and any dict holding one, where it does not
+        # track a dict of plain strings, so a kept payload, reply or message tuple is found.
+        needle = "secret-" + uuid.uuid4().hex
+        pid = self.inspect()["pid"]
+        done = self.wait(self.store.submit("test.delay", {"seconds": 0, "value": [needle]})["id"])
+        self.assertEqual(done["result"]["value"], [needle])  # the store keeps the result; the child must not
+        report = self.inspect(needle)
+        self.assertEqual(report["pid"], pid)
+        self.assertEqual(report["held"], 0)
+        # Not even when the task failed with the input still in hand.
+        failed = self.wait(self.store.submit("test.error", {"value": [needle]})["id"])
+        self.assertEqual(failed["error"]["code"], "task_failed")
+        report = self.inspect(needle)
+        self.assertEqual(report["pid"], pid)
+        self.assertEqual(report["held"], 0)
+        # Nor after a real task's payload shapes.
+        self.wait(self.store.submit("rerank", {"query": needle, "documents": [needle, "other"]})["id"])
+        self.wait(self.store.submit("redact", {"text": "mail " + needle + "@example.com"})["id"])
+        report = self.inspect(needle)
+        self.assertEqual(report["pid"], pid)
+        self.assertEqual(report["held"], 0)
+        # The question would find the answer if it were there: a needle planted whole in its own input is seen,
+        # from the serving loop's locals.
+        planted = self.wait(self.store.submit("test.inspect", {"value": [needle]})["id"])
+        self.assertGreater(planted["result"]["held"], 0)
+
+    def test_the_residue_scan_finds_what_the_collector_does_not_track(self):
+        # A dict or tuple of plain strings is not tracked by the collector, so a kept payload would hide in one;
+        # the scan follows references from every tracked object and every frame instead. In this process the
+        # needle also sits in this frame's locals, so a planted copy must raise the count above that baseline.
+        needle = "secret-" + uuid.uuid4().hex
+        parts = [needle[:12], needle[12:]]
+        baseline = tasks._inspect(parts)["held"]
+        kept = {"value": needle[:1] + needle[1:]}
+        self.assertGreater(tasks._inspect(parts)["held"], baseline)
+        del kept
+        kept = (uuid.uuid4().hex, "result", {"value": needle[:1] + needle[1:]})
+        self.assertGreater(tasks._inspect(parts)["held"], baseline)
+        del kept
+        self.assertEqual(tasks._inspect(parts)["held"], baseline)
+        self.assertEqual(tasks._inspect([])["held"], 0)
+
+    def test_a_killed_child_is_replaced_and_never_serves_again(self):
+        pids = [self.inspect()["pid"]]
+        cancelled = self.store.submit("test.delay", {"seconds": 5})
+        self.wait(cancelled["id"], {"running"})
+        self.assertEqual(self.store.cancel(cancelled["id"])["status"], "cancelled")
+        pids.append(self.inspect()["pid"])
+        timed_out = self.wait(self.store.submit("test.delay", {"seconds": 5}, 150)["id"])
+        self.assertEqual(timed_out["error"]["code"], "deadline_exceeded")
+        pids.append(self.inspect()["pid"])
+        crashed = self.wait(self.store.submit("test.crash", {})["id"])
+        self.assertEqual(crashed["error"]["code"], "worker_crashed")
+        pids.append(self.inspect()["pid"])
+        self.assertEqual(len(set(pids)), 4, pids)
+        self.assertFalse(self.store._active)
+
+    def test_a_child_is_recycled_after_its_share_of_jobs(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True, max_jobs=3))
+        pids = [self.inspect()["pid"] for _ in range(7)]
+        self.assertEqual(pids[0], pids[1])
+        self.assertEqual(pids[1], pids[2])
+        self.assertNotEqual(pids[2], pids[3])
+        self.assertEqual(pids[3], pids[5])
+        self.assertNotEqual(pids[5], pids[6])
+        # The boundaries: one job per child, and the largest share, which never recycles here.
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True, max_jobs=1))
+        pids = [self.inspect()["pid"] for _ in range(3)]
+        self.assertEqual(len(set(pids)), 3)
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True, max_jobs=1000000))
+        self.assertEqual(len({self.inspect()["pid"] for _ in range(3)}), 1)
+
+    def test_the_service_token_is_absent_from_the_child_environment(self):
+        # The service pops the token before it starts its children, so it is not in their environment block
+        # either, which a pop inside the child would leave as it was; the child's own pop is the second layer.
+        self.store.close()
+        token = "test-only-bridge-token-never-use-in-production"
+        with patch.dict(os.environ, {"BRIDGE_TOKEN": token}):
+            server = BridgeServer(("127.0.0.1", 0), token, Settings(concurrency=1, test_tasks=True))
+            try:
+                self.assertNotIn("BRIDGE_TOKEN", os.environ)
+                self.assertEqual(server.token, token)
+                self.store = server.jobs
+                report = self.inspect()
+            finally:
+                server.server_close()
+        self.assertFalse(report["token_in_environment"])
+        if os.path.exists("/proc/self/environ"):
+            self.assertIs(report["token_in_environment_block"], False)
+        # A store built without the service still has the child drop it from os.environ.
+        with patch.dict(os.environ, {"BRIDGE_TOKEN": token}):
+            self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+            report = self.inspect()
+            self.assertIn("BRIDGE_TOKEN", os.environ)
+        self.assertFalse(report["token_in_environment"])
+
+    def test_a_message_for_an_earlier_job_is_dropped(self):
+        # A child only ever answers its current job, but a message tagged with an old job id, were one to arrive,
+        # lands nowhere: not on the job the child runs now.
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+        first = self.wait(self.store.submit("test.delay", {"seconds": 0, "value": "first"})["id"])
+        running = self.store.submit("test.delay", {"seconds": 1, "value": "second"})
+        self.wait(running["id"], {"running"})
+        with self.store._lock:
+            worker = self.store._active[running["id"]]
+            self.store._jobs[first["id"]]["status"] = "running"  # even if the old job were still open
+            self.store._drain_message(worker, (first["id"], "result", {"value": "stale"}))
+            self.store._drain_message(worker, (first["id"], "progress", {"completed": 9, "total": 9}))
+            self.store._jobs[first["id"]]["status"] = "succeeded"
+        done = self.wait(running["id"])
+        self.assertEqual(done["result"]["value"], "second")
+        self.assertEqual(self.store.get(first["id"])["result"]["value"], "first")
+        self.assertEqual(self.store.get(first["id"])["progress"], {"completed": 1, "total": 1})
+
+    def test_a_child_that_never_says_it_is_ready_is_replaced(self):
+        self.store.close()
+        # Longer than a child takes to start under the test container's one CPU, or the replacement goes the
+        # same way; the job then waits that long, the backoff and a start.
+        with patch.object(jobs, "READY_SECONDS", 1.0):
+            self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+            self.wait_ready()
+            with self.store._lock:
+                # The child is up and waiting, but as far as the store knows it never said so: a stuck child.
+                silent = self.store._pool[0]
+                silent.ready = False
+            job = self.store.submit("test.delay", {"seconds": 0, "value": "served"})
+            self.assertEqual(self.wait(job["id"], timeout=10)["result"]["value"], "served")
+            self.assertIsNotNone(silent.retired_at)
+            try:
+                alive = silent.process.is_alive()
+            except ValueError:
+                alive = False  # the process object is closed: the reaper saw it dead
+            self.assertFalse(alive)
+
+    def wait_ready(self, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.store._lock:
+                if any(worker.ready for worker in self.store._pool):
+                    return
+            time.sleep(0.01)
+        self.fail("no child became ready")
+
+    def test_children_that_die_before_they_are_ready_are_not_restarted_in_a_loop(self):
+        self.store.close()
+
+        class Connection:
+            def send(self, message):
+                pass
+
+            def poll(self):
+                return False
+
+            def close(self):
+                pass
+
+        class Process:
+            """Dies at once, before it could say it is ready."""
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                return False
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+            def close(self):
+                pass
+
+        factory = Mock(side_effect=lambda *_, **__: Process())
+        with patch.object(jobs, "BACKOFF_SECONDS", 0.3), \
+                patch.object(multiprocessing.get_context("spawn"), "Pipe", return_value=(Connection(), Connection())), \
+                patch.object(multiprocessing.get_context("spawn"), "Process", factory):
+            self.store = JobStore(Settings(concurrency=2, test_tasks=True))
+            job = self.store.submit("test.delay", {"seconds": 0})
+            # Nothing is up and starts are failing, so the job is told so rather than left to its deadline.
+            self.assertEqual(self.wait(job["id"], timeout=1)["error"]["code"], "worker_start_failed")
+            time.sleep(1.0)
+            # Without the backoff a tick every 10 ms would have started a hundred children per second.
+            self.assertLessEqual(factory.call_count, 2 + 2 * 4)
+
+    def test_a_running_job_is_not_held_up_by_another_being_cancelled(self):
+        # The cancelled child's death is waited for outside the lock, so reads keep answering at once.
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=2, test_tasks=True))
+        running = self.store.submit("test.delay", {"seconds": 1, "value": "kept"})
+        doomed = self.store.submit("test.delay", {"seconds": 5})
+        self.wait(doomed["id"], {"running"})
+        started = time.monotonic()
+        self.assertEqual(self.store.cancel(doomed["id"])["status"], "cancelled")
+        self.store.get(running["id"])
+        self.assertLess(time.monotonic() - started, 0.1)
+        self.assertEqual(self.wait(running["id"])["result"]["value"], "kept")
 
 
 if __name__ == "__main__":

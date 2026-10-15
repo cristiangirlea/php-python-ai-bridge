@@ -1,8 +1,10 @@
-"""Informational cold-job latency against running workers. Asserts correctness, never speed.
+"""Informational job latency against running workers. Asserts correctness, never speed.
 
-Every job is cold by design: the worker starts a fresh process per job, which imports its
-dependencies and loads the model before doing any work. The output is a Markdown block for
-docs/testing.md; progress goes to stderr.
+The worker keeps a pool of warm child processes, so only a child's first job of a kind imports
+dependencies and loads that kind's model. Each backend's first job is reported on its own as the
+cold row, on the assumption that the worker has served nothing yet (restart it first); every other
+row is the median of warm jobs after one job of that case has run. The output is a Markdown block
+for docs/testing.md; progress goes to stderr.
 """
 
 import datetime
@@ -39,7 +41,7 @@ def sentence(seed: int, count: int) -> str:
     return " ".join(WORDS[(seed * 7 + i * 3) % len(WORDS)] for i in range(count)) + "."
 
 
-# Deterministic inputs: the same text on every run and every runner.
+# Deterministic inputs: the same text on every run and every runner. The first case is the one the cold row runs.
 CASES = [
     ("rerank 32 documents of ~40 words", "rerank",
      {"query": QUERY, "documents": [sentence(i, 40) for i in range(32)]}, "1 batch of 32"),
@@ -56,6 +58,8 @@ CASES = [
                "maria.lopez@example.com or call +44 20 7946 0958. " * 20)[:2000], "entities": ["PER", "ORG", "LOC"]},
      "rules plus windows of 512"),
 ]
+# What the ONNX backend loads on a child's first job of each task; the lexical backend loads nothing.
+MODELS = {"rerank": "the cross-encoder", "embed": "the embedding model", "redact": "both NER models"}
 
 
 def call(base: str, method: str, path: str, body=None) -> dict:
@@ -67,7 +71,8 @@ def call(base: str, method: str, path: str, body=None) -> dict:
 
 
 def wait_ready(base: str) -> dict:
-    deadline = time.monotonic() + 60
+    # A restarted model worker installs its wheels before it answers.
+    deadline = time.monotonic() + 180
     while True:
         try:
             return call(base, "GET", "/healthz")
@@ -107,22 +112,38 @@ def main() -> None:
         reported = wait_ready(base)["backend"]
         if reported != backend:
             raise SystemExit(f"{base} reports backend {reported!r}, expected {backend!r}")
-        for label, task, payload, note in CASES:
+        loaded = set()
+        for index, (label, task, payload, note) in enumerate(CASES):
+            # One job of the case first: the backend's very first job is the cold row, and a first job that loads
+            # a model is named in its row's note. Then the warm jobs the row measures.
+            first = run_once(base, task, payload)
+            print(f"{backend} {label} first job: {first:.2f} s", file=sys.stderr)
+            loads = backend == "onnx" and task not in loaded
+            loaded.add(task)
+            if index == 0:
+                rows.append((backend, "first job after start: " + label, 1, first, first, first,
+                             "cold; the child imports its dependencies"
+                             + (f" and loads {MODELS[task]}" if loads else "")))
             times = []
             for run in range(RUNS):
                 times.append(run_once(base, task, payload))
                 print(f"{backend} {label} run {run + 1}: {times[-1]:.2f} s", file=sys.stderr)
-            rows.append((backend, label, min(times), statistics.median(times), max(times),
-                         "cold; " + note if backend == "onnx" else "cold process, no model"))
+            if backend == "onnx":
+                detail = "warm; " + note
+                if index and loads:
+                    detail += f"; the first job, loading {MODELS[task]}, took {first:.2f} s"
+            else:
+                detail = "warm process, no model"
+            rows.append((backend, label, RUNS, min(times), statistics.median(times), max(times), detail))
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     print(f"""Measured {now} UTC, commit `{os.environ.get("BENCH_COMMIT", "unknown")}`, runner: {os.environ.get("BENCH_RUNNER", "unspecified")}, CPU: {cpu_model()}.
 Limits: model-worker cpus=1, mem_limit=1536m, BRIDGE_CONCURRENCY=1; worker cpus=1, mem_limit=512m.
-N={RUNS} sequential jobs per row; wall time from POST /v1/jobs to the first GET showing a terminal state, polled every {POLL_S:g} s.
+N={RUNS} sequential warm jobs per row, after one job of the case; wall time from POST /v1/jobs to the first GET showing a terminal state, polled every {POLL_S:g} s.
 
 | Backend | Case | N | min s | p50 s | max s | Note |
 | --- | --- | --- | --- | --- | --- | --- |""")
-    for backend, label, low, median, high, note in rows:
-        print(f"| {backend} | {label} | {RUNS} | {low:.2f} | {median:.2f} | {high:.2f} | {note} |")
+    for backend, label, count, low, median, high, note in rows:
+        print(f"| {backend} | {label} | {count} | {low:.2f} | {median:.2f} | {high:.2f} | {note} |")
 
 
 if __name__ == "__main__":

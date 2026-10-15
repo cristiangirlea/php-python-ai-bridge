@@ -1,7 +1,7 @@
 # PHP-Python AI Bridge
 
-A typed PHP client for a small Python service that runs bounded AI tasks (rerank, embed, redact), one
-process per job, with a FrankenPHP worker-mode example and a stdio MCP server as a second client of the
+A typed PHP client for a small Python service that runs bounded AI tasks (rerank, embed, redact) on a
+pool of warm child processes, one job per child at a time, with a FrankenPHP worker-mode example and a stdio MCP server as a second client of the
 same HTTP protocol. Experimental: jobs live in memory, nothing is durable, no production claim is made.
 README has the overview; `docs/protocol.md`, `docs/integration.md`, `docs/mcp.md`, `docs/security.md`
 and `docs/testing.md` are the guides. Everything builds, tests and downloads inside `docker/compose.yaml`.
@@ -11,7 +11,7 @@ and `docs/testing.md` are the guides. Everything builds, tests and downloads ins
 | Path | Holds |
 |---|---|
 | `src/` | The PHP client (`PhpAiBridge\`): `Client`, `Job`, the typed results, `BridgeException`. PHP `>=8.2 <8.6`, `ext-curl` and `ext-json` only. |
-| `worker/ai_bridge/` | The Python 3.12 service: `server.py` (HTTP), `jobs.py` (store, limits, retention), `tasks.py` (allowlist, validation, backends, `MODEL_NAMES`). |
+| `worker/ai_bridge/` | The Python 3.12 service: `server.py` (HTTP), `jobs.py` (store, worker pool, limits, retention), `tasks.py` (allowlist, validation, backends, `MODEL_NAMES`). |
 | `mcp_server/bridge_mcp/` | The stdio MCP server: `tools.py` (the tool list and `BACKENDS`), `protocol.py` (its client of the worker), `index.py` (the builder behind `bridge_search`). |
 | `examples/` | Local autoloader, the CLI example, the FrankenPHP route and Caddyfile. |
 | `scripts/` | Model fetcher, benchmark, NER measurement, MCP stdio launchers, the LLM evaluation runner. |

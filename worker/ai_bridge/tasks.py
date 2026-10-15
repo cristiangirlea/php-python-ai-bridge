@@ -65,12 +65,16 @@ def _strings(values: object, plural: str, singular: str, limit: int, extra: int 
 def validate(task: str, payload: object, test_tasks: bool = False) -> dict:
     if not isinstance(payload, dict):
         raise InvalidInput("input must be an object")
-    if test_tasks and task in {"test.delay", "test.crash", "test.error"}:
+    if test_tasks and task in {"test.delay", "test.crash", "test.error", "test.inspect"}:
         if set(payload) - {"seconds", "value"}:
             raise InvalidInput("unknown input field")
         seconds = payload.get("seconds", 0.05)
         if type(seconds) not in (int, float) or not math.isfinite(seconds) or not 0 <= seconds <= 10:
             raise InvalidInput("seconds must be between 0 and 10")
+        if task == "test.inspect":
+            parts = payload.get("value", [])
+            if not isinstance(parts, list) or any(not isinstance(part, str) for part in parts):
+                raise InvalidInput("value must be a list of strings")
         return payload
     if task == "embed":
         if set(payload) != {"texts"}:
@@ -113,6 +117,8 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
         time.sleep(payload.get("seconds", 0.05))
         progress(1, 1)
         return {"value": payload.get("value")}
+    if task == "test.inspect":
+        return _inspect(payload.get("value", []))
     if task == "embed":
         return _embed(payload["texts"], backend, model_dir, progress)
     if task == "redact":
@@ -151,6 +157,62 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
     return {"rankings": rankings[:payload.get("top_k", total)], "model": model}
 
 
+def _reachable_holding(needle: str, roots: list) -> int:
+    """How many distinct strings reachable from the roots contain the needle, following every reference the
+    collector knows of, the needle object itself excepted. The collector does not track a dict or tuple of plain
+    strings, so such a container is reached through whatever holds it rather than listed on its own; the walk
+    therefore starts from every tracked object and every frame's locals and follows referents until nothing new
+    is found."""
+    import gc
+
+    seen, queue, held = {id(roots), id(needle)}, list(roots), 0
+    while queue:
+        item = queue.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, (str, bytes)):
+            text = item if isinstance(item, str) else item.decode("utf-8", "replace")
+            held += needle in text
+            continue
+        queue.extend(gc.get_referents(item))
+    return held
+
+
+def _inspect(parts: list) -> dict:
+    """What a test may ask a worker child about itself: its process id, whether the service token reached its
+    environment or its initial environment block (which unsetenv leaves in place), and how many strings reachable
+    from any live object or any frame's locals still hold the text joined from parts, which no earlier job of the
+    child may have left behind. The parts are joined here so that the question itself does not hold the answer;
+    the joined copy is always a new object, so it is left out of the count by identity."""
+    import gc
+    import sys
+
+    needle = ("".join(parts) + "\0")[:-1]
+    held = 0
+    if needle:
+        # Every frame's locals but this function's own, read first: before 3.13 a frame's f_locals is a dict
+        # cached on the frame and brought up to date only when it is read, so a read here drops what an earlier
+        # inspection left in it before the collector's objects are listed. The own frame is known by id, not
+        # held: a frame object still referenced when its function returns takes over the locals.
+        roots, own = [], id(sys._getframe())
+        for frame in sys._current_frames().values():
+            while frame is not None:
+                if id(frame) != own:
+                    roots.extend(frame.f_locals.values())
+                frame = frame.f_back
+        gc.collect()
+        roots.extend(gc.get_objects())
+        held = _reachable_holding(needle, roots)
+    try:
+        with open("/proc/self/environ", "rb") as environ:
+            in_block = b"BRIDGE_TOKEN=" in environ.read()
+    except OSError:
+        in_block = None  # no procfs here
+    return {"pid": os.getpid(), "token_in_environment": "BRIDGE_TOKEN" in os.environ,
+            "token_in_environment_block": in_block, "held": held}
+
+
 def _tensors(encodings: list) -> dict:
     """The model inputs for a list of encodings of equal length, as int64 arrays. The only numpy touchpoint."""
     import numpy as np
@@ -185,7 +247,19 @@ def _score_pairs(tokenizer, session, names: set, query: str, documents: list, re
     return scores
 
 
+# Loaded tokenizers and sessions by model directory and tokenizer settings. A worker child loads each model it needs
+# once, on first use, and keeps it for its next jobs; the coordinator never runs a task, so it holds none.
+_LOADED = {}
+
+
 def _onnx(directory: Path, max_length: int, stride: int = 0):
+    key = (str(directory), max_length, stride)
+    if key not in _LOADED:
+        _LOADED[key] = _load_onnx(directory, max_length, stride)
+    return _LOADED[key]
+
+
+def _load_onnx(directory: Path, max_length: int, stride: int):
     # Optional dependencies are installed separately; no runtime downloads.
     import onnxruntime as ort
     from tokenizers import Tokenizer
