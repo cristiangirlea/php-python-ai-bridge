@@ -67,26 +67,27 @@ BACKENDS = {
     },
 }
 
-# Worker time from submission to a terminal state: the p50 of five cold jobs on one CPU, as the range between
-# two GitHub-hosted runners measured 2026-09-27 (docs/testing.md's "Measured latency" table and the earlier run
-# it quotes): the lexical rows, and on onnx the 32- and 512-document rerank rows and the embed row. Redaction runs
-# two models since pull request #19, so its range is that pull request's run on an EPYC 7763 runner and a local
-# Ryzen 9 9950X, measured 2026-10-01. The same figures appear in docs/mcp.md's tool table; a re-measurement updates
-# all three places.
-_COLD = "median of five cold jobs on one CPU on two runners, the model loaded afresh for each; docs/testing.md"
+# Worker time from submission to a terminal state: the p50 of five warm jobs on one CPU, measured 2026-10-15 on a
+# local Ryzen 9 9950X (docs/testing.md's "Measured latency" table): the lexical rows, and on onnx the 32- and
+# 512-document rerank rows, the embed row and the redact row. The worker keeps its child processes, so only a
+# child's first job of a kind loads that kind's model; that first-job cost is quoted beside each warm figure. The
+# same figures appear in docs/mcp.md's tool table; a re-measurement updates all three places.
+_WARM = ("median of five warm jobs on one CPU; a worker's first job of a kind also loads its model, and costs what "
+         "is quoted for it; docs/testing.md")
 TIMING = {
-    "lexical": {task: "about 0.4 s of worker time (median of five cold jobs on one CPU on two runners, almost all "
-                      "of it process start-up; docs/testing.md)" for task in ("rerank", "embed", "redact")},
+    "lexical": {task: "about 0.05 s of worker time (median of five warm jobs on one CPU, the polling floor; "
+                      "docs/testing.md)" for task in ("rerank", "embed", "redact")},
     "onnx": {
-        "rerank": f"0.7-0.9 s of worker time for 32 documents and 1.0-1.2 s for 512 ({_COLD})",
-        "embed": f"1.1-1.3 s of worker time for 32 texts ({_COLD})",
-        "redact": "2.8-3.4 s of worker time for 2000 characters with all three entity kinds (median of five cold jobs "
-                  "on one CPU on two machines, both models loaded afresh for each; docs/testing.md)",
+        "rerank": f"0.05 s of worker time for 32 documents and 0.2 s for 512, 0.8 s for the first job ({_WARM})",
+        "embed": f"0.2 s of worker time for 32 texts, 0.8 s for the first job ({_WARM})",
+        "redact": f"0.7 s of worker time for 2000 characters with all three entity kinds, 2.3 s for the first job, "
+                  f"which loads both models ({_WARM})",
     },
 }
 
 INSTRUCTIONS = """Tools for a private PHP-Python AI bridge worker. Every call submits a job over the bridge's HTTP
-protocol, polls it to completion and returns the finished result; the worker runs each job in its own process.
+protocol, polls it to completion and returns the finished result; the worker runs each job on one of its warm
+child processes, which keeps its loaded models and no reference to the job once it is done.
 
 Economics: a tool's input is your output. Do not paste hundreds of documents into bridge_rerank; put them in a
 file under the configured root and pass documents_path. bridge_embed_similarity never returns raw vectors.

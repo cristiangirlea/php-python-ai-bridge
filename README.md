@@ -7,7 +7,7 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 ## What is implemented
 
 - PHP 8.2–8.5 client using cURL, with validated job objects and typed rerank, embedding and redaction results. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result; the ONNX backend scores them 32 pairs per forward pass.
-- Python 3.12 service with an explicit task allowlist and a separate process per task.
+- Python 3.12 service with an explicit task allowlist and a pool of warm child processes, one job per child at a time.
 - Text embedding: up to 32 texts per job return unit-length 384-dimensional vectors for an index the caller owns.
 - Redaction: checksum and pattern rules for card numbers, IBANs, emails, IPv4 and IPv6 addresses and phone numbers on every backend, plus named-entity masking with the int8 cased and uncased `bert-base-NER` models on the ONNX profile. Assistive, not a compliance control.
 - Bounded concurrency, queue/result capacity, retention, request sizes and execution deadlines.
@@ -67,7 +67,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps model-test
 docker compose -f docker/compose.yaml run --rm --no-deps model-integration
 ```
 
-`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured cold-job medians are in [the testing guide](docs/testing.md#measured-latency-informational). Model scores are relevance logits, not probabilities.
+`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational). Model scores are relevance logits, not probabilities.
 
 Stop this project's containers when finished:
 
@@ -133,7 +133,7 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 - **Trusted services only:** one bearer token authorizes all jobs. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
 - **Private HTTP transport:** deploy behind an authenticated TLS boundary for cross-host use. The sample Python HTTP server is not an internet-facing production server.
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
-- **Cold model per job:** this prototype favors simple crash/cancellation containment over model pooling and throughput. Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no model pooling, and no claim of GPU support, multi-host scaling or stateful agents.
+- **One job per warm child, no sharing across jobs:** the worker keeps `BRIDGE_CONCURRENCY` child processes alive and each keeps the models it has loaded, so only a child's first job of a kind pays for imports and model loading; a child is replaced after a cancellation, a deadline or a crash, and after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no sharing of a loaded model between children, and no claim of GPU support, multi-host scaling or stateful agents.
 - **Cancellation cannot undo effects:** registered future tasks must manage their own external side effects. A transport failure during POST has an uncertain submission outcome; the client never retries POST automatically.
 - **No token streaming:** progress is polled by job ID. The MCP server forwards that progress to a host that asks for it; there is no SSE, framework plugin or chat SDK.
 

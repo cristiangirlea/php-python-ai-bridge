@@ -183,7 +183,7 @@ services:
       FRANKENPHP_URL: http://model-frankenphp:8080
     command: [python, tests/model_integration.py]
 
-  # Informational cold-job latency for docs/testing.md; asserts correctness, never speed.
+  # Informational job latency for docs/testing.md, one cold first job then warm ones; asserts correctness, never speed.
   model-bench:
     <<: *python
     profiles: [model]
@@ -308,7 +308,7 @@ services:
     environment:
       <<: *mcp-env
       BRIDGE_URL: http://mcp-model-worker:8090
-      # The worker runs one job at a time and loads a model for each, so calls an agent makes together queue.
+      # The worker runs one job at a time, so calls an agent makes together queue for its one warm child.
       BRIDGE_MCP_TIMEOUT_MS: "300000"
 
   # Builds an index with the models, e.g. `run --rm mcp-model-index /data/docs --out /data/artifacts/docs`. An index
