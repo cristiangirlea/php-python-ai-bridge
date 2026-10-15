@@ -26,6 +26,10 @@ docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch down
 ```
 
+The `python-tests` step also runs both hooks' tests (`tests/python/test_repo_rules_hook.py` and
+`tests/python/test_push_guard_hook.py`, which runs `.claude/hooks/push-guard.test.sh`); the containers
+mount `/tmp` noexec, so the guard's killed-git case is skipped there and runs only on a host.
+
 This runs the PHP steps on compose's default image, PHP 8.5. CI runs them on 8.2, 8.3, 8.4 and 8.5
 and first checks that the image's PHP minor is the one the matrix expects; to reproduce another branch,
 set `BRIDGE_PHP_IMAGE` to its pinned image from `.github/workflows/tests.yml` and rerun the PHP and

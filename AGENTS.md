@@ -16,7 +16,7 @@ and `docs/testing.md` are the guides. Everything builds, tests and downloads ins
 | `examples/` | Local autoloader, the CLI example, the FrankenPHP route and Caddyfile. |
 | `scripts/` | Model fetcher, benchmark, NER measurement, MCP stdio launchers, the LLM evaluation runner. |
 | `tests/php/` | `run.php` (offline contract checks), `integration.php` (the client against the real worker and broken peers over HTTP), `model.php` (ONNX smoke). |
-| `tests/python/` | The worker's unittest suite, including the workflows' runner routing and the post-edit hook. |
+| `tests/python/` | The worker's unittest suite, including the workflows' runners and both hooks (the pre-call push guard's own cases are in `.claude/hooks/push-guard.test.sh`). |
 | `tests/mcp/` | The MCP server's suite, offline against hash-pinned wheels; its fixtures and LLM evaluations. |
 | `tests/*.py` | Cross-boundary tests: `integration.py` (through the FrankenPHP worker), `model_integration.py`, `mcp_model_probe.py`, and `hostile_server.py`, a broken peer. |
 | `docker/compose.yaml` | Every service, profile and limit. |
@@ -77,7 +77,9 @@ and update both together. Path-scoped detail is in `.claude/rules/`.
   independent review ran and its blocking findings are fixed, a security read of the diff has nothing
   open, and the head being merged is the commit all of that ran on. Merge `main` in only for a conflict,
   or once before those final checks and review. What could not be tested is said in the PR and waits for
-  the owner. Never `--auto` or `--admin`, never push to `main`: hand over the command.
+  the owner. Never `--auto` or `--admin`, never push to `main`: hand over the command (the pre-call
+  hook `.claude/hooks/push-guard.sh` refuses these in the spellings it can read and an unreadable command
+  that mentions them; script files and other programs are not read: the ruleset on `main` is the guard).
 - **Reviews are text, commits are changes.** A finding is blocking when it is a defect this branch brings
   in, a missing test for what it changes, a broken house rule or a security hole; fix it with the smallest
   change. Everything else (problems already on `main`, improvements, style) becomes an issue linked from
