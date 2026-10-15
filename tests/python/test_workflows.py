@@ -3,9 +3,11 @@
 The repository is public: GitHub does not meter Actions minutes for it, and a fork's pull request runs its own code
 on a disposable runner of GitHub's, never on a machine of the maintainer's. Nothing here installs Docker Compose,
 since GitHub's images ship the plugin. Read as text, since the standard library has no YAML parser; the workflows
-keep their jobs two spaces in under `jobs:`.
+keep their jobs two spaces in under `jobs:`. Every action a step uses is pinned to a commit, and no checkout
+leaves the job's token behind: `docs/security.md` promises both.
 """
 
+import itertools
 import re
 import unittest
 from pathlib import Path
@@ -13,6 +15,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 WORKFLOWS = sorted(path for ext in ("*.yml", "*.yaml") for path in (REPO / ".github" / "workflows").glob(ext))
 RUNS_ON = "runs-on: ubuntu-latest"
+# A step's `uses:` may follow its `name:` (so the dash is optional) and may quote its value.
+USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(.*?)\s*$")
+# Every spelling of the key YAML accepts (quoted, a space before the colon, a flow-style step), so that a line
+# USES cannot read is counted, not passed over.
+ANY_USES = re.compile(r"""^\s*(?:-\s+)?(?:\{\s*)?['"]?uses['"]?\s*:""")
+# `owner/repo@<commit>`, and the version that commit is, as a comment, for the human reading the workflow.
+PINNED = re.compile(r"""^['"]?[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+@[0-9a-f]{40}['"]?(?: +# v\d+\.\d+\.\d+)?$""")
 
 
 def jobs(text: str) -> dict:
@@ -28,6 +37,52 @@ def jobs(text: str) -> dict:
         elif line.strip() and not line.startswith(" "):
             name = None
     return found
+
+
+def steps(text: str) -> list:
+    """Every step of every job, in file order, each the list of its lines with their indentation kept.
+
+    A step is an item of a `steps:` list: its `- ` line and the lines below it until the next item at the same
+    indentation, or the end of the list.
+    """
+    found, key_indent, item_indent = [], None, None
+    for line in text.splitlines():
+        key = re.match(r"^(\s*)steps:\s*$", line)
+        if key:
+            key_indent, item_indent = len(key.group(1)), None
+            continue
+        if key_indent is None or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= key_indent:
+            key_indent = None
+        elif line.lstrip().startswith("- ") and item_indent in (None, indent):
+            item_indent = indent
+            found.append([line])
+        else:
+            found[-1].append(line)
+    return found
+
+
+def action(step: list) -> str:
+    """The value of a step's `uses:` line as written, or an empty string for a step that runs a command."""
+    return next((USES.match(line).group(1) for line in step if USES.match(line)), "")
+
+
+def is_checkout(step: list) -> bool:
+    """Whether the step runs actions/checkout; GitHub reads owner and repository names case-insensitively."""
+    return action(step).lstrip("'\"").lower().startswith("actions/checkout@")
+
+
+def inputs(step: list) -> list:
+    """The stripped lines of a step's `with:` block."""
+    lines = iter(step)
+    for line in lines:
+        key = re.match(r"^(\s*)with:\s*$", line)
+        if key:
+            deeper = itertools.takewhile(lambda below: len(below) - len(below.lstrip()) > len(key.group(1)), lines)
+            return [below.strip() for below in deeper]
+    return []
 
 
 class WorkflowTests(unittest.TestCase):
@@ -75,6 +130,77 @@ class WorkflowTests(unittest.TestCase):
                 with self.subTest(workflow=path.name, job=name):
                     checkout = next(i for i, line in enumerate(lines) if line.startswith("- uses: actions/checkout@"))
                     self.assertLess(checkout, commands[0])
+
+    def test_every_action_is_pinned_to_a_commit(self):
+        # A tag or a branch can be moved after the review that admitted it; a commit cannot. The version comment
+        # beside the hash is what a human reads, and what the next bump is compared against.
+        for path in WORKFLOWS:
+            text = path.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            used = [USES.match(line).group(1) for line in lines if USES.match(line)]
+            self.assertTrue(used, path.name)
+            self.assertEqual(len(used), len([line for line in lines if ANY_USES.match(line)]), path.name)
+            for value in used:
+                with self.subTest(workflow=path.name, uses=value):
+                    self.assertRegex(value, PINNED)
+
+    def test_every_checkout_step_leaves_no_credentials_behind(self):
+        # By default the checkout writes the job's token into .git/config, where every later step can read it.
+        for path in WORKFLOWS:
+            text = path.read_text(encoding="utf-8")
+            found = steps(text)
+            with self.subTest(workflow=path.name):
+                # The step parser saw every `uses:` line, so no checkout step is missing from the check below.
+                seen = len([step for step in found if action(step)])
+                self.assertEqual(seen, len([line for line in text.splitlines() if USES.match(line)]))
+            checkouts = [step for step in found if is_checkout(step)]
+            self.assertTrue(checkouts, path.name)
+            for step in checkouts:
+                with self.subTest(workflow=path.name, step=step[0].strip()):
+                    self.assertIn("persist-credentials: false", inputs(step))
+
+    def test_the_pin_and_step_readers_on_the_shapes_they_must_tell_apart(self):
+        sha = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+        for value in (f"actions/checkout@{sha}", f"'actions/checkout@{sha}' # v7.0.1",
+                      f"owner-1/re.po_1@{sha} # v10.2.33"):
+            self.assertRegex(value, PINNED)
+        for value in ("actions/checkout@v7.0.1", "actions/checkout@3d3c42e # v7", f"actions/checkout@{sha} # v7",
+                      f"actions/checkout@{sha} # v7.0.1 node24", f"./local@{sha}", f"docker://python@{sha}"):
+            self.assertNotRegex(value, PINNED)
+        text = f"""jobs:
+  one:
+    steps:
+      # a comment at the items' indentation
+      - name: Check out
+        uses: 'Actions/Checkout@{sha}' # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: |
+          echo one
+
+          echo two
+      - uses: actions/checkout@{sha}
+        with:
+          persist-credentials: true
+  two:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@{sha}
+        env:
+          persist-credentials: false
+"""
+        found = steps(text)
+        checkout = f"- uses: actions/checkout@{sha}"
+        self.assertEqual([step[0].strip() for step in found], ["- name: Check out", "- run: |", checkout, checkout])
+        self.assertEqual([is_checkout(step) for step in found], [True, False, True, True])
+        self.assertEqual(inputs(found[0]), ["fetch-depth: 1", "persist-credentials: false"])
+        self.assertEqual(inputs(found[2]), ["persist-credentials: true"])
+        self.assertEqual(inputs(found[3]), [])
+        self.assertEqual(len([line for line in text.splitlines() if ANY_USES.match(line)]), 3)
+        for line in ("- { uses: actions/checkout@v4 }", '- "uses": actions/checkout@v4', "uses : actions/checkout@v4"):
+            self.assertTrue(ANY_USES.match(line), line)
+            self.assertIsNone(USES.match(line), line)
 
     def test_tests_run_for_pull_requests_and_for_pushes_to_main_only(self):
         # A push to a pull request's branch would otherwise run every job twice.
