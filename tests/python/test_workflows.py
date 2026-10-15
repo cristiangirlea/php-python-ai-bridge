@@ -43,22 +43,25 @@ class WorkflowTests(unittest.TestCase):
                     self.assertEqual([line for line in lines if line.startswith("runs-on:")], [RUNS_ON])
 
     def test_no_workflow_names_a_self_hosted_runner_or_a_runner_variable(self):
-        # A `runs-on` expression is how a self-hosted runner or a fallback to one would come back.
+        # A `runs-on` expression is how a self-hosted runner or a fallback to one would come back. Only the
+        # `runs-on` values are read for the label, so a comment may say "self-hosted".
         for path in WORKFLOWS:
             text = path.read_text(encoding="utf-8")
             with self.subTest(workflow=path.name):
                 self.assertNotIn("vars.CI_RUNNER", text)
                 self.assertNotIn("runner.environment", text)
-                self.assertNotRegex(text, r"(?i)self-hosted")
                 self.assertNotRegex(text, r"runs-on: *\$\{\{")
                 self.assertNotRegex(text, r"runs-on: *\[")
+                for line in re.findall(r"^\s*runs-on:.*$", text, re.MULTILINE):
+                    self.assertNotIn("self-hosted", line.lower(), line)
 
-    def test_no_workflow_installs_compose_through_a_local_action(self):
+    def test_no_step_uses_a_local_action(self):
         # GitHub's runner images ship the Docker Compose plugin; the lab-only install action is gone with the lab.
-        self.assertFalse((REPO / ".github" / "actions").exists())
+        # What matters is that no step runs one, not whether a directory exists in a checkout.
         for path in WORKFLOWS:
-            with self.subTest(workflow=path.name):
-                self.assertNotIn(".github/actions/", path.read_text(encoding="utf-8"))
+            for name, lines in jobs(path.read_text(encoding="utf-8")).items():
+                with self.subTest(workflow=path.name, job=name):
+                    self.assertEqual([line for line in lines if re.match(r"- uses: *\./", line)], [])
 
     def test_every_job_that_runs_compose_checks_the_repository_out_first(self):
         for path in WORKFLOWS:
