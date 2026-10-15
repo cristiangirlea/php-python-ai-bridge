@@ -160,7 +160,7 @@ PHP objects reused by a long-lived worker must not retain per-user inputs, authe
 | `invalid_response` | Peer violated the client contract | Treat as an integration failure, not a valid task result |
 | Terminal `failed` or `timed_out` | Task did not succeed | Report a safe failure; retries require an application policy |
 
-The current default limits are two simultaneous task processes, 128 total job slots and 300 seconds of terminal retention. These are settings, not measured throughput or a production SLA. The model profile uses one task process at a time and loads the model anew per job.
+The current default limits are two warm task processes, 128 total job slots and 300 seconds of terminal retention. These are settings, not measured throughput or a production SLA. The model profile keeps one task process, which loads each model on its first job of that kind and keeps it.
 
 ## Before shipping a framework integration
 

@@ -25,6 +25,9 @@ class BridgeServer(ThreadingHTTPServer):
             raise ValueError("BRIDGE_TOKEN must contain at least 32 non-whitespace ASCII characters")
         self.token = token
         self.slots = threading.BoundedSemaphore(32)
+        # The children the store starts inherit this process's environment block as it is at that moment, and
+        # removing a variable later leaves it in /proc/<pid>/environ; so the token leaves before any child exists.
+        os.environ.pop("BRIDGE_TOKEN", None)
         self.jobs = JobStore(settings)
         try:
             super().__init__(address, Handler)
@@ -170,6 +173,7 @@ def main():
         backend=os.environ.get("BRIDGE_BACKEND", "lexical"),
         model_dir=os.environ.get("BRIDGE_MODEL_DIR", "/models"),
         test_tasks=os.environ.get("BRIDGE_TEST_TASKS") == "1",
+        max_jobs=int(os.environ.get("BRIDGE_WORKER_MAX_JOBS", "1000")),
     )
     # Without its files every job needing a model would fail as task_failed, which cannot say why: a cache fetched
     # before a model was added has no directory for it.
@@ -177,7 +181,7 @@ def main():
     if missing:
         raise SystemExit(f"{settings.model_dir} lacks the model files for {', '.join(missing)}; acquire them with "
                          "the fetcher: docker compose -f docker/compose.yaml run --rm --no-deps fetcher")
-    with BridgeServer((args.host, args.port), os.environ.get("BRIDGE_TOKEN", ""), settings) as server:
+    with BridgeServer((args.host, args.port), os.environ.pop("BRIDGE_TOKEN", ""), settings) as server:
         def stop(*_):
             threading.Thread(target=server.shutdown, daemon=True).start()
 
