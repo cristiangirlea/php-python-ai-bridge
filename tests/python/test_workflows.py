@@ -25,18 +25,28 @@ PINNED = re.compile(r"""^['"]?[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+@[0-9a-f]{
 
 
 def jobs(text: str) -> dict:
-    """Each job's name and its lines."""
+    """Each job's name and its lines.
+
+    A job's header is its key two spaces in, quoted or not, with nothing after the colon but a comment. A header
+    this does not recognise drops the lines of a first job, or adds a later job's lines to the job before it,
+    which is why the number of jobs read is checked against the `runs-on:` lines of the file.
+    """
     found, name = {}, None
     for line in text.split("\njobs:\n", 1)[1].splitlines():
-        header = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        header = re.match(r"""^  (['"]?)([A-Za-z0-9_-]+)\1:\s*(?:#.*)?$""", line)
         if header:
-            name = header.group(1)
+            name = header.group(2)
             found[name] = []
         elif name and line.startswith("    "):
             found[name].append(line.strip())
         elif line.strip() and not line.startswith(" "):
             name = None
     return found
+
+
+def runs_on_lines(text: str) -> int:
+    """How many `runs-on:` lines the file has, wherever they are: the number of jobs the reader should have found."""
+    return len(re.findall(r"^\s*runs-on:", text, re.MULTILINE))
 
 
 def steps(text: str) -> list:
@@ -90,6 +100,46 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([path.name for path in WORKFLOWS], ["model-smoke.yml", "tests.yml"])
         for path in WORKFLOWS:
             self.assertTrue(jobs(path.read_text(encoding="utf-8")), path.name)
+
+    def test_the_job_reader_sees_every_job(self):
+        # Every job of these workflows runs on a runner, so it has exactly one `runs-on:` line: a job whose header
+        # the reader did not recognise shows up as a `runs-on:` line without a job, not as a job that was never
+        # checked. (A job that calls a reusable workflow has none; add it to the count if one appears.)
+        for path in WORKFLOWS:
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(workflow=path.name):
+                self.assertEqual(len(jobs(text)), runs_on_lines(text))
+
+    def test_the_job_reader_on_the_headers_it_must_tell_apart(self):
+        text = """name: x
+on: push
+jobs:
+  php:  # the matrix
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo php
+  "mcp":
+    runs-on: ubuntu-latest
+  'gate':
+    needs: [php, mcp]
+    runs-on: ubuntu-latest
+  # a comment between jobs
+  "odd':
+    runs-on: ubuntu-latest
+  smoke: &anchored
+    runs-on: ubuntu-latest
+env:
+  runs-on: not-a-job
+"""
+        found = jobs(text)
+        # Mismatched quotes and an anchor are shapes the reader does not know; the count is what tells, since a
+        # job it misses leaves its `runs-on:` line in the file. The `env:` line after the jobs is counted too: a
+        # false failure at worst, never a job passed over.
+        self.assertEqual(list(found), ["php", "mcp", "gate"])
+        self.assertEqual(found["php"], ["runs-on: ubuntu-latest", "steps:", "- run: echo php"])
+        self.assertEqual(found["gate"][:2], ["needs: [php, mcp]", "runs-on: ubuntu-latest"])
+        self.assertEqual(runs_on_lines(text), 6)
+        self.assertNotEqual(len(found), runs_on_lines(text))
 
     def test_every_job_runs_on_github_hosted_ubuntu(self):
         for path in WORKFLOWS:
