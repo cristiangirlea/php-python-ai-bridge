@@ -78,7 +78,8 @@ and update both together. Path-scoped detail is in `.claude/rules/`.
   open, and the head being merged is the commit all of that ran on. Merge `main` in only for a conflict,
   or once before those final checks and review. What could not be tested is said in the PR and waits for
   the owner. Never `--auto` or `--admin`, never push to `main`: hand over the command (the pre-call
-  hook `.claude/hooks/push-guard.sh` refuses these in every spelling it can read, and what it cannot).
+  hook `.claude/hooks/push-guard.sh` refuses these in the spellings it can read and an unreadable command
+  that mentions them; script files and other programs are not read: the ruleset on `main` is the guard).
 - **Reviews are text, commits are changes.** A finding is blocking when it is a defect this branch brings
   in, a missing test for what it changes, a broken house rule or a security hole; fix it with the smallest
   change. Everything else (problems already on `main`, improvements, style) becomes an issue linked from
