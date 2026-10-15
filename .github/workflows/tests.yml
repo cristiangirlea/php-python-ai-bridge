@@ -9,14 +9,12 @@ on:
 permissions:
   contents: read
 
-# Every job runs on the lab's self-hosted runner scale set that the CI_RUNNER repository variable names, or on
-# GitHub's when it is unset. As written here, a fork's pull request goes to GitHub's disposable runners, since the
-# repository is public; a fork can edit this file in its pull request, so the fork approval policy is what keeps
-# its code off the lab's runner (docs/security.md).
+# The repository is public, so every job runs on GitHub's hosted runners, which GitHub does not meter for public
+# repositories and which are disposable: a fork's pull request runs its own code on a runner that is thrown away.
 jobs:
   php:
     name: PHP ${{ matrix.php }}
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 12
     strategy:
       fail-fast: false
@@ -38,7 +36,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: ./.github/actions/compose
       - name: Inspect sandbox configuration
         run: docker compose -f docker/compose.yaml --profile test config
       - name: Unit and syntax tests
@@ -61,7 +58,7 @@ jobs:
 
   mcp:
     name: MCP server
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 12
     env:
       BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
@@ -69,7 +66,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: ./.github/actions/compose
       - name: Prepare disposable cache
         run: mkdir -p .cache && chmod 777 .cache
       - name: Inspect sandbox configuration
@@ -86,7 +82,7 @@ jobs:
   deterministic:
     if: always()
     needs: [php, mcp]
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - name: Require every supported PHP version and the MCP server to pass
