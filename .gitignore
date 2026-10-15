@@ -10,3 +10,7 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Personal AI notes and settings
+CLAUDE.local.md
+.claude/settings.local.json
