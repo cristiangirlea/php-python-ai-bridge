@@ -1145,6 +1145,89 @@ class WarmPoolTests(unittest.TestCase):
         self.assertEqual(self.store.get(first["id"])["result"]["value"], "first")
         self.assertEqual(self.store.get(first["id"])["progress"], {"completed": 1, "total": 1})
 
+    def idle_child(self):
+        return next(w for w in self.store._pool if w.ready and w.job_id is None)
+
+    def send_to_a_dead_child(self, record, send_succeeds=False):
+        """Under the lock: kill the first ready idle child unseen and send it the job. The send then fails, or,
+        with send_succeeds, appears to, and the death is found as the coordinator finds it: end of file."""
+        worker = self.idle_child()
+        worker.process.kill()
+        worker.process.join(5)
+        if send_succeeds:
+            with patch.object(worker.connection, "send"):
+                self.store._assign(record)
+            self.assertIsNone(worker.retired_at)
+            self.store._drain(worker)
+        else:
+            self.store._assign(record)
+        self.assertIsNotNone(worker.retired_at)
+
+    def wait_children(self, count, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.store._lock:
+                if sum(worker.ready for worker in self.store._pool) == count:
+                    return
+            time.sleep(0.01)
+        self.fail(f"{count} children did not become ready")
+
+    def test_a_job_whose_child_died_before_reading_it_is_tried_again(self):
+        for send_succeeds in (False, True):
+            with self.subTest(send_succeeds=send_succeeds):
+                self.wait_children(1)
+                with self.store._lock:
+                    job = self.store.submit("test.delay", {"seconds": 0, "value": "served"})
+                    self.send_to_a_dead_child(self.store._jobs[job["id"]], send_succeeds)
+                    self.assertEqual(self.store._jobs[job["id"]]["status"], "queued")
+                    self.assertFalse(self.store._active)
+                done = self.wait(job["id"], timeout=10)
+                self.assertEqual((done["status"], done["result"]), ("succeeded", {"value": "served"}), done)
+
+    @unittest.skipIf(os.name == "nt", "SIGSTOP, which keeps the child from taking the job, is POSIX only")
+    def test_a_job_sent_but_not_yet_taken_can_be_cancelled_or_time_out(self):
+        for ending in ("cancelled", "timed_out"):
+            with self.subTest(ending=ending):
+                self.wait_children(1)
+                with self.store._lock:
+                    job = self.store.submit("test.delay", {"seconds": 0})
+                    record, worker = self.store._jobs[job["id"]], self.idle_child()
+                    os.kill(worker.process.pid, signal.SIGSTOP)  # SIGKILL still ends it when it is retired
+                    self.store._assign(record)
+                    self.assertEqual((record["status"], self.store._active), ("queued", {job["id"]: worker}))
+                    if ending == "cancelled":
+                        self.assertEqual(self.store.cancel(job["id"])["status"], "cancelled")
+                    else:
+                        record["_deadline"] = 0  # the coordinator's next tick finds it past its deadline
+                done = self.wait(job["id"])
+                self.assertEqual(done["status"], ending)
+                self.assertIsNotNone(worker.retired_at)  # it may have been halfway into the job
+                self.assertFalse(self.store._active)
+                after = self.wait(self.store.submit("test.delay", {"seconds": 0, "value": "next"})["id"], timeout=10)
+                self.assertEqual(after["result"], {"value": "next"})
+
+    def test_a_job_is_tried_again_only_once(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=2, test_tasks=True))
+        self.wait_children(2)
+        with self.store._lock:
+            job = self.store.submit("test.delay", {"seconds": 0})
+            record = self.store._jobs[job["id"]]
+            self.send_to_a_dead_child(record)
+            self.assertEqual(record["status"], "queued")
+            self.send_to_a_dead_child(record)
+            self.assertEqual((record["status"], record["error"]["code"]), ("failed", "worker_crashed"))
+
+    def test_a_job_that_crashes_its_child_is_not_tried_again(self):
+        # The child had the job, so it may have been halfway through: one crash, one replacement, no second try.
+        self.inspect()
+        starts = Mock(side_effect=self.store._context.Process)
+        with patch.object(self.store._context, "Process", starts):
+            crashed = self.wait(self.store.submit("test.crash", {})["id"])
+            self.assertEqual(crashed["error"]["code"], "worker_crashed")
+            self.inspect()
+        self.assertEqual(starts.call_count, 1)
+
     def test_a_child_that_never_says_it_is_ready_is_replaced(self):
         self.store.close()
         # Longer than a child takes to start under the test container's one CPU, or the replacement goes the

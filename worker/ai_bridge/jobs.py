@@ -66,6 +66,11 @@ def _serve(connection, backend, model_dir):
             break
         job_id, task, payload = message
         del message
+        try:
+            # Until this arrives the job has not started, so the parent may give it to another child.
+            connection.send((job_id, "started", None))
+        except (OSError, ValueError):
+            break
 
         def progress(completed, total):
             connection.send((job_id, "progress", {"completed": completed, "total": total}))
@@ -100,7 +105,7 @@ class _Worker:
         self.connection = connection
         self.started_at = time.monotonic()
         self.ready = False  # it has said so, and so reads a job the moment it is sent
-        self.job_id = None  # the job running on it
+        self.job_id = None  # the job sent to it, acknowledged or not
         self.served = 0  # jobs sent to it, towards max_jobs
         self.retired_at = None  # set once it must never serve again; it is then reaped outside the lock
         self.killed = False
@@ -120,7 +125,7 @@ class JobStore:
             raise ValueError("invalid worker settings")
         self._context = multiprocessing.get_context("spawn")
         self._jobs = {}
-        self._active = {}  # job id -> the worker running it
+        self._active = {}  # job id -> the worker it was sent to
         self._pool = []  # children that may take a job, idle or running one
         self._retiring = []  # children that never serve again, until they are gone
         self._backoff_until = 0.0  # no child is started before this time
@@ -151,7 +156,7 @@ class JobStore:
                 "id": job_id, "task": task, "status": "queued", "result": None,
                 "error": None, "progress": None, "timeout_ms": timeout_ms,
                 "_input": copy.deepcopy(payload), "_deadline": now + timeout_ms / 1000,
-                "_finished": None,
+                "_finished": None, "_retried": False,
             }
             return self._public(self._jobs[job_id])
 
@@ -263,7 +268,10 @@ class JobStore:
             else:
                 self._backoff_until = worker.retired_at + BACKOFF_SECONDS
         if job is not None and job["status"] not in TERMINAL:
-            self._finish(job, "failed", code="worker_crashed")
+            if job["status"] == "queued" and not job["_retried"]:
+                job["_retried"] = True  # the child never had it, so it can run elsewhere, once
+            else:
+                self._finish(job, "failed", code="worker_crashed")
 
     def _assign(self, job):
         """Send a queued job to an idle child that is ready for one. When none is and the pool has room, a child
@@ -283,11 +291,10 @@ class JobStore:
         worker.job_id = job["id"]
         worker.served += 1
         self._active[job["id"]] = worker
-        job["status"] = "running"
         try:
             worker.connection.send((job["id"], job["task"], job["_input"]))
         except (OSError, ValueError):
-            # Its pipe is gone, so the child is: reported like any other crash, and replaced.
+            # Its pipe is gone, so the child is: retired like one that died, and replaced.
             self._retire(worker)
 
     def _coordinate(self):
@@ -308,7 +315,7 @@ class JobStore:
                         continue
                     if now >= job["_deadline"]:
                         self._abort(job, "timed_out", code="deadline_exceeded")
-                    elif job["status"] == "queued":
+                    elif job["status"] == "queued" and job["id"] not in self._active:
                         self._assign(job)
                 self._replenish()
                 retiring = list(self._retiring)
@@ -334,6 +341,9 @@ class JobStore:
         job = self._jobs.get(job_id)
         # A message from a job the child no longer runs for us has nowhere to go.
         if job_id != worker.job_id or job is None or job["status"] in TERMINAL:
+            return False
+        if kind == "started":
+            job["status"] = "running"
             return False
         if kind == "progress":
             job["progress"] = value
