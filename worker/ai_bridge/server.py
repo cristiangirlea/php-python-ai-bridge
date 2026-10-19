@@ -161,19 +161,27 @@ class Handler(BaseHTTPRequestHandler):
             self._error(408, "request_timeout", "Request body was not received in time")
 
 
+def _number(name, default, kind):
+    """A numeric setting from the environment; a malformed one stops the service with the variable's name."""
+    try:
+        return kind(os.environ.get(name, default))
+    except ValueError:
+        raise SystemExit(f"{name} must be {'an integer' if kind is int else 'a number'}") from None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
     args = parser.parse_args()
     settings = Settings(
-        concurrency=int(os.environ.get("BRIDGE_CONCURRENCY", "2")),
-        capacity=int(os.environ.get("BRIDGE_CAPACITY", "128")),
-        retention_seconds=float(os.environ.get("BRIDGE_RETENTION_SECONDS", "300")),
+        concurrency=_number("BRIDGE_CONCURRENCY", "2", int),
+        capacity=_number("BRIDGE_CAPACITY", "128", int),
+        retention_seconds=_number("BRIDGE_RETENTION_SECONDS", "300", float),
         backend=os.environ.get("BRIDGE_BACKEND", "lexical"),
         model_dir=os.environ.get("BRIDGE_MODEL_DIR", "/models"),
         test_tasks=os.environ.get("BRIDGE_TEST_TASKS") == "1",
-        max_jobs=int(os.environ.get("BRIDGE_WORKER_MAX_JOBS", "1000")),
+        max_jobs=_number("BRIDGE_WORKER_MAX_JOBS", "1000", int),
     )
     # Without its files every job needing a model would fail as task_failed, which cannot say why: a cache fetched
     # before a model was added has no directory for it.

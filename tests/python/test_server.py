@@ -147,3 +147,60 @@ class StartupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             bridge = self.start("lexical", root)
         bridge.assert_called_once()
+
+
+class EnvironmentTests(unittest.TestCase):
+    """server.main builds the store's settings from the BRIDGE_* variables."""
+
+    def main(self, environment, real_server=False):
+        """Run main with exactly these BRIDGE_* variables; returns the settings BridgeServer was given."""
+        with patch.dict(os.environ, {"BRIDGE_TOKEN": TOKEN, **environment}), \
+                patch.object(sys, "argv", ["ai_bridge.server", "--port", "0"]), \
+                patch.object(server.signal, "signal"):
+            for name in [name for name in os.environ if name.startswith("BRIDGE_")]:
+                if name != "BRIDGE_TOKEN" and name not in environment:
+                    del os.environ[name]
+            if real_server:
+                # A store that accepted the settings would serve forever; fail instead, and close it on the way out.
+                started = AssertionError("the server started")
+                with patch.object(server.BridgeServer, "serve_forever", side_effect=started):
+                    server.main()
+                return None
+            with patch.object(server, "BridgeServer") as bridge:
+                server.main()
+        return bridge.call_args.args[2]
+
+    def test_defaults_when_nothing_is_set(self):
+        self.assertEqual(self.main({}), Settings())
+
+    def test_every_variable_is_read(self):
+        settings = self.main({
+            "BRIDGE_CONCURRENCY": "3", "BRIDGE_CAPACITY": "9", "BRIDGE_RETENTION_SECONDS": "1.5",
+            "BRIDGE_BACKEND": "lexical", "BRIDGE_MODEL_DIR": "/elsewhere", "BRIDGE_TEST_TASKS": "1",
+            "BRIDGE_WORKER_MAX_JOBS": "7",
+        })
+        self.assertEqual(settings, Settings(concurrency=3, capacity=9, retention_seconds=1.5, backend="lexical",
+                                            model_dir="/elsewhere", test_tasks=True, max_jobs=7))
+
+    def test_test_tasks_need_exactly_one(self):
+        for value in ("true", "yes", "0", ""):
+            with self.subTest(value=value):
+                self.assertFalse(self.main({"BRIDGE_TEST_TASKS": value}).test_tasks)
+
+    def test_a_malformed_number_names_its_variable(self):
+        for name, value, expected in (
+                ("BRIDGE_WORKER_MAX_JOBS", "many", "BRIDGE_WORKER_MAX_JOBS must be an integer"),
+                ("BRIDGE_WORKER_MAX_JOBS", "1.5", "BRIDGE_WORKER_MAX_JOBS must be an integer"),
+                ("BRIDGE_CONCURRENCY", "", "BRIDGE_CONCURRENCY must be an integer"),
+                ("BRIDGE_CAPACITY", "1e3", "BRIDGE_CAPACITY must be an integer"),
+                ("BRIDGE_RETENTION_SECONDS", "soon", "BRIDGE_RETENTION_SECONDS must be a number")):
+            with self.subTest(name=name, value=value):
+                with self.assertRaises(SystemExit) as raised:
+                    self.main({name: value})
+                self.assertEqual(raised.exception.code, expected)
+
+    def test_an_out_of_range_job_limit_is_refused_by_the_store(self):
+        # The real server: the store checks its limits before it starts any child or binds the port.
+        for value in ("0", "1000001", "-1"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "invalid worker limits"):
+                self.main({"BRIDGE_WORKER_MAX_JOBS": value}, real_server=True)
