@@ -3,6 +3,7 @@ import json
 import math
 import multiprocessing
 import os
+import threading
 import time
 import unittest
 import uuid
@@ -924,6 +925,71 @@ class JobsTests(unittest.TestCase):
                         self.assertEqual(process.close.call_count, pipe.call_count)
                 recovery = self.store.submit("test.delay", {"seconds": 0})
                 self.assertEqual(self.wait(recovery["id"])["status"], "succeeded")
+
+    def slow_starts(self, release, longest=2):
+        """A patch under which a child starts only once release is set (or after longest seconds), the event set
+        when a start begins, and the processes started. The class is patched: spawn pickles the process object."""
+        cls, starting, made = self.store._context.Process, threading.Event(), []
+        start = cls.start
+
+        def slow_start(process):
+            made.append(process)
+            starting.set()
+            release.wait(longest)
+            start(process)
+
+        return patch.object(cls, "start", slow_start), starting, made
+
+    def test_reads_and_submissions_are_not_held_up_by_a_child_being_started(self):
+        release = threading.Event()
+        slow, starting, _ = self.slow_starts(release)
+        with slow:
+            crashed = self.store.submit("test.crash", {})
+            self.assertTrue(starting.wait(5), "no replacement was started")
+            began = time.monotonic()
+            self.assertEqual(self.store.get(crashed["id"])["error"]["code"], "worker_crashed")
+            queued = self.store.submit("test.delay", {"seconds": 0, "value": "served"})
+            elapsed = time.monotonic() - began
+            release.set()
+            self.assertLess(elapsed, 0.5)
+            self.assertEqual(self.wait(queued["id"])["result"]["value"], "served")
+
+    def test_a_child_started_while_the_store_closes_does_not_outlive_it(self):
+        release, failures = threading.Event(), []
+        slow, starting, made = self.slow_starts(release, longest=5)
+        timer = threading.Timer(2.5, release.set)
+        self.addCleanup(timer.cancel)
+        with slow, patch.object(threading, "excepthook", failures.append):
+            self.store.submit("test.crash", {})
+            self.assertTrue(starting.wait(5), "no replacement was started")
+            # Past the 2 s close() waits for the coordinator, so the child is up only after the pool was drained.
+            timer.start()
+            self.store.close()
+        self.assertEqual(failures, [])  # the coordinator ended without an exception
+        self.assertFalse(self.store._thread.is_alive())
+        self.assertFalse(self.store._pool)
+        for process in made:
+            try:
+                alive = process.is_alive()
+            except ValueError:
+                alive = False  # closed: it was joined
+            self.assertFalse(alive)
+
+    def test_a_failed_start_leaves_the_job_for_a_busy_child_when_one_is_up(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=2, test_tasks=True))
+        busy = self.store.submit("test.delay", {"seconds": 2.5})
+        deadline = time.monotonic() + 5
+        while self.store.get(busy["id"])["progress"] is None:
+            self.assertLess(time.monotonic(), deadline, "the busy job never started")
+            time.sleep(0.01)
+        with patch.object(self.store._context, "Pipe", side_effect=OSError(24, "Too many open files")):
+            crashed = self.store.submit("test.crash", {})
+            self.assertEqual(self.wait(crashed["id"])["error"]["code"], "worker_crashed")
+            # No replacement can start, but a child is up: the job waits for it rather than failing.
+            waiting = self.store.submit("test.delay", {"seconds": 0, "value": "served"})
+            self.assertEqual(self.wait(waiting["id"])["result"], {"value": "served"})
+        self.assertEqual(self.wait(busy["id"])["status"], "succeeded")
 
     def test_exception_detail_is_not_exposed(self):
         job = self.store.submit("test.error", {})
