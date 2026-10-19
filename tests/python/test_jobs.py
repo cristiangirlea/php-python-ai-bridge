@@ -3,6 +3,7 @@ import json
 import math
 import multiprocessing
 import os
+import signal
 import time
 import unittest
 import uuid
@@ -1107,6 +1108,23 @@ class WarmPoolTests(unittest.TestCase):
             report = self.inspect()
             self.assertIn("BRIDGE_TOKEN", os.environ)
         self.assertFalse(report["token_in_environment"])
+
+    @unittest.skipIf(os.name == "nt", "os.kill cannot deliver SIGINT to a process on Windows")
+    def test_a_child_ignores_sigint_idle_and_running(self):
+        pid = self.inspect()["pid"]
+        os.kill(pid, signal.SIGINT)
+        time.sleep(0.2)
+        self.assertEqual(self.inspect()["pid"], pid)
+        running = self.store.submit("test.delay", {"seconds": 2, "value": "kept"})
+        deadline = time.monotonic() + 5
+        # test.delay reports (0, 1) just before it sleeps: from then on the child is inside the job.
+        while self.store.get(running["id"])["progress"] != {"completed": 0, "total": 1}:
+            self.assertLess(time.monotonic(), deadline, "the job never started")
+            time.sleep(0.01)
+        os.kill(pid, signal.SIGINT)
+        done = self.wait(running["id"])
+        self.assertEqual((done["status"], done["result"]), ("succeeded", {"value": "kept"}), done)
+        self.assertEqual(self.inspect()["pid"], pid)
 
     def test_a_message_for_an_earlier_job_is_dropped(self):
         # A child only ever answers its current job, but a message tagged with an old job id, were one to arrive,

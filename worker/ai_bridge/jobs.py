@@ -10,6 +10,7 @@ import copy
 import math
 import multiprocessing
 import os
+import signal
 import threading
 import time
 import uuid
@@ -46,6 +47,8 @@ class Settings:
 
 def _serve(connection, backend, model_dir):
     """A child's whole life: run the jobs the parent sends until it hangs up."""
+    # Ctrl+C in a terminal reaches the whole process group; stopping children is the parent's job.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     # The service removes the token from its environment before it starts any child (server.py), so it is not
     # in the child's environment block; this second pop covers a store built by something that did not.
     os.environ.pop("BRIDGE_TOKEN", None)
