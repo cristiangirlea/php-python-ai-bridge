@@ -40,7 +40,7 @@ CI runs on GitHub's hosted runners, `ubuntu-latest` for every job, because the r
 
 Every job starts on a fresh runner with an empty image store and pulls `python:3.12-bookworm` and the FrankenPHP images, and the MCP job `composer:2`, from Docker Hub, which limits unauthenticated pulls per IP; GitHub's runners share address ranges, so a pull that fails with a rate-limit error is a rerun, not a regression. The model workflow keeps both model workers up, each allowed 1536 MiB with its wheels in tmpfs, beside FrankenPHP, the MCP server, the demo worker and one client, whose limits add up to about 5 GiB; a Docker daemon that reproduces that workflow locally needs about 6 GiB.
 
-CI checks the actual PHP minor before testing so a misconfigured image cannot silently test the default version four times. The stable required check `deterministic` depends on all four matrix jobs and on the MCP server job, which also runs the consumer install, and rejects any of them failed, cancelled or skipped. PHP contract/HTTP tests promote warnings and deprecations to exceptions. Dependabot proposes action-pin bumps weekly through `.github/dependabot.yml`.
+CI checks the actual PHP minor before testing so a misconfigured image cannot silently test the default version four times. The stable required check `deterministic` depends on all four matrix jobs and on the MCP server job, which also runs the consumer install and PHPStan, and rejects any of them failed, cancelled or skipped. PHP contract/HTTP tests promote warnings and deprecations to exceptions. Dependabot proposes action-pin bumps weekly through `.github/dependabot.yml`.
 
 ## What the tests establish
 
@@ -54,6 +54,7 @@ PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4
 | FrankenPHP | 12 jobs submitted by six concurrent test threads through a reused PHP worker, a 512-document `top_k` request, embedding and redaction round trips, and invalid-input, missing-job and multibyte boundary checks |
 | PHP syntax | All 13 PHP source/example/test files |
 | Consumer install | `composer validate --strict` on the library, then a throwaway consumer project in tmpfs, with Packagist disabled and the platform pinned to PHP 8.2.0, installs its `git archive` zip from an `artifact` repository (or from a path repository in a git worktree whose git directory is outside the mount; the archive is built from the committed `HEAD`, so an uncommitted change is not what it tests), checks that `vendor/` holds `src/Client.php` and `docs/` and not `worker/`, `tests/` or `docker/`, and autoloads `PhpAiBridge\Client`; runs once, in the MCP server job, with no network |
+| PHPStan | Level max over `src`, `examples` and `tests/php` with `phpstan.neon`, PHPStan 2.3.1 from `composer.lock` installed into `.cache/php-vendor` by `php-fetcher` and run offline by `php-analysis`; `phpstan-baseline.neon` holds 9 findings in examples and tests, each with its reason, and none in `src`; runs once, in the MCP server job |
 | Optional ONNX | Through both the PHP CLI and FrankenPHP HTTP: 2 rerank cases, a 70-document rerank across three batches with its relevant document in the second, a parity check that three documents score within 1e-3 alone and inside that set, 1 embedding and 3 redaction cases: a name, an email address and a place; a sentence whose lower-case person, place and organisation only the uncased model finds, which also checks its label order; and clean text, which must produce no spans; and the ONNX-backed MCP server end to end, every tool through compose's `mcp-model` service over stdio, including a search over an index the embedding model built, with a query worded unlike the note it must find, and the calls for every question in the semantic evaluation, whose answers the models must all reach; smoke checks, not quality datasets |
 
 Test durations reported by the runners are suite durations, not inference latency or a reproducible performance benchmark.
@@ -163,6 +164,21 @@ docker compose -f docker/compose.yaml up -d model-worker
 docker compose -f docker/compose.yaml run --rm --no-deps -T model-ner
 NER_SAMPLE=tests/fixtures/ner-dev.json docker compose -f docker/compose.yaml run --rm --no-deps -T model-ner
 ```
+
+## Measured hook cost (informational)
+
+Measured 2026-10-20 locally on Windows 11 Pro 10.0.26200, CPU AMD Ryzen 9 9950X 16-Core Processor, Git Bash 5.2.37 (`x86_64-pc-msys`) with GNU sed 4.9. The pre-call push guard runs before every Bash and PowerShell call with a 20-second timeout in `.claude/settings.json`. Each figure is the wall time of `sh .claude/hooks/push-guard.sh` reading a Bash tool call's JSON on stdin, from the process start to its exit 0, so it includes starting the shell on Windows but not Claude Code's own spawn. Ten runs per input after the change; on `main` at `02bfc25`, ten for the first two and three for the 200 KB body. The bodies repeat one block of ordinary Markdown (headings, a list, a table, code spans, a link, quotes) to the stated size of the escaped JSON string.
+
+| Input | Hook | N | min s | median s | max s |
+| --- | --- | --- | --- | --- | --- |
+| `docker compose -f docker/compose.yaml run --rm --no-deps python-tests` | `main` | 10 | 0.05 | 0.06 | 0.08 |
+| `docker compose -f docker/compose.yaml run --rm --no-deps python-tests` | changed | 10 | 0.08 | 0.09 | 0.10 |
+| `gh pr create --title x --body-file - <<'EOF'`, a 20 KB body, `EOF` | `main` | 10 | 1.04 | 1.05 | 1.14 |
+| `gh pr create --title x --body-file - <<'EOF'`, a 20 KB body, `EOF` | changed | 10 | 0.34 | 0.38 | 0.40 |
+| `gh pr create --title x --body-file - <<'EOF'`, a 200 KB body, `EOF` | `main` | 3 | 75.57 | 75.75 | 75.98 |
+| `gh pr create --title x --body-file - <<'EOF'`, a 200 KB body, `EOF` | changed | 10 | 1.59 | 1.60 | 1.64 |
+
+The compose command has no word the hook guards, so it exits at its first check; alternating the two hooks 20 times on it gave medians of 0.085 and 0.089 s, the same within noise. On `main` the cost grew with the square of the body: Git Bash's C locale is UTF-8, where each bash pattern cut and each sed substitution walks the whole text, and the hook cut one character, one quote and one heredoc line at a time. A 200 KB body ran past the timeout almost four times over. The hook now uses a single-byte locale under MSYS and Cygwin, as C is on Linux, splits the JSON string at quotes once, reads a heredoc's body line by line with `read`, and takes single characters with cuts that stop at the first try. A long command outside a heredoc, such as a 200 KB double-quoted `--body`, is still walked a character at a time and was not measured here.
 
 ## LLM evaluation (informational)
 

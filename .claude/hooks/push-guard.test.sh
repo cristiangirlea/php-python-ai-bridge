@@ -257,6 +257,12 @@ refused 'git status \u0026\u0026 git push origin main'
 allowed 'cat <<A <<B\ngit tag x\nA\ngit push origin main\nB\ngit status'
 allowed 'cat <<A <<B\nx\nB\ngit push origin main\nA\ngit status'
 allowed 'cat <<\"EOF\"\ngit push origin main\nEOF'
+# A multi-kilobyte heredoc body with quotes, backslashes and guarded words, and what follows it.
+big='See \"git push origin main\" and '\''git tag v1'\'' under C:\\dir\\file.\n'
+for _ in 1 2 3 4 5 6; do big=$big$big; done
+allowed "gh pr create --title x --body-file - <<'EOF'\\n${big}EOF"
+refused "gh pr create --title x --body-file - <<'EOF'\\n${big}EOF\\ngit push origin main"
+refused "gh pr create --title x --body-file - <<EOF\\n${big}\$(git push origin main)\\nEOF"
 allowed 'eval \"$(echo git status)\"' "$tmp/push/clone"
 allowed 'echo push'
 allowed 'go test ./...'
@@ -341,6 +347,17 @@ if "$tmp/shim/probe" 2>/dev/null; then
 else
   echo "push-guard.test: skipped the killed-git case: $tmp is not executable"
 fi
+# In heredoc_skip, an unusable TMPDIR fails closed when a guarded word is mentioned and open otherwise.
+n=$((n + 1))
+printf '{"cwd":"%s","tool_name":"Bash","tool_input":{"command":"cat <<EOF\\nhi\\nEOF\\ngit push origin my-branch"}}' "$onfeat" |
+  TMPDIR="$tmp/no-such-dir" sh "$hook" 2>"$tmp/err"
+expect 2 $? "TMPDIR failure on git push"
+grep -q 'the hook failed (status 3)' "$tmp/err" ||
+  fail "TMPDIR failure was not refused with status 3: $(cat "$tmp/err")"
+n=$((n + 1))
+printf '{"cwd":"%s","tool_name":"Bash","tool_input":{"command":"cat <<EOF\\nhi\\nEOF\\ngit status"}}' "$onfeat" |
+  TMPDIR="$tmp/no-such-dir" sh "$hook" 2>"$tmp/err"
+expect 0 $? "TMPDIR failure on git status"
 # A Windows cwd, backslashes JSON-escaped, as Claude Code sends it on Windows.
 if command -v cygpath >/dev/null 2>&1; then
   winmain=$(cygpath -w "$onmain" | sed 's/\\/\\\\/g')
