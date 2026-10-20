@@ -181,4 +181,58 @@ $redacted['result']['spans'] = [];
 $redacted['result']['text'] = $original;
 check(RedactResult::fromJob(Job::fromArray($redacted), $original)->spans === [], 'clean redact result');
 
+// A loopback peer in a child process answers each connection with the next canned response; no network is needed.
+$refusal = static fn (int $status, string $headers): string => "HTTP/1.1 $status Refused\r\nContent-Type: application/json\r\n"
+    . "Content-Length: 2\r\nConnection: close\r\n" . $headers . "\r\n{}";
+$responses = [
+    $refusal(429, "Retry-After: 7\r\n"),
+    $refusal(429, ''),
+    $refusal(429, "Retry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n"),
+    $refusal(429, "Retry-After: 1234567\r\n"),
+    $refusal(429, "Retry-After: -1\r\n"),
+    $refusal(429, "Retry-After: 7\r\nRetry-After: 3\r\n"),
+    $refusal(503, "Retry-After: 5\r\n"),
+    $refusal(429, str_repeat('X-Padding: ' . str_repeat('p', 100) . "\r\n", 160) . "Retry-After: 3\r\n"),
+];
+$peer = proc_open([PHP_BINARY, '-r', '
+    $responses = unserialize(base64_decode($argv[1]));
+    $server = stream_socket_server("tcp://127.0.0.1:0");
+    echo parse_url("tcp://" . stream_socket_get_name($server, false), PHP_URL_PORT), "\n";
+    foreach ($responses as $response) {
+        $connection = stream_socket_accept($server, 10);
+        $request = "";
+        while (!str_contains($request, "\r\n\r\n") && ($chunk = fread($connection, 8192)) !== false && $chunk !== "") {
+            $request .= $chunk;
+        }
+        fwrite($connection, $response);
+        fclose($connection);
+    }', base64_encode(serialize($responses))], [1 => ['pipe', 'w']], $pipes);
+if ($peer === false) {
+    throw new RuntimeException('The loopback peer did not start');
+}
+try {
+    $peerClient = new Client('http://127.0.0.1:' . (int) fgets($pipes[1]), $token);
+    $refused = static function () use ($peerClient): BridgeException {
+        try {
+            $peerClient->get(str_repeat('a', 32));
+        } catch (BridgeException $error) {
+            return $error;
+        }
+        throw new RuntimeException('Expected a refusal');
+    };
+    $error = $refused();
+    check($error->httpStatus === 429 && $error->errorCode === 'http_error' && $error->retryAfterSeconds === 7, 'a 429 carries its Retry-After seconds');
+    foreach (['absent', 'an HTTP date', 'seven digits', 'a sign', 'repeated'] as $form) {
+        check($refused()->retryAfterSeconds === null, 'a Retry-After that is ' . $form . ' is ignored');
+    }
+    $error = $refused();
+    check($error->httpStatus === 503 && $error->retryAfterSeconds === null, 'only a 429 reads Retry-After');
+    $error = $refused();
+    check($error->errorCode === 'invalid_response' && $error->retryAfterSeconds === null, 'a header block over 16 KiB is refused');
+} finally {
+    fclose($pipes[1]);
+    proc_terminate($peer);
+    proc_close($peer);
+}
+
 echo "PASS: $count PHP contract checks\n";

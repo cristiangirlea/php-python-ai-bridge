@@ -99,6 +99,60 @@ class ProtocolTests(unittest.TestCase):
             proxy.server_close()
         self.assertEqual((caught.exception.code, caught.exception.status), ("http_error", 503))
 
+    def refusal(self, *headers):
+        """What the client makes of a 429 that carries these headers."""
+        class Full(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"error":{"code":"capacity_exceeded","message":"Worker capacity reached"}}'
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        stub = HTTPServer(("127.0.0.1", 0), Full)
+        thread = threading.Thread(target=stub.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(BridgeError) as caught:
+                Bridge("http://127.0.0.1:%d" % stub.server_address[1], TOKEN).health()
+        finally:
+            stub.shutdown()
+            thread.join()
+            stub.server_close()
+        return caught.exception
+
+    def test_a_capacity_refusal_carries_the_retry_after_seconds(self):
+        error = self.refusal(("Retry-After", "7"))
+        self.assertEqual((error.status, error.code, error.retry_after), (429, "capacity_exceeded", 7))
+        self.assertIsNone(self.refusal().retry_after)
+        self.assertEqual(self.refusal(("Retry-After", "0")).retry_after, 0)
+        for value in ["Wed, 21 Oct 2026 07:28:00 GMT", "1234567", "-1", "1.5", ""]:
+            with self.subTest(value=value):
+                self.assertIsNone(self.refusal(("Retry-After", value)).retry_after)
+        self.assertIsNone(self.refusal(("Retry-After", "7"), ("Retry-After", "3")).retry_after)
+
+    def test_the_real_worker_sends_retry_after_on_a_full_store(self):
+        server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=1, test_tasks=True))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            bridge = Bridge("http://127.0.0.1:%d" % server.server_address[1], TOKEN)
+            bridge.submit("test.delay", {"seconds": 5}, 10000)
+            with self.assertRaises(BridgeError) as caught:
+                bridge.submit("test.delay", {"seconds": 0}, 10000)
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+        # The one slot holds a job still running, so capacity returns no sooner than the worker's short default.
+        self.assertEqual((caught.exception.status, caught.exception.retry_after), (429, 1))
+
     def test_task_failures_become_errors_with_the_worker_code(self):
         for task, code in [("test.crash", "worker_crashed"), ("test.error", "task_failed")]:
             with self.subTest(task=task), self.assertRaises(BridgeError) as caught:

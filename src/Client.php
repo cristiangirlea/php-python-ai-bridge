@@ -37,7 +37,12 @@ final class Client
         $this->baseUrl = rtrim($baseUrl, '/');
     }
 
-    /** @param array<mixed> $input */
+    /**
+     * A full worker refuses with HTTP 429 and says in retryAfterSeconds when capacity returns. The client never
+     * retries by itself: whether and when to resubmit is the application's decision.
+     *
+     * @param array<mixed> $input
+     */
     public function submit(string $task, array $input, int $timeoutMs = 30000): Job
     {
         if ($task === '' || strlen($task) > 128 || $timeoutMs < 100 || $timeoutMs > 300000) {
@@ -210,6 +215,10 @@ final class Client
         $handle = curl_init($this->baseUrl . $path);
         $response = '';
         $tooLarge = false;
+        $headerBytes = 0;
+        $headersTooLarge = false;
+        $retryAfter = null;
+        $retryAfterSeen = false;
         $timeoutMs ??= $this->requestTimeoutMs;
         curl_setopt_array($handle, [
             CURLOPT_CUSTOMREQUEST => $method,
@@ -228,6 +237,26 @@ final class Client
                 $response .= $chunk;
                 return strlen($chunk);
             },
+            CURLOPT_HEADERFUNCTION => static function ($curl, string $line) use (&$headerBytes, &$headersTooLarge, &$retryAfter, &$retryAfterSeen): int {
+                // An interim response such as 100 Continue starts a new block; only the final one counts.
+                if (str_starts_with($line, 'HTTP/')) {
+                    $headerBytes = 0;
+                    $retryAfter = null;
+                    $retryAfterSeen = false;
+                }
+                $headerBytes += strlen($line);
+                if ($headerBytes > 16384) {
+                    $headersTooLarge = true;
+                    return 0;
+                }
+                if (preg_match('/\Aretry-after:(.*)\z/is', $line, $match) === 1) {
+                    // Delay seconds only: an HTTP date would need this host's clock to agree with the worker's.
+                    // A repeated header is a conflict the caller cannot trust, so it counts as absent.
+                    $retryAfter = !$retryAfterSeen && preg_match('/\A[ \t]*([0-9]{1,6})[ \t]*\r?\n?\z/', $match[1], $digits) === 1 ? (int) $digits[1] : null;
+                    $retryAfterSeen = true;
+                }
+                return strlen($line);
+            },
         ]);
         if ($json !== null) {
             curl_setopt($handle, CURLOPT_POSTFIELDS, $json);
@@ -236,6 +265,9 @@ final class Client
             $ok = curl_exec($handle);
             $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
             $contentType = curl_getinfo($handle, CURLINFO_CONTENT_TYPE);
+            if ($headersTooLarge) {
+                throw new BridgeException('Response headers exceed 16384 bytes', 'invalid_response');
+            }
             if ($tooLarge) {
                 throw new BridgeException('Response exceeds 262144 bytes', 'invalid_response');
             }
@@ -249,7 +281,7 @@ final class Client
             }
             if ($status < 200 || $status >= 300) {
                 // Do not reflect server-supplied text that may contain secrets or markup.
-                throw new BridgeException('Bridge returned HTTP ' . $status, 'http_error', $status);
+                throw new BridgeException('Bridge returned HTTP ' . $status, 'http_error', $status, $status === 429 ? $retryAfter : null);
             }
             if (!is_string($contentType) || strtolower(trim(explode(';', $contentType)[0])) !== 'application/json') {
                 throw new BridgeException('Expected a JSON response', 'invalid_response');

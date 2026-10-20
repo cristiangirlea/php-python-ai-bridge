@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- A 429 from the worker carries `Retry-After` in whole seconds: when the first retained job expires, or 1 when every slot holds an unfinished job. The PHP client exposes it as `BridgeException::$retryAfterSeconds` (and refuses a response header block over 16 KiB as `invalid_response`) without retrying by itself; the MCP server waits for it within a call's budget instead of guessing.
+
 ### Changed
 
 - The dist archive now ships only `src/`, `composer.json`, `LICENSE`, `README.md`, `CHANGELOG.md` and `docs/`.

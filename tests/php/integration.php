@@ -101,5 +101,21 @@ $text = 'Mail me at a@b.co or on +44 20 7946 0958 today';
 $job = $real->submitRedact($text);
 $redaction = RedactResult::fromJob($real->wait($job->id), $text);
 check($redaction->text === 'Mail me at [EMAIL] or on [PHONE] today' && count($redaction->spans) === 2, 'redaction round trip through the PHP client');
+// Last, since the fault-worker then stays full for its 300 s retention: its default capacity is 128 jobs, and the
+// jobs above have finished, so the earliest of them to expire says when a slot returns.
+$refusal = null;
+for ($submitted = 0; $submitted <= 128 && $refusal === null; ++$submitted) {
+    try {
+        $client->submit('test.delay', ['seconds' => 0]);
+    } catch (BridgeException $error) {
+        $refusal = $error;
+    }
+}
+if ($refusal === null) {
+    throw new RuntimeException('Expected the fault-worker to fill up');
+}
+check($refusal->httpStatus === 429, 'a full worker refuses with HTTP 429');
+check($refusal->retryAfterSeconds !== null && $refusal->retryAfterSeconds >= 1 && $refusal->retryAfterSeconds <= 300,
+    'the real worker\'s Retry-After reaches the PHP client in whole seconds within its retention');
 /** @var int $count counted by check() in run.php */
 echo "PASS: $count total PHP checks including real HTTP failure cases\n";

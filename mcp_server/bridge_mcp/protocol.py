@@ -11,14 +11,17 @@ TERMINAL = frozenset({"succeeded", "failed", "timed_out", "cancelled"})
 STATUSES = TERMINAL | {"queued", "running"}
 JOB_ID = re.compile(r"[a-f0-9]{32}")
 ERROR_CODE = re.compile(r"[a-z_]{1,40}")
+# Delay seconds only, as the PHP client reads them; an HTTP date would need the two clocks to agree.
+RETRY_AFTER = re.compile(r"[ \t]*([0-9]{1,6})[ \t]*")
 
 
 class BridgeError(Exception):
     """A protocol, transport or task failure. Messages never contain the token or worker internals."""
 
-    def __init__(self, message: str, code: str, status: int | None = None, job_id: str | None = None):
+    def __init__(self, message: str, code: str, status: int | None = None, job_id: str | None = None,
+                 retry_after: int | None = None):
         super().__init__(message)
-        self.code, self.status, self.job_id = code, status, job_id
+        self.code, self.status, self.job_id, self.retry_after = code, status, job_id, retry_after
 
 
 class Bridge:
@@ -135,6 +138,9 @@ class Bridge:
             connection.request(method, path, data, headers)
             response = connection.getresponse()
             status, content_type = response.status, response.getheader("Content-Type") or ""
+            # A repeated Retry-After is a conflict the caller cannot trust, so it counts as absent.
+            values = (response.headers.get_all("Retry-After") or []) if status == 429 else []
+            retry_after = RETRY_AFTER.fullmatch(values[0]) if len(values) == 1 else None
             raw = response.read(MAX_BYTES + 1)
         except (OSError, http.client.HTTPException) as error:
             raise BridgeError("Bridge transport failed: " + type(error).__name__, "transport_error") from None
@@ -154,7 +160,8 @@ class Bridge:
             # free text, and a proxy's HTML error page contributes nothing but its status.
             code = decoded.get("error", {}).get("code") if isinstance(decoded, dict) and isinstance(decoded.get("error"), dict) else None
             code = code if isinstance(code, str) and ERROR_CODE.fullmatch(code) else "http_error"
-            raise BridgeError(f"Bridge returned HTTP {status}: {code}", code, status)
+            raise BridgeError(f"Bridge returned HTTP {status}: {code}", code, status,
+                              retry_after=int(retry_after[1]) if retry_after else None)
         if not is_json:
             raise BridgeError("Expected a JSON response", "invalid_response", status)
         if decoded is None:

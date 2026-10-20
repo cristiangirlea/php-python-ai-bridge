@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -100,6 +101,48 @@ class HttpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CapacityHttpTests(unittest.TestCase):
+    """A store of its own, so the full one never refuses the other HTTP tests."""
+
+    def setUp(self):
+        self.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=1, retention_seconds=300))
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join()
+        self.server.server_close()
+
+    def submit(self):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        try:
+            connection.request("POST", "/v1/jobs", json.dumps({"task": "rerank", "input": {"query": "x", "documents": ["x"]}}),
+                               {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"})
+            response = connection.getresponse()
+            return response.status, response.getheader("Retry-After"), json.loads(response.read())
+        finally:
+            connection.close()
+
+    def test_a_refusal_for_capacity_says_when_to_retry_in_whole_seconds(self):
+        status, retry_after, job = self.submit()
+        self.assertEqual((status, retry_after), (202, None))
+        deadline = time.monotonic() + 5
+        while self.server.jobs.get(job["id"])["status"] != "succeeded":
+            self.assertLess(time.monotonic(), deadline, "the job never finished")
+            time.sleep(0.01)
+        status, retry_after, body = self.submit()
+        self.assertEqual((status, body["error"]["code"]), (429, "capacity_exceeded"))
+        # Whole seconds, never an HTTP date: the finished job holds its slot for the 300 s retention.
+        self.assertRegex(retry_after, r"\A[1-9][0-9]*\Z")
+        self.assertIn(int(retry_after), (299, 300))
+
+    def test_a_shutting_down_store_says_one_second(self):
+        self.server.jobs.close()
+        status, retry_after, _ = self.submit()
+        self.assertEqual((status, retry_after), (429, "1"))
 
 
 class StartupTests(unittest.TestCase):
