@@ -42,7 +42,7 @@ Until the Packagist listing exists, install the same tag from the repository ins
 
 Then run `composer update cristiangirlea/php-python-ai-bridge --no-scripts --no-plugins`. Either way, review and commit the resulting `composer.lock` to pin the installed revision. These commands deliberately skip application hooks/plugins; perform any reviewed framework setup separately in your isolated application environment. A tagged version needs no `minimum-stability` change. See [Composer's VCS repository documentation](https://getcomposer.org/doc/05-repositories.md#vcs).
 
-A clean Composer installation of the library is checked on every push and pull request: CI's `composer-install` service validates `composer.json` strictly, then installs the library into a throwaway consumer project from a path repository, offline, and autoloads the client; see [testing](testing.md#what-the-tests-establish). That proves the package installs and autoloads, not that any framework boots with it.
+A clean Composer installation of the library is checked on every push to `main` and every pull request: CI's `composer-install` service validates `composer.json` strictly, then installs the library into a throwaway consumer project from a path repository, offline, and autoloads the client; see [testing](testing.md#what-the-tests-establish). That proves the package installs and autoloads, not that any framework boots with it.
 
 The client needs PHP 8.2–8.5 and `ext-curl`/`ext-json`. See [support and verification](testing.md) for the tested matrix and limitations. The selected framework may require a newer PHP version than this library.
 

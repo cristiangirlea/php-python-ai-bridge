@@ -11,7 +11,7 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 ### Added
 
 - The PHP client `PhpAiBridge\Client` for PHP 8.2 to 8.5 (`ext-curl`, `ext-json`): submit, poll, wait and cancel jobs, with typed `RerankResult`, `EmbedResult` and `RedactResult` objects that validate what the service returns. Rerank takes up to 512 documents and an optional `top_k`; embed up to 32 texts; redact one text.
-- The Python 3.12 standard-library service: an explicit task allowlist, a pool of warm child processes with one job per child at a time, bounded concurrency and queue/result capacity, request-size limits, execution deadlines, cancellation of queued and running jobs, crash containment (a crashed, cancelled or timed-out child is replaced) and generic error messages that omit internal exception text.
+- The Python 3.12 standard-library service: an explicit task allowlist, a pool of warm child processes with one job per child at a time, bounded concurrency and queue/result capacity, request-size limits, execution deadlines, cancellation of queued and running jobs, crash containment (a crashed, cancelled or timed-out child is replaced, and a job whose child died before taking it is tried once more on another) and generic error messages that omit internal exception text.
 - Deterministic default backends for testing the integration: lexical word overlap for rerank, feature hashing for embed, and checksum and pattern rules (card numbers, IBANs, emails, IPv4 and IPv6 addresses, phone numbers) for redact. None of them is a model.
 - The optional ONNX profile with four pinned, hash-verified models: `cross-encoder/ms-marco-TinyBERT-L2-v2` for rerank, `sentence-transformers/all-MiniLM-L6-v2` for embed, and the int8 cased and uncased `dslim/bert-base-NER` conversions for named-entity masking, all on CPU with no hosted AI account.
 - The stdio MCP server: one tool per task over the same HTTP protocol, an index builder over the protocol and a `bridge_search` tool over what it built, a compose service that puts the ONNX models behind it, and an LLM evaluation runner.
@@ -20,7 +20,7 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 
 ### Limits
 
-- Experimental prototype, not a production job queue: jobs and results live in memory, a restart loses them, and there is no durable delivery, retry or idempotency key.
+- Experimental prototype, not a production job queue: jobs and results live in memory, a restart loses them, and there is no durable delivery, no automatic retry of a failed or lost job and no idempotency key.
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 

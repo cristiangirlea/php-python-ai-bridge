@@ -8,6 +8,7 @@
     },
     "minimum-stability": "dev",
     "config": {
-        "platform": {"php": "8.2.0"}
+        "platform": {"php": "8.2.0"},
+        "allow-plugins": false
     }
 }
