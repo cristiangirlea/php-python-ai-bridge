@@ -72,6 +72,31 @@ services:
     network_mode: none
     command: [php, tests/php/run.php]
 
+  # The consumer-install check: the library's composer.json validated strictly, then a throwaway consumer project
+  # in tmpfs installs it from a path repository with Packagist disabled and autoloads the client, offline.
+  composer-install:
+    <<: *limits
+    image: composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac
+    profiles: [test]
+    network_mode: none
+    entrypoint: []
+    environment:
+      COMPOSER_HOME: /tmp/composer
+      COMPOSER_NO_INTERACTION: "1"
+      # Composer reads the library's version from git, which refuses a checkout another uid owns.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: /work
+    command:
+      - sh
+      - -ec
+      - |
+        composer validate --strict
+        mkdir -p /tmp/consumer && cd /tmp/consumer
+        cp /work/tests/php/consumer/composer.json .
+        composer install --no-interaction
+        php /work/tests/php/consumer/check.php
+
   integration:
     <<: *python
     profiles: [test]

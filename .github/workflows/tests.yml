@@ -74,6 +74,8 @@ jobs:
         run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
       - name: Offline MCP server tests
         run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
+      - name: Consumer Composer install of the library
+        run: docker compose -f docker/compose.yaml run --rm --no-deps composer-install
       - name: Stop test containers
         if: always()
         run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch down
