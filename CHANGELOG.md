@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The dist archive now ships only `src/`, `composer.json`, `LICENSE`, `README.md`, `CHANGELOG.md` and `docs/`.
+
 ## [0.1.0] - 2026-10-20
 
 First release: a typed PHP client for bounded Python AI tasks (rerank, embed, redact), with a FrankenPHP example and a stdio MCP server.
@@ -24,4 +30,5 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 
+[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/cristiangirlea/php-python-ai-bridge/releases/tag/v0.1.0

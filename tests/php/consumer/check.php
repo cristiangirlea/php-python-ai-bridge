@@ -22,4 +22,29 @@ $client = new PhpAiBridge\Client('http://localhost:8090', str_repeat('x', 32));
 if (PhpAiBridge\Client::MAX_DOCUMENTS !== 512) {
     throw new RuntimeException('Client::MAX_DOCUMENTS is not 512');
 }
+
+$packageDir = getcwd() . '/vendor/cristiangirlea/php-python-ai-bridge';
+if (is_dir('/work/.git')) {
+    if (!is_file($packageDir . '/src/Client.php') || !is_dir($packageDir . '/docs')) {
+        throw new RuntimeException('The installed archive is missing src/Client.php or docs/');
+    }
+    foreach (['worker', 'tests', 'docker'] as $excluded) {
+        if (file_exists($packageDir . '/' . $excluded)) {
+            throw new RuntimeException('The installed archive must not contain ' . $excluded . '/');
+        }
+    }
+    $entries = array_values(array_diff(scandir($packageDir) ?: [], ['.', '..']));
+    sort($entries);
+    if ($entries !== ['CHANGELOG.md', 'LICENSE', 'README.md', 'composer.json', 'docs', 'src']) {
+        throw new RuntimeException('Unexpected archive entries: ' . implode(', ', $entries));
+    }
+} elseif (is_file('/work/.git')) {
+    if ((string) getenv('BRIDGE_REQUIRE_ARCHIVE') !== '') {
+        throw new RuntimeException('BRIDGE_REQUIRE_ARCHIVE is set, but /work/.git is a worktree file');
+    }
+    echo "consumer install: archive check skipped (/work/.git is a worktree file whose git directory is outside the mount)\n";
+} else {
+    throw new RuntimeException('/work/.git is neither a directory nor a worktree file');
+}
+
 echo "consumer install: PhpAiBridge\\Client autoloaded from vendor/, MAX_DOCUMENTS = 512\n";

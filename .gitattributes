@@ -1,3 +1,22 @@
 * text=auto eol=lf
 # Hook scripts run under sh, which breaks on CRLF line endings.
 .claude/hooks/* text eol=lf
+
+# Consumers need only the PHP client, its composer.json, license, changelog and documentation in dist archives.
+/.claude export-ignore
+/.gitattributes export-ignore
+/.github export-ignore
+/.gitignore export-ignore
+/AGENTS.md export-ignore
+/CLAUDE.md export-ignore
+/CONTRIBUTING.md export-ignore
+/docker export-ignore
+/examples export-ignore
+/mcp_server export-ignore
+/requirements-mcp.lock export-ignore
+/requirements-mcp.txt export-ignore
+/requirements-model.lock export-ignore
+/requirements-model.txt export-ignore
+/scripts export-ignore
+/tests export-ignore
+/worker export-ignore
