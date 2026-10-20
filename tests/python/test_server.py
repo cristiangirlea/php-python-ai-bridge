@@ -1,11 +1,12 @@
 import http.client
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from ai_bridge import server, tasks
 from ai_bridge.jobs import Settings
@@ -71,12 +72,41 @@ class HttpTests(unittest.TestCase):
                      '{"task":"rerank","input":{"query":NaN,"documents":["x"]}}',
                      '{"task":"rerank","input":{"query":"x","documents":["x"],"top_k":2}}',
                      '{"task":"rerank","input":{"query":"x","documents":["x"],"top_k":null}}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"]},"idempotency_key":""}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"]},"idempotency_key":"' + "a" * 129 + '"}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"]},"idempotency_key":"has space"}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"]},"idempotency_key":"café"}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"]},"idempotency_key":"\\u007f"}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"]},"idempotency_key":123}',
+                     '{"task":"rerank","input":{"query":"x","documents":["x"]},"idempotency_key":null}',
                      '{"task":"embed","input":{"texts":[]}}',
                      '{"task":"embed","input":{"texts":["x"],"query":"x"}}',
                      '{"task":"redact","input":{"text":""}}',
                      '{"task":"redact","input":{"text":"x","entities":["MISC"]}}']:
             with self.subTest(body=body):
                 self.assertEqual(self.request("POST", "/v1/jobs", body, self.auth())[0], 400)
+
+    def test_repeated_idempotency_key_returns_202_with_existing_job(self):
+        body = json.dumps({"task": "rerank", "input": {"query": "x", "documents": ["x"]}, "idempotency_key": "http-k1"})
+        status, first = self.request("POST", "/v1/jobs", body, self.auth())
+        self.assertEqual(status, 202)
+        status, repeated = self.request("POST", "/v1/jobs", body, self.auth())
+        self.assertEqual(status, 202)
+        self.assertEqual(repeated["id"], first["id"])
+        other = json.dumps({"task": "rerank", "input": {"query": "x", "documents": ["x"]}, "idempotency_key": "http-k2"})
+        status, second = self.request("POST", "/v1/jobs", other, self.auth())
+        self.assertEqual(status, 202)
+        self.assertNotEqual(second["id"], first["id"])
+
+    def test_a_submission_the_job_table_refuses_is_429(self):
+        database = MagicMock()
+        database.execute.side_effect = sqlite3.OperationalError("disk I/O error")
+        body = json.dumps({"task": "rerank", "input": {"query": "x", "documents": ["x"]}, "idempotency_key": "http-k3"})
+        with patch.object(self.server.jobs, "_db", database):
+            status, data = self.request("POST", "/v1/jobs", body, self.auth())
+        self.assertEqual(status, 429)
+        self.assertEqual(data["error"]["code"], "capacity_exceeded")
+        self.assertNotIn("http-k3", self.server.jobs._keys)
 
     def test_body_limit(self):
         self.assertEqual(self.request("POST", "/v1/jobs", " " * 262145, self.auth())[0], 413)
@@ -174,13 +204,35 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(self.main({}), Settings())
 
     def test_every_variable_is_read(self):
-        settings = self.main({
-            "BRIDGE_CONCURRENCY": "3", "BRIDGE_CAPACITY": "9", "BRIDGE_RETENTION_SECONDS": "1.5",
-            "BRIDGE_BACKEND": "lexical", "BRIDGE_MODEL_DIR": "/elsewhere", "BRIDGE_TEST_TASKS": "1",
-            "BRIDGE_WORKER_MAX_JOBS": "7",
-        })
-        self.assertEqual(settings, Settings(concurrency=3, capacity=9, retention_seconds=1.5, backend="lexical",
-                                            model_dir="/elsewhere", test_tasks=True, max_jobs=7))
+        with tempfile.TemporaryDirectory() as state_dir:
+            settings = self.main({
+                "BRIDGE_CONCURRENCY": "3", "BRIDGE_CAPACITY": "9", "BRIDGE_RETENTION_SECONDS": "1.5",
+                "BRIDGE_BACKEND": "lexical", "BRIDGE_MODEL_DIR": "/elsewhere", "BRIDGE_TEST_TASKS": "1",
+                "BRIDGE_WORKER_MAX_JOBS": "7", "BRIDGE_STATE_DIR": state_dir,
+            })
+            self.assertEqual(settings, Settings(concurrency=3, capacity=9, retention_seconds=1.5, backend="lexical",
+                                                model_dir="/elsewhere", test_tasks=True, max_jobs=7,
+                                                state_dir=state_dir))
+
+    def test_an_empty_state_dir_is_unset(self):
+        self.assertIsNone(self.main({"BRIDGE_STATE_DIR": ""}).state_dir)
+
+    def test_a_state_dir_that_cannot_hold_the_table_names_its_variable(self):
+        with tempfile.TemporaryDirectory() as root:
+            a_file = os.path.join(root, "file")
+            open(a_file, "w").close()
+            read_only = os.path.join(root, "read-only")
+            os.mkdir(read_only, 0o500)
+            paths = [os.path.join(root, "missing"), a_file]
+            # Root writes through the mode bits; compose runs these tests as uid 65532.
+            if os.geteuid() != 0:
+                paths.append(read_only)
+            for path in paths:
+                with self.subTest(path=path):
+                    with self.assertRaises(SystemExit) as raised:
+                        self.main({"BRIDGE_STATE_DIR": path}, real_server=True)
+                    self.assertIn("BRIDGE_STATE_DIR", str(raised.exception.code))
+                    self.assertIn(path, str(raised.exception.code))
 
     def test_test_tasks_need_exactly_one(self):
         for value in ("true", "yes", "0", ""):

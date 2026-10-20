@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- `BRIDGE_STATE_DIR`: the worker keeps its job table (never inputs) in `jobs.sqlite` there, so retained results survive a restart and unfinished jobs are reported as `failed` with `service_restarted` instead of disappearing; unset, the table stays in memory as before. Compose's `worker` keeps it on a tmpfs.
+- An optional `idempotency_key` on `POST /v1/jobs` (1–128 printable ASCII characters): a repeat while its job is retained returns that job with 202 instead of submitting again. The PHP client's `submit`, `submitRerank`, `submitEmbed` and `submitRedact` take it as `?string $idempotencyKey` and, when one is sent, accept any valid status in the response.
+
 ### Changed
 
 - The dist archive now ships only `src/`, `composer.json`, `LICENSE`, `README.md`, `CHANGELOG.md` and `docs/`.

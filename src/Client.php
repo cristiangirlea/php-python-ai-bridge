@@ -37,22 +37,37 @@ final class Client
         $this->baseUrl = rtrim($baseUrl, '/');
     }
 
-    public function submit(string $task, array $input, int $timeoutMs = 30000): Job
+    /**
+     * With an idempotency key, a repeat while the worker retains the first job returns that job as it is now,
+     * so resubmitting after an uncertain POST cannot run the task twice.
+     *
+     * @param array<string, mixed> $input
+     */
+    public function submit(string $task, array $input, int $timeoutMs = 30000, ?string $idempotencyKey = null): Job
     {
         if ($task === '' || strlen($task) > 128 || $timeoutMs < 100 || $timeoutMs > 300000) {
             throw new \InvalidArgumentException('Invalid task or execution deadline');
         }
-        $job = Job::fromArray($this->request('POST', '/v1/jobs', [
-            'task' => $task, 'input' => (object) $input, 'timeout_ms' => $timeoutMs,
-        ]));
-        if ($job->task !== $task || $job->timeoutMs !== $timeoutMs || $job->status !== 'queued') {
+        if ($idempotencyKey !== null && !preg_match('/\A[\x21-\x7e]{1,128}\z/', $idempotencyKey)) {
+            throw new \InvalidArgumentException('idempotencyKey must be 1-128 printable ASCII characters');
+        }
+        $body = ['task' => $task, 'input' => (object) $input, 'timeout_ms' => $timeoutMs];
+        if ($idempotencyKey !== null) {
+            $body['idempotency_key'] = $idempotencyKey;
+        }
+        $job = Job::fromArray($this->request('POST', '/v1/jobs', $body));
+        if ($job->task !== $task || $job->timeoutMs !== $timeoutMs || ($idempotencyKey === null && $job->status !== 'queued')) {
             throw new BridgeException('Submission response does not match the request', 'invalid_response');
         }
         return $job;
     }
 
-    /** A null top_k returns every document ranked; the worker enforces the same limits. */
-    public function submitRerank(string $query, array $documents, int $timeoutMs = 30000, ?int $topK = null): Job
+    /**
+     * A null top_k returns every document ranked; the worker enforces the same limits.
+     *
+     * @param array<mixed> $documents
+     */
+    public function submitRerank(string $query, array $documents, int $timeoutMs = 30000, ?int $topK = null, ?string $idempotencyKey = null): Job
     {
         if (trim($query) === '' || !array_is_list($documents) || count($documents) < 1 || count($documents) > self::MAX_DOCUMENTS) {
             throw new \InvalidArgumentException('Expected a query and 1-' . self::MAX_DOCUMENTS . ' documents');
@@ -67,11 +82,15 @@ final class Client
         if ($topK !== null) {
             $input['top_k'] = $topK;
         }
-        return $this->submit('rerank', $input, $timeoutMs);
+        return $this->submit('rerank', $input, $timeoutMs, $idempotencyKey);
     }
 
-    /** Returns one unit-length vector per text; the caller owns any index built from them. */
-    public function submitEmbed(array $texts, int $timeoutMs = 30000): Job
+    /**
+     * Returns one unit-length vector per text; the caller owns any index built from them.
+     *
+     * @param array<mixed> $texts
+     */
+    public function submitEmbed(array $texts, int $timeoutMs = 30000, ?string $idempotencyKey = null): Job
     {
         if (!array_is_list($texts) || count($texts) < 1 || count($texts) > self::MAX_TEXTS) {
             throw new \InvalidArgumentException('Expected 1-' . self::MAX_TEXTS . ' texts');
@@ -79,11 +98,15 @@ final class Client
         if (self::textBytes($texts, 'Texts') > self::MAX_TOTAL_BYTES) {
             throw new \InvalidArgumentException('Texts must total at most ' . self::MAX_TOTAL_BYTES . ' bytes');
         }
-        return $this->submit('embed', ['texts' => $texts], $timeoutMs);
+        return $this->submit('embed', ['texts' => $texts], $timeoutMs, $idempotencyKey);
     }
 
-    /** Rules for structured identifiers run on every backend; entities and minScore only shape the optional model pass. */
-    public function submitRedact(string $text, array $entities = ['PER'], float $minScore = 0.85, int $timeoutMs = 30000): Job
+    /**
+     * Rules for structured identifiers run on every backend; entities and minScore only shape the optional model pass.
+     *
+     * @param array<mixed> $entities
+     */
+    public function submitRedact(string $text, array $entities = ['PER'], float $minScore = 0.85, int $timeoutMs = 30000, ?string $idempotencyKey = null): Job
     {
         if (trim($text) === '' || self::codePoints($text) > self::MAX_TEXT_CHARACTERS) {
             throw new \InvalidArgumentException('Expected 1-' . self::MAX_TEXT_CHARACTERS . ' characters of text');
@@ -101,7 +124,7 @@ final class Client
         if (!is_finite($minScore) || $minScore < 0 || $minScore > 1) {
             throw new \InvalidArgumentException('minScore must be between 0 and 1');
         }
-        return $this->submit('redact', ['text' => $text, 'entities' => $entities, 'min_score' => $minScore], $timeoutMs);
+        return $this->submit('redact', ['text' => $text, 'entities' => $entities, 'min_score' => $minScore], $timeoutMs, $idempotencyKey);
     }
 
     /** Counts Unicode code points without ext-mbstring: bytes minus UTF-8 continuation bytes. */
