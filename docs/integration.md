@@ -16,9 +16,15 @@ Composer installs and autoloads the PHP client. It does not install Python, down
 
 Three normal tasks are implemented. Reranking: given a query and up to 512 candidate documents, it returns document indexes sorted by relevance, optionally narrowed to the `top_k` best. Embedding: up to 32 texts return one unit-length vector each, for an index your application owns. Redaction: one text returns a masked copy and the spans found, from checksum and pattern rules on every backend and a named-entity model on the ONNX profile. It is not a chat/completions API. The default backends are deterministic demos, not AI; the optional ONNX profile runs the real models offline after a separate download step.
 
-## Install through Composer during evaluation
+## Install through Composer
 
-There is no tagged release or Packagist package yet. The implementation is on `main`. In your application's root `composer.json`, add this repository and requirement, preserving existing entries:
+The first tagged release is `v0.1.0`; see [the changelog](../CHANGELOG.md). Once the package is on Packagist, this is the normal path, run inside your application's dependency-acquisition container:
+
+```sh
+composer require cristiangirlea/php-python-ai-bridge:^0.1 --no-scripts --no-plugins
+```
+
+Until the Packagist listing exists, install the same tag from the repository instead. In your application's root `composer.json`, add this repository and requirement, preserving existing entries:
 
 ```json
 {
@@ -29,14 +35,14 @@ There is no tagged release or Packagist package yet. The implementation is on `m
     }
   ],
   "require": {
-    "cristiangirlea/php-python-ai-bridge": "dev-main"
+    "cristiangirlea/php-python-ai-bridge": "0.1.0"
   }
 }
 ```
 
-Run `composer update cristiangirlea/php-python-ai-bridge --no-scripts --no-plugins` inside your application's dependency-acquisition container. Review and commit the resulting `composer.lock` to pin the evaluated revision. This command deliberately skips application hooks/plugins; perform any reviewed framework setup separately in your isolated application environment. No global `minimum-stability: dev` change is necessary for this explicit development requirement. See [Composer's VCS repository documentation](https://getcomposer.org/doc/05-repositories.md#vcs).
+Then run `composer update cristiangirlea/php-python-ai-bridge --no-scripts --no-plugins`. Either way, review and commit the resulting `composer.lock` to pin the installed revision. These commands deliberately skip application hooks/plugins; perform any reviewed framework setup separately in your isolated application environment. A tagged version needs no `minimum-stability` change. See [Composer's VCS repository documentation](https://getcomposer.org/doc/05-repositories.md#vcs).
 
-After a release is published to Packagist, the custom repository/branch constraint can be replaced by a released version. That publication has not happened yet. A clean Composer installation is a separate release gate; the dependency-free examples in this repository do not prove it.
+A clean Composer installation of the library is checked on every push and pull request: CI's `composer-install` service validates `composer.json` strictly, then installs the library into a throwaway consumer project from a path repository, offline, and autoloads the client; see [testing](testing.md#what-the-tests-establish). That proves the package installs and autoloads, not that any framework boots with it.
 
 The client needs PHP 8.2–8.5 and `ext-curl`/`ext-json`. See [support and verification](testing.md) for the tested matrix and limitations. The selected framework may require a newer PHP version than this library.
 

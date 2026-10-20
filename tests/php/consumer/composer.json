@@ -1,0 +1,13 @@
+{
+    "repositories": [
+        {"type": "path", "url": "/work", "options": {"symlink": true}},
+        {"packagist.org": false}
+    ],
+    "require": {
+        "cristiangirlea/php-python-ai-bridge": "*"
+    },
+    "minimum-stability": "dev",
+    "config": {
+        "platform": {"php": "8.2.0"}
+    }
+}

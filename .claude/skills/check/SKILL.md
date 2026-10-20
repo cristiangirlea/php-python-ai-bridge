@@ -23,8 +23,13 @@ docker compose -f docker/compose.yaml --profile test down
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
+docker compose -f docker/compose.yaml run --rm --no-deps composer-install
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch down
 ```
+
+The `composer-install` step is the consumer-install check: `composer validate --strict` on the library, then a
+throwaway consumer project in tmpfs installs it from a path repository with Packagist disabled and autoloads
+`PhpAiBridge\Client`; it needs no network and no cache.
 
 The `python-tests` step also runs both hooks' tests (`tests/python/test_repo_rules_hook.py` and
 `tests/python/test_push_guard_hook.py`, which runs `.claude/hooks/push-guard.test.sh`); the containers

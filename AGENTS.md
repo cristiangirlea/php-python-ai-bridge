@@ -15,7 +15,7 @@ and `docs/testing.md` are the guides. Everything builds, tests and downloads ins
 | `mcp_server/bridge_mcp/` | The stdio MCP server: `tools.py` (the tool list and `BACKENDS`), `protocol.py` (its client of the worker), `index.py` (the builder behind `bridge_search`). |
 | `examples/` | Local autoloader, the CLI example, the FrankenPHP route and Caddyfile. |
 | `scripts/` | Model fetcher, benchmark, NER measurement, MCP stdio launchers, the LLM evaluation runner. |
-| `tests/php/` | `run.php` (offline contract checks), `integration.php` (the client against the real worker and broken peers over HTTP), `model.php` (ONNX smoke). |
+| `tests/php/` | `run.php` (offline contract checks), `integration.php` (the client against the real worker and broken peers over HTTP), `model.php` (ONNX smoke), `consumer/` (the consumer project and check behind compose's `composer-install`). |
 | `tests/python/` | The worker's unittest suite, including the workflows' runners and both hooks (the pre-call push guard's own cases are in `.claude/hooks/push-guard.test.sh`). |
 | `tests/mcp/` | The MCP server's suite, offline against hash-pinned wheels; its fixtures and LLM evaluations. |
 | `tests/*.py` | Cross-boundary tests: `integration.py` (through the FrankenPHP worker), `model_integration.py`, `mcp_model_probe.py`, and `hostile_server.py`, a broken peer. |
@@ -40,6 +40,7 @@ docker compose -f docker/compose.yaml --profile test down
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher   # network once: wheels into .cache/
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
+docker compose -f docker/compose.yaml run --rm --no-deps composer-install   # offline consumer install of the library
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch down
 ```
 
