@@ -19,7 +19,7 @@ Submit:
 
 A job contains `id`, `task`, `status`, `timeout_ms`, `result`, `error`, and `progress`. IDs are 32 lowercase hex characters. Result/error/progress are null until applicable. Input documents are not echoed in status responses.
 
-States: `queued` → `running` → `succeeded` or `failed`. A queued/running job may also become `timed_out` or `cancelled`. Terminal states do not change. Cancelling an already completed job returns its unchanged state. Progress contains integer `completed` and `total`; it may be null before execution.
+States: `queued` → `running` → `succeeded` or `failed`. A job is `running` once a worker process has taken it; if that process dies before taking it, the job stays `queued` and is tried once more, and a second such death, or any death after it started, fails it as `worker_crashed`. A queued/running job may also become `timed_out` or `cancelled`. Terminal states do not change. Cancelling an already completed job returns its unchanged state. Progress contains integer `completed` and `total`; it may be null before execution.
 
 Successful reranking returns `{"model":"...","rankings":[{"index":0,"score":1.0}]}`. Rankings are sorted by descending score, with original order breaking ties; each original document index occurs at most once, and exactly `top_k` rankings are returned (every document when `top_k` is omitted). Progress is reported at most 66 times per job regardless of document count and always ends at the total. The deterministic backend identifies itself as `lexical-demo-not-a-model`. ONNX scores are not calibrated probabilities.
 
