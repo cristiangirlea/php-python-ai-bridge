@@ -8,6 +8,11 @@ final readonly class Job
 {
     private const STATUSES = ['queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled'];
 
+    /**
+     * @param array<mixed>|null $result
+     * @param array<mixed>|null $error
+     * @param array<mixed>|null $progress
+     */
     private function __construct(
         public string $id,
         public string $task,
@@ -18,6 +23,7 @@ final readonly class Job
         public int $timeoutMs,
     ) {}
 
+    /** @param array<mixed> $data */
     public static function fromArray(array $data): self
     {
         foreach (['id', 'task', 'status', 'result', 'error', 'progress', 'timeout_ms'] as $key) {
@@ -62,6 +68,7 @@ final readonly class Job
         return in_array($this->status, ['succeeded', 'failed', 'timed_out', 'cancelled'], true);
     }
 
+    /** @return array<string, mixed> */
     public function toArray(): array
     {
         return [

@@ -41,7 +41,7 @@ final class Client
      * With an idempotency key, a repeat while the worker retains the first job returns that job as it is now,
      * so resubmitting after an uncertain POST cannot run the task twice.
      *
-     * @param array<string, mixed> $input
+     * @param array<mixed> $input
      */
     public function submit(string $task, array $input, int $timeoutMs = 30000, ?string $idempotencyKey = null): Job
     {
@@ -170,6 +170,8 @@ final class Client
     /**
      * Counted in bytes as sent; the worker counts characters. Escaped quotes and backslashes
      * can still push an accepted request over the transport limit checked in submit().
+     *
+     * @param array<mixed> $strings
      */
     private static function textBytes(array $strings, string $noun): int
     {
@@ -190,6 +192,10 @@ final class Client
         }
     }
 
+    /**
+     * @param non-empty-string $method
+     * @param array<string, mixed>|null $body
+     */
     private function jobResponse(string $method, string $path, string $id, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): Job
     {
         $job = Job::fromArray($this->request($method, $path, $body, $timeoutMs, $waitDeadline));
@@ -199,6 +205,11 @@ final class Client
         return $job;
     }
 
+    /**
+     * @param non-empty-string $method
+     * @param array<string, mixed>|null $body
+     * @return array<mixed>
+     */
     private function request(string $method, string $path, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): array
     {
         // Raw UTF-8 keeps the encoded size close to the byte budget; the worker decodes UTF-8 directly.

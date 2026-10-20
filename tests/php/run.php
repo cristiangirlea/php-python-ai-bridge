@@ -23,6 +23,7 @@ use PhpAiBridge\RerankResult;
 $count = 0;
 function check(bool $value, string $message): void
 {
+    /** @var int $count */
     global $count;
     if (!$value) {
         throw new RuntimeException($message);
@@ -39,6 +40,7 @@ function rejects(callable $action, string $class): void
     }
     throw new RuntimeException('Expected rejection');
 }
+/** @return array<string, mixed> */
 function sample(): array
 {
     return ['id' => str_repeat('a', 32), 'task' => 'rerank', 'status' => 'queued',

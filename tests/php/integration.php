@@ -108,4 +108,5 @@ $repeated = $real->submitRerank('needle token', ['other words', 'needle token'],
 check($repeated->id === $first->id && $repeated->status === 'succeeded' && $repeated->result === $firstDone->result, 'repeated idempotency key returns the same job');
 $different = $real->submitRerank('needle token', ['other words', 'needle token'], idempotencyKey: $idempotencyKey . '-2');
 check($different->id !== $first->id, 'different idempotency key runs a new job');
+/** @var int $count counted by check() in run.php */
 echo "PASS: $count total PHP checks including real HTTP failure cases\n";

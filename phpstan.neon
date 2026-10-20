@@ -1,0 +1,11 @@
+includes:
+    - phpstan-baseline.neon
+
+parameters:
+    level: max
+    paths:
+        - src
+        - examples
+        - tests/php
+    # The checkout is mounted read-only in the container, so the result cache lives in its tmpfs.
+    tmpDir: /tmp/phpstan
