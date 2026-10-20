@@ -215,11 +215,14 @@ for ($i = 0; $i < 4; ++$i) {
 PHP;
 $pipes = [];
 $proc = proc_open([PHP_BINARY, '-r', $serverCode], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+if (!is_resource($proc)) {
+    throw new RuntimeException('Could not start the stub server');
+}
 $address = trim((string) fgets($pipes[1]));
 $stubClient = new Client('http://' . $address, $token);
 rejects(fn () => $stubClient->submitRerank('x', ['x']), BridgeException::class);
 $replayed = $stubClient->submitRerank('x', ['x'], idempotencyKey: 'retry-key-1');
-check($replayed->status === 'succeeded' && $replayed->result['model'] === 'retry-key-1', 'idempotency key sends field and accepts non-queued 202 status');
+check($replayed->status === 'succeeded' && is_array($replayed->result) && isset($replayed->result['model']) && $replayed->result['model'] === 'retry-key-1', 'idempotency key sends field and accepts non-queued 202 status');
 // The stub always answers a rerank job of 30000 ms, as a worker would for a key first used that way.
 foreach ([fn () => $stubClient->submitEmbed(['x'], idempotencyKey: 'retry-key-1'),
           fn () => $stubClient->submitRerank('x', ['x'], 5000, idempotencyKey: 'retry-key-1')] as $mismatched) {
