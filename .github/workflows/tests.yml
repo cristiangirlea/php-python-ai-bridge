@@ -69,16 +69,20 @@ jobs:
       - name: Prepare disposable cache
         run: mkdir -p .cache && chmod 777 .cache
       - name: Inspect sandbox configuration
-        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model config
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev config
       - name: Acquire hash-pinned MCP wheels
         run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
       - name: Offline MCP server tests
         run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
       - name: Consumer Composer install of the library
         run: docker compose -f docker/compose.yaml run --rm --no-deps composer-install
+      - name: Acquire the locked PHPStan
+        run: docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher
+      - name: PHPStan at level max, offline
+        run: docker compose -f docker/compose.yaml run --rm --no-deps php-analysis
       - name: Stop test containers
         if: always()
-        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch down
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev down
 
   # Keep the required branch-protection check stable as the matrix changes.
   deterministic:

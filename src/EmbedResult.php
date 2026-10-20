@@ -6,6 +6,7 @@ namespace PhpAiBridge;
 
 final readonly class EmbedResult
 {
+    /** @param list<list<int|float>> $vectors */
     private function __construct(public array $vectors, public int $dimensions, public string $model) {}
 
     public static function fromJob(Job $job, int $textCount): self
@@ -39,6 +40,8 @@ final readonly class EmbedResult
                 throw new BridgeException('Vector is not unit length', 'invalid_response');
             }
         }
-        return new self($result['vectors'], $dimensions, $result['model']);
+        /** @var list<list<int|float>> $vectors checked element by element above */
+        $vectors = $result['vectors'];
+        return new self($vectors, $dimensions, $result['model']);
     }
 }

@@ -101,4 +101,5 @@ $text = 'Mail me at a@b.co or on +44 20 7946 0958 today';
 $job = $real->submitRedact($text);
 $redaction = RedactResult::fromJob($real->wait($job->id), $text);
 check($redaction->text === 'Mail me at [EMAIL] or on [PHONE] today' && count($redaction->spans) === 2, 'redaction round trip through the PHP client');
+/** @var int $count counted by check() in run.php */
 echo "PASS: $count total PHP checks including real HTTP failure cases\n";
