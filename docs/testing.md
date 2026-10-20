@@ -142,6 +142,21 @@ docker compose -f docker/compose.yaml run --rm --no-deps -T model-ner
 NER_SAMPLE=tests/fixtures/ner-dev.json docker compose -f docker/compose.yaml run --rm --no-deps -T model-ner
 ```
 
+## Measured hook cost (informational)
+
+Measured 2026-10-20 locally on Windows 11 Pro 10.0.26200, CPU AMD Ryzen 9 9950X 16-Core Processor, Git Bash 5.2.37 (`x86_64-pc-msys`) with GNU sed 4.9. The pre-call push guard runs before every Bash and PowerShell call with a 20-second timeout in `.claude/settings.json`. Each figure is the wall time of `sh .claude/hooks/push-guard.sh` reading a Bash tool call's JSON on stdin, from the process start to its exit 0, so it includes starting the shell on Windows but not Claude Code's own spawn. Ten runs per input after the change; on `main` at `02bfc25`, ten for the first two and three for the 200 KB body. The bodies repeat one block of ordinary Markdown (headings, a list, a table, code spans, a link, quotes) to the stated size of the escaped JSON string.
+
+| Input | Hook | N | min s | median s | max s |
+| --- | --- | --- | --- | --- | --- |
+| `docker compose -f docker/compose.yaml run --rm --no-deps python-tests` | `main` | 10 | 0.05 | 0.06 | 0.08 |
+| `docker compose -f docker/compose.yaml run --rm --no-deps python-tests` | changed | 10 | 0.08 | 0.09 | 0.10 |
+| `gh pr create --title x --body-file - <<'EOF'`, a 20 KB body, `EOF` | `main` | 10 | 1.04 | 1.05 | 1.14 |
+| `gh pr create --title x --body-file - <<'EOF'`, a 20 KB body, `EOF` | changed | 10 | 0.34 | 0.38 | 0.40 |
+| `gh pr create --title x --body-file - <<'EOF'`, a 200 KB body, `EOF` | `main` | 3 | 75.57 | 75.75 | 75.98 |
+| `gh pr create --title x --body-file - <<'EOF'`, a 200 KB body, `EOF` | changed | 10 | 1.59 | 1.60 | 1.64 |
+
+The compose command has no word the hook guards, so it exits at its first check; alternating the two hooks 20 times on it gave medians of 0.085 and 0.089 s, the same within noise. On `main` the cost grew with the square of the body: Git Bash's C locale is UTF-8, where each bash pattern cut and each sed substitution walks the whole text, and the hook cut one character, one quote and one heredoc line at a time. A 200 KB body ran past the timeout almost four times over. The hook now uses a single-byte locale under MSYS and Cygwin, as C is on Linux, splits the JSON string at quotes once, reads a heredoc's body line by line with `read`, and takes single characters with cuts that stop at the first try. A long command outside a heredoc, such as a 200 KB double-quoted `--body`, is still walked a character at a time and was not measured here.
+
 ## LLM evaluation (informational)
 
 Run 2026-09-27 on Windows 11 with Docker Desktop and Claude Code 2.1.278, through `scripts/mcp_evaluate.py` as [the MCP guide](mcp.md#evaluating-with-an-llm) describes: the demo worker behind the compose `mcp` service, the 27-chunk fixture corpus, and one session per question per model.

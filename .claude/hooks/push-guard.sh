@@ -9,6 +9,9 @@
 # Past that: sed for JSON escapes, tr for capitals, git to resolve a push or an alias, and a
 # subshell for the hook's body and for each shell, eval, alias and heredoc whose text it checks.
 LC_ALL=C
+# Git Bash's C is UTF-8, where bash's pattern cuts and sed's s///g cost the whole text per step: a
+# single-byte locale, as C is elsewhere, keeps a long command fast.
+case ${OSTYPE-} in msys* | cygwin*) LC_ALL=C.ISO-8859-1 ;; esac
 export LC_ALL
 set -f
 nl='
@@ -56,10 +59,15 @@ json_string() {
     t=${t#"${t%%[![:space:]]*}"}
     case $t in '"'*) t=${t#\"} ;; *) return 1 ;; esac
     val=
-    while :; do
-      case $t in *'"'*) ;; *) return 1 ;; esac
-      head=${t%%\"*}
-      t=${t#*\"}
+    # Split at quotes once: cutting a long value one quote at a time is quadratic in bash. The x
+    # keeps a field after a final quote, so every field but the last is followed by one.
+    oifs=$IFS
+    IFS='"'
+    set -- ${t}x
+    IFS=$oifs
+    while [ $# -gt 1 ]; do
+      head=$1
+      shift
       h=$head
       while :; do case $h in *'\\') h=${h%??} ;; *) break ;; esac; done
       case $h in
@@ -67,6 +75,7 @@ json_string() {
         *) val=$val$head; return 0 ;;
       esac
     done
+    return 1
   done
 }
 # unescape: JSON escapes decoded, a line at a time. An escaped backslash is set aside first, so it
@@ -101,14 +110,14 @@ words() {
     esac
     wd=$wd$wp ws=${ws#"$wp"}
     [ -n "$ws" ] || break
-    wc=${ws%"${ws#?}"} ws=${ws#?}
+    wc=${ws%%"${ws#?}"} ws=${ws#?} # %%, not %: see check_cmd
     case $wm$wc in
       s\' | d\") wm=o ;;
       o\') if [ "$lang" = cmd ]; then wd=$wd$wc; else wm=s wq=1; fi ;;
       o\") wm=d wq=1 ;;
       [od]\\ | [od]\`)
         if [ "$wc" = "$esc" ]; then
-          wn=${ws%"${ws#?}"} ws=${ws#?}
+          wn=${ws%%"${ws#?}"} ws=${ws#?}
           # In sh's double quotes, \ escapes only " \ $ and `.
           case $wm$lang$wn in dsh[\"\\\$\`]) ;; dsh*) wn=$wc$wn ;; esac
           wd=$wd$wn
@@ -151,16 +160,17 @@ check_cmd() {
       *) pre=${cs%%[\"\\\`\(]*} ;;
     esac
     cur=$cur$pre cs=${cs#"$pre"}
-    case $pre in ?*) lastc=${pre#"${pre%?}"} ;; esac
+    case $pre in ?*) lastc=${pre##"${pre%?}"} ;; esac
     [ -n "$cs" ] || break
-    ch=${cs%"${cs#?}"} cs=${cs#?}
+    # %% and ## find a one-character cut at once; % and # try every position, quadratic in bash.
+    ch=${cs%%"${cs#?}"} cs=${cs#?}
     case $md$ch in
       s\' | d\") cur=$cur$ch md=o ;;
       o\') cur=$cur$ch; [ "$lang" = cmd ] || md=s ;;
       o\") cur=$cur$ch md=d ;;
       [od]\\ | [od]\`)
         if [ "$ch" = "$esc" ]; then
-          cur=$cur$ch${cs%"${cs#?}"} cs=${cs#?}
+          cur=$cur$ch${cs%%"${cs#?}"} cs=${cs#?}
         elif [ "$ch$lang" = '`sh' ]; then
           case $md$stk in
             o[OD]*) check_part "$cur"; sub_end ;;
@@ -220,19 +230,29 @@ heredoc_start() {
 # heredoc_skip: at a newline, takes the queued heredocs' bodies off the text. <<- ends at the word
 # after blanks: a JSON tab arrives as a space.
 heredoc_skip() {
-  while [ -n "$hdq" ]; do
-    he=${hdq%%"$nl"*} hdq=${hdq#*"$nl"}
-    hq=${he%"${he#?}"} he=${he#?}
-    hd=${he%"${he#?}"} he=${he#?}
-    hbody=
-    while [ -n "$cs" ]; do
-      case $cs in *"$nl"*) hl=${cs%%"$nl"*} cs=${cs#*"$nl"} ;; *) hl=$cs cs= ;; esac
-      [ "$hd" = - ] && hl=${hl#"${hl%%[!\ \	]*}"}
-      [ "$hl" = "$he" ] && break
-      hbody=$hbody$hl$nl
+  [ -n "$hdq" ] || return 0
+  hrest=
+  # read takes a line in its own length, where cutting one off a long text costs the whole text
+  # in bash. The heredoc adds one newline at the end, taken off again below. A heredoc the shell
+  # cannot write is a failure of the hook: the rest of the text would go unread.
+  [ -d "${TMPDIR:-/tmp}" ] && {
+    while [ -n "$hdq" ]; do
+      he=${hdq%%"$nl"*} hdq=${hdq#*"$nl"}
+      hq=${he%"${he#?}"} he=${he#?}
+      hd=${he%"${he#?}"} he=${he#?}
+      hbody=
+      while IFS= read -r hl; do
+        [ "$hd" = - ] && hl=${hl#"${hl%%[!\ \	]*}"}
+        [ "$hl" = "$he" ] && break
+        [ "$hq" = q ] || hbody=$hbody$hl$nl
+      done
+      case $hq$hbody in u*'$('* | u*'`'*) (check_cmd "$hbody") || exit $? ;; esac
     done
-    case $hq$hbody in u*'$('* | u*'`'*) (check_cmd "$hbody") || exit $? ;; esac
-  done
+    while IFS= read -r hl; do hrest=$hrest$hl$nl; done
+  } <<PUSH_GUARD_TEXT || exit 3
+$cs
+PUSH_GUARD_TEXT
+  cs=${hrest%"$nl"}
 }
 # sub_start MODE: a substitution or a group begins; MODE (o, d, or O, D for backticks) is the mode to
 # return to, and the command so far is set aside. MODE a is arithmetic, $(( or ((: back to o at its
