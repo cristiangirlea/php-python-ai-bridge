@@ -79,9 +79,9 @@ The downloaded cache remains for reuse; it is not included in Git.
 
 ## Use from PHP
 
-See the [integration guide](docs/integration.md) for Composer evaluation setup, manual Symfony/Laravel configuration, application job ownership and failure handling. Dedicated framework adapters are not implemented yet.
+See the [integration guide](docs/integration.md) for Composer setup, manual Symfony/Laravel configuration, application job ownership and failure handling. Dedicated framework adapters are not implemented yet.
 
-This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. There is no tagged release or Packagist publication yet; use a Composer path/VCS repository during evaluation. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
+This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. The first tagged release is `v0.1.0` ([changelog](CHANGELOG.md)): install it with `composer require cristiangirlea/php-python-ai-bridge:^0.1` once the package is on Packagist, or from a VCS repository pinned to the tag until then, as the integration guide shows. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
 
 ```php
 use PhpAiBridge\Client;
@@ -121,11 +121,15 @@ docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 # PHP syntax validation inside the container:
 docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
   'find src examples tests/php -name "*.php" -print0 | xargs -0 -n1 php -l'
+
+# Consumer install, offline: composer validate --strict, then a throwaway project
+# installs the library from a path repository and autoloads the client:
+docker compose -f docker/compose.yaml run --rm --no-deps composer-install
 ```
 
 Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only in the test service with `BRIDGE_TEST_TASKS=1`.
 
-CI runs deterministic tests for pushes to main and for pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. Every job runs on GitHub's hosted runners (`ubuntu-latest`), because the repository is public: GitHub does not meter Actions minutes for public repositories, and a fork's pull request runs its own code on a disposable runner of GitHub's, not on a machine of the maintainer's; see [the runner notes](docs/testing.md#ci-runners) and [security](docs/security.md). The stable `deterministic` check succeeds only if every PHP matrix job and the offline MCP server suite succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
+CI runs deterministic tests for pushes to main and for pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. Every job runs on GitHub's hosted runners (`ubuntu-latest`), because the repository is public: GitHub does not meter Actions minutes for public repositories, and a fork's pull request runs its own code on a disposable runner of GitHub's, not on a machine of the maintainer's; see [the runner notes](docs/testing.md#ci-runners) and [security](docs/security.md). The stable `deterministic` check succeeds only if every PHP matrix job and the MCP server job, which runs the offline MCP suite and the consumer install, succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
 
 ## Important limits
 
