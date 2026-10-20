@@ -93,6 +93,50 @@ echo $documents[$result->rankings[0]['index']];
 
 Handle `InvalidArgumentException` for local validation and `PhpAiBridge\BridgeException` for transport/protocol errors. Remote task failure is a terminal job status, not necessarily an exception from `get()` or `wait()`.
 
+## Through a PSR-18 HTTP client
+
+By default the client talks to the service through `ext-curl`. An application that already routes its HTTP through a [PSR-18](https://www.php-fig.org/psr/psr-18/) client can pass `PhpAiBridge\Psr18Transport` as the constructor's last argument instead. It takes the PSR-18 client, a PSR-17 request factory and a PSR-17 stream factory. The library does not require the PSR packages (`composer.json` only suggests `psr/http-client` and `psr/http-factory`); the HTTP client you install brings them.
+
+Configure that client for the bridge before handing it over:
+
+- **Redirects off.** The service never redirects. A client that follows a redirect would send the service token to wherever the `Location` header points, before the bridge sees anything. `Psr18Transport` refuses any 3xx response it receives as `invalid_response`, but it cannot see a redirect the client has already followed.
+- **No proxy from the environment** for the service's private address, as the cURL path does.
+- **The client's own timeout applies.** PSR-18 has no per-request timeout, so `requestTimeoutMs` and the per-poll budget `wait()` computes are not enforced by this transport. Set the client's timeout at or below `requestTimeoutMs`. `wait()` still checks its deadline between polls and reports a transport failure past that deadline as `wait_timeout`, but one poll can outlast the wait budget by up to the client's timeout.
+- **The 262144-byte response cap bounds what the bridge reads**, not what the client buffers: `Psr18Transport` reads at most one byte past the cap from the body stream and refuses a larger body as `invalid_response`. A client that buffers the whole response first (as Guzzle does for `sendRequest()`) has already received it.
+
+A client exception (`Psr\Http\Client\ClientExceptionInterface`) or a failure while reading the body becomes `BridgeException` `transport_error`, without the client's message. As with cURL, a failed submission's outcome is unknown and must not be retried automatically. Other statuses, the content type and the JSON are checked by `Client` exactly as on the cURL path.
+
+In both examples `$url` and `$token` are read from the environment as in the plain PHP example above. Symfony HttpClient's `Psr18Client` is the PSR-18 client and both PSR-17 factories at once. It needs a PSR-7 implementation such as `nyholm/psr7`:
+
+```php
+use PhpAiBridge\Client;
+use PhpAiBridge\Psr18Transport;
+use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Component\HttpClient\Psr18Client;
+
+$http = new Psr18Client(HttpClient::create([
+    'max_redirects' => 0,
+    'no_proxy' => '*',
+    'timeout' => 2.0,
+    'max_duration' => 2.0,
+]));
+$client = new Client($url, $token, 2000, new Psr18Transport($http, $http, $http));
+```
+
+Guzzle 7's client implements PSR-18 itself, and `guzzlehttp/psr7` ships the PSR-17 factories:
+
+```php
+use GuzzleHttp\Psr7\HttpFactory;
+use PhpAiBridge\Client;
+use PhpAiBridge\Psr18Transport;
+
+$http = new \GuzzleHttp\Client(['allow_redirects' => false, 'proxy' => '', 'connect_timeout' => 1.0, 'timeout' => 2.0]);
+$factory = new HttpFactory();
+$client = new Client($url, $token, 2000, new Psr18Transport($http, $factory, $factory));
+```
+
+The repository's tests drive `Psr18Transport` through small in-repo fakes of the PSR interfaces (see [testing](testing.md)); neither Symfony HttpClient nor Guzzle is installed or run by them, so treat these two snippets as configuration recipes.
+
 ## Symfony: manual service registration
 
 Add this service to your existing `config/services.yaml`:

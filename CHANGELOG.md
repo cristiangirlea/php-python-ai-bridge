@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- `PhpAiBridge\Transport`, with `CurlTransport` as the client's default and `Psr18Transport` for an application's PSR-18 HTTP client (Symfony HttpClient, Guzzle and others): `Client` takes one as an optional last constructor argument. `psr/http-client` and `psr/http-factory` are suggested, not required.
+
 ### Changed
 
 - The dist archive now ships only `src/`, `composer.json`, `LICENSE`, `README.md`, `CHANGELOG.md` and `docs/`.

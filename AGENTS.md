@@ -41,8 +41,9 @@ docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profil
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher   # network once: wheels into .cache/
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 docker compose -f docker/compose.yaml run --rm --no-deps composer-install   # offline consumer install of the library
-docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher   # network once: PHPStan into .cache/
+docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher   # network once: PHPStan and the PSR interfaces into .cache/
 docker compose -f docker/compose.yaml run --rm --no-deps php-analysis   # offline PHPStan at level max
+docker compose -f docker/compose.yaml run --rm --no-deps php-psr18-tests   # offline PSR-18 transport checks
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev down
 ```
 

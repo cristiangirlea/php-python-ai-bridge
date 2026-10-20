@@ -115,7 +115,8 @@ services:
         composer install --no-interaction
         php /work/tests/php/consumer/check.php
 
-  # PHPStan from composer.lock into .cache, the only PHP step with network; php-analysis then runs it offline.
+  # The dev packages from composer.lock (PHPStan, the PSR interfaces) into .cache, the only PHP step with network;
+  # php-analysis and php-psr18-tests then use them offline.
   php-fetcher:
     <<: *limits
     image: composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac
@@ -146,6 +147,16 @@ services:
       - ..:/work:ro
       - ../.cache:/cache:ro
     command: [php, /cache/php-vendor/bin/phpstan, analyse, --no-progress, --memory-limit=512M, -c, phpstan.neon]
+
+  # The contract checks again with php-fetcher's vendor directory on the include path, so the PSR-18 ones run too.
+  php-psr18-tests:
+    <<: *php
+    profiles: [php-dev]
+    network_mode: none
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache:ro
+    command: [php, -d, include_path=/cache/php-vendor, tests/php/run.php]
 
   integration:
     <<: *python

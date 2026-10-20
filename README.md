@@ -80,6 +80,7 @@ The downloaded cache remains for reuse; it is not included in Git.
 ## Use from PHP
 
 See the [integration guide](docs/integration.md) for Composer setup, manual Symfony/Laravel configuration, application job ownership and failure handling. Dedicated framework adapters are not implemented yet.
+The client sends through `ext-curl` by default; an application with a PSR-18 client such as Symfony HttpClient or Guzzle can pass `PhpAiBridge\Psr18Transport` instead, configured as the [integration guide](docs/integration.md#through-a-psr-18-http-client) shows.
 
 This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. The first tagged release is `v0.1.0` ([changelog](CHANGELOG.md)): install it with `composer require cristiangirlea/php-python-ai-bridge:^0.1` once the package is on Packagist, or from a VCS repository pinned to the tag until then, as the integration guide shows. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
 

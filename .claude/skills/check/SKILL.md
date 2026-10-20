@@ -26,6 +26,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 docker compose -f docker/compose.yaml run --rm --no-deps composer-install
 docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps php-analysis
+docker compose -f docker/compose.yaml run --rm --no-deps php-psr18-tests
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev down
 ```
 
@@ -35,9 +36,11 @@ repository in a git worktree whose git directory is outside the mount) with Pack
 `vendor/`, and autoloads `PhpAiBridge\Client`; the archive is built from the committed `HEAD`, so an uncommitted change
 is not what it tests, and it needs no network and no cache.
 
-`php-fetcher` installs the PHPStan that `composer.lock` pins into `.cache/php-vendor`, with network, and
-`php-analysis` runs it offline at level max over `src`, `examples` and `tests/php` with `phpstan.neon`;
-`phpstan-baseline.neon` holds the findings left on purpose, each with its reason.
+`php-fetcher` installs the PHPStan and the PSR-7/17/18 interfaces that `composer.lock` pins into
+`.cache/php-vendor`, with network, and `php-analysis` runs PHPStan offline at level max over `src`, `examples`
+and `tests/php` with `phpstan.neon`; `phpstan-baseline.neon` holds the findings left on purpose, each with its
+reason. `php-psr18-tests` reruns `tests/php/run.php` with that vendor directory on the include path, so the
+PSR-18 transport checks that `php-tests` skips (with one printed line) run too, offline.
 
 The `python-tests` step also runs both hooks' tests (`tests/python/test_repo_rules_hook.py` and
 `tests/python/test_push_guard_hook.py`, which runs `.claude/hooks/push-guard.test.sh`); the containers
