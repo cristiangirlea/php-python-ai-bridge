@@ -131,10 +131,9 @@ class JobStore:
         self._backoff_until = 0.0  # no child is started before this time
         self._lock = threading.RLock()
         self._stopping = threading.Event()
-        with self._lock:
-            # A child that cannot start now is tried again once the backoff ends; a job that finds no child up
-            # meanwhile fails as worker_start_failed, so the service still answers.
-            self._replenish()
+        # A child that cannot start now is tried again once the backoff ends; a job that finds no child up
+        # meanwhile fails as worker_start_failed, so the service still answers.
+        self._replenish()
         self._thread = threading.Thread(target=self._coordinate, daemon=True)
         self._thread.start()
 
@@ -199,7 +198,8 @@ class JobStore:
         self._finish(job, status, code=code)
 
     def _start_worker(self):
-        """A fresh child, or None when the system refuses one; nothing allocated is leaked either way."""
+        """A fresh child, or None when the system refuses one; nothing allocated is leaked either way. Runs
+        without the lock, since creating a process takes milliseconds on Linux and tens of them on Windows."""
         parent = child = process = None
         try:
             parent, child = self._context.Pipe()
@@ -213,7 +213,6 @@ class JobStore:
                         resource.close()
                     except (OSError, ValueError):
                         pass
-            self._start_failed()
             return None
         # The parent keeps no copy of the child's end, so a dead child reads as end-of-file, not a hang.
         child.close()
@@ -225,17 +224,45 @@ class JobStore:
         self._backoff_until = time.monotonic() + BACKOFF_SECONDS
         if not self._pool:
             for job in self._jobs.values():
-                if job["status"] == "queued":
+                if job["status"] == "queued" and job["id"] not in self._active:
                     self._finish(job, "failed", code="worker_start_failed")
 
     def _replenish(self):
-        """Fill the pool up to the concurrency limit; True when it is full."""
-        while len(self._pool) < self.settings.concurrency and time.monotonic() >= self._backoff_until:
+        """Fill the pool up to the concurrency limit, deciding and adding under the lock and starting without it.
+        Only the coordinator calls it once the store is built, so no two starts race for the same place."""
+        while True:
+            with self._lock:
+                if (self._stopping.is_set() or len(self._pool) >= self.settings.concurrency
+                        or time.monotonic() < self._backoff_until):
+                    return
             worker = self._start_worker()
-            if worker is None:
-                return False
-            self._pool.append(worker)
-        return True
+            with self._lock:
+                if worker is None:
+                    self._start_failed()
+                    return
+                if not self._stopping.is_set():
+                    self._pool.append(worker)
+                    continue
+            # close() has drained the pool meanwhile, so this child is stopped here.
+            self._discard(worker)
+            return
+
+    @staticmethod
+    def _discard(worker):
+        """Stop a child that never joined the pool."""
+        try:
+            worker.connection.close()
+        except (OSError, ValueError):
+            pass
+        worker.process.terminate()
+        worker.process.join(GRACE_SECONDS)
+        if worker.process.is_alive():
+            worker.process.kill()
+            worker.process.join(GRACE_SECONDS)
+        try:
+            worker.process.close()
+        except ValueError:
+            pass
 
     def _retire(self, worker, stop=False, died=False):
         """Take a child out of service for good. With stop, it is asked to exit by itself, because it is idle and
@@ -274,19 +301,10 @@ class JobStore:
                 self._finish(job, "failed", code="worker_crashed")
 
     def _assign(self, job):
-        """Send a queued job to an idle child that is ready for one. When none is and the pool has room, a child
-        is started; the job then waits for a child to be ready, as it waits for one to be free."""
+        """Send a queued job to an idle child that is ready for one; otherwise it waits for one, which the
+        coordinator starts outside the lock when the pool has room."""
         worker = next((candidate for candidate in self._pool if candidate.ready and candidate.job_id is None), None)
         if worker is None:
-            if len(self._pool) >= self.settings.concurrency:
-                return
-            if time.monotonic() < self._backoff_until:
-                return  # starts are failing; the next attempt comes when the backoff ends
-            worker = self._start_worker()
-            if worker is None:
-                self._finish(job, "failed", code="worker_start_failed")
-                return
-            self._pool.append(worker)
             return
         worker.job_id = job["id"]
         worker.served += 1
@@ -317,9 +335,12 @@ class JobStore:
                         self._abort(job, "timed_out", code="deadline_exceeded")
                     elif job["status"] == "queued" and job["id"] not in self._active:
                         self._assign(job)
-                self._replenish()
                 retiring = list(self._retiring)
-            # Nothing that can wait on a process happens under the lock: a GET never waits for a child to die.
+            # Nothing that can wait on a process happens under the lock: a GET never waits for a child to start
+            # or to die.
+            self._replenish()
+            if self._stopping.is_set():
+                return  # close() reaps from here on; reaping too would touch processes it has closed
             self._reap(retiring)
 
     def _drain(self, worker):
@@ -397,5 +418,7 @@ class JobStore:
                 worker.process.close()
             except ValueError:
                 pass  # still exiting; a daemon, so the interpreter takes it down with itself
+        # A coordinator still inside a start only has that child left to stop.
+        self._thread.join()
         with self._lock:
             self._retiring.clear()
