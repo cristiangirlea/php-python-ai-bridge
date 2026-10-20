@@ -299,6 +299,8 @@ class JobStore:
         parent = child = process = None
         try:
             parent, child = self._context.Pipe()
+            # numpy's OpenBLAS starts a thread per visible CPU, not per CPU of quota, and all count towards pids_limit.
+            os.environ.update(RAYON_NUM_THREADS="1", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
             process = self._context.Process(
                 target=_serve, args=(child, self.settings.backend, self.settings.model_dir), daemon=True)
             process.start()

@@ -58,6 +58,16 @@ CASES = [
                "maria.lopez@example.com or call +44 20 7946 0958. " * 20)[:2000], "entities": ["PER", "ORG", "LOC"]},
      "rules plus windows of 512"),
 ]
+
+
+def cases() -> list:
+    # worst-last loads every model before the widest batch, so the child's memory peak holds them all at once.
+    order = os.environ.get("BENCH_ORDER", "")
+    if order not in ("", "worst-last"):
+        raise SystemExit("BENCH_ORDER must be empty or worst-last")
+    return [CASES[i] for i in (3, 4, 0, 1, 2)] if order else CASES
+
+
 # What the ONNX backend loads on a child's first job of each task; the lexical backend loads nothing.
 MODELS = {"rerank": "the cross-encoder", "embed": "the embedding model", "redact": "both NER models"}
 
@@ -113,7 +123,7 @@ def main() -> None:
         if reported != backend:
             raise SystemExit(f"{base} reports backend {reported!r}, expected {backend!r}")
         loaded = set()
-        for index, (label, task, payload, note) in enumerate(CASES):
+        for index, (label, task, payload, note) in enumerate(cases()):
             # One job of the case first: the backend's very first job is the cold row, and a first job that loads
             # a model is named in its row's note. Then the warm jobs the row measures.
             first = run_once(base, task, payload)
