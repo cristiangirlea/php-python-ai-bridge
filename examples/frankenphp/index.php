@@ -17,7 +17,9 @@ $handler = static function () use ($client, &$handled): void {
     header('X-Demo-Worker-Requests: ' . $handled);
     try {
         $method = $_SERVER['REQUEST_METHOD'];
-        $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+        /** @var string $uri every web SAPI sets it */
+        $uri = $_SERVER['REQUEST_URI'];
+        $path = parse_url($uri, PHP_URL_PATH);
         if ($method === 'GET' && $path === '/healthz') {
             echo json_encode(['status' => 'ok']);
             return;

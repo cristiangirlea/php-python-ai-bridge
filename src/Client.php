@@ -37,6 +37,7 @@ final class Client
         $this->baseUrl = rtrim($baseUrl, '/');
     }
 
+    /** @param array<mixed> $input */
     public function submit(string $task, array $input, int $timeoutMs = 30000): Job
     {
         if ($task === '' || strlen($task) > 128 || $timeoutMs < 100 || $timeoutMs > 300000) {
@@ -51,7 +52,11 @@ final class Client
         return $job;
     }
 
-    /** A null top_k returns every document ranked; the worker enforces the same limits. */
+    /**
+     * A null top_k returns every document ranked; the worker enforces the same limits.
+     *
+     * @param array<mixed> $documents
+     */
     public function submitRerank(string $query, array $documents, int $timeoutMs = 30000, ?int $topK = null): Job
     {
         if (trim($query) === '' || !array_is_list($documents) || count($documents) < 1 || count($documents) > self::MAX_DOCUMENTS) {
@@ -70,7 +75,11 @@ final class Client
         return $this->submit('rerank', $input, $timeoutMs);
     }
 
-    /** Returns one unit-length vector per text; the caller owns any index built from them. */
+    /**
+     * Returns one unit-length vector per text; the caller owns any index built from them.
+     *
+     * @param array<mixed> $texts
+     */
     public function submitEmbed(array $texts, int $timeoutMs = 30000): Job
     {
         if (!array_is_list($texts) || count($texts) < 1 || count($texts) > self::MAX_TEXTS) {
@@ -82,7 +91,11 @@ final class Client
         return $this->submit('embed', ['texts' => $texts], $timeoutMs);
     }
 
-    /** Rules for structured identifiers run on every backend; entities and minScore only shape the optional model pass. */
+    /**
+     * Rules for structured identifiers run on every backend; entities and minScore only shape the optional model pass.
+     *
+     * @param array<mixed> $entities
+     */
     public function submitRedact(string $text, array $entities = ['PER'], float $minScore = 0.85, int $timeoutMs = 30000): Job
     {
         if (trim($text) === '' || self::codePoints($text) > self::MAX_TEXT_CHARACTERS) {
@@ -147,6 +160,8 @@ final class Client
     /**
      * Counted in bytes as sent; the worker counts characters. Escaped quotes and backslashes
      * can still push an accepted request over the transport limit checked in submit().
+     *
+     * @param array<mixed> $strings
      */
     private static function textBytes(array $strings, string $noun): int
     {
@@ -167,6 +182,10 @@ final class Client
         }
     }
 
+    /**
+     * @param non-empty-string $method
+     * @param array<string, mixed>|null $body
+     */
     private function jobResponse(string $method, string $path, string $id, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): Job
     {
         $job = Job::fromArray($this->request($method, $path, $body, $timeoutMs, $waitDeadline));
@@ -176,6 +195,11 @@ final class Client
         return $job;
     }
 
+    /**
+     * @param non-empty-string $method
+     * @param array<string, mixed>|null $body
+     * @return array<mixed>
+     */
     private function request(string $method, string $path, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): array
     {
         // Raw UTF-8 keeps the encoded size close to the byte budget; the worker decodes UTF-8 directly.
