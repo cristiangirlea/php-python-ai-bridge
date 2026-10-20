@@ -123,7 +123,8 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
   'find src examples tests/php -name "*.php" -print0 | xargs -0 -n1 php -l'
 
 # Consumer install, offline: composer validate --strict, then a throwaway project
-# installs the library from a path repository and autoloads the client:
+# installs the git archive from an artifact repository (or a path repository in a worktree),
+# checks what shipped in vendor/, and autoloads the client:
 docker compose -f docker/compose.yaml run --rm --no-deps composer-install
 ```
 

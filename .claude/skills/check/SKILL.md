@@ -28,8 +28,10 @@ docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch down
 ```
 
 The `composer-install` step is the consumer-install check: `composer validate --strict` on the library, then a
-throwaway consumer project in tmpfs installs it from a path repository with Packagist disabled and autoloads
-`PhpAiBridge\Client`; it needs no network and no cache.
+throwaway consumer project in tmpfs installs its `git archive` zip from an `artifact` repository (or from a path
+repository in a git worktree whose git directory is outside the mount) with Packagist disabled, checks what shipped in
+`vendor/`, and autoloads `PhpAiBridge\Client`; the archive is built from the committed `HEAD`, so an uncommitted change
+is not what it tests, and it needs no network and no cache.
 
 The `python-tests` step also runs both hooks' tests (`tests/python/test_repo_rules_hook.py` and
 `tests/python/test_push_guard_hook.py`, which runs `.claude/hooks/push-guard.test.sh`); the containers
