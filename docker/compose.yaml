@@ -267,6 +267,7 @@ services:
       <<: *python-env
       BENCH_TARGETS: onnx=http://model-worker:8090,lexical=http://worker:8090
       BENCH_RUNS: "5"
+      BENCH_ORDER: ${BENCH_ORDER:-}
       BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
       BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
     command: [python, scripts/benchmark.py]

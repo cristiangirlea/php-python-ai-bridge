@@ -70,7 +70,7 @@ The original prototype was not entirely developed with TDD. Review corrections u
 - No measured line/branch coverage percentage, formal security audit or production certification.
 - No full Symfony kernel or Laravel application/Octane integration test, including configuration caching and multi-user authorization.
 - No Packagist release yet, so no install from Packagist has been exercised, nor one from the `v0.1.0` tag through a VCS repository: the consumer Composer-install check installs the library's `git archive` zip from an `artifact` repository inside its container, offline (falling back to a path repository in a git worktree), and the repository's own examples use a small local autoloader.
-- No sustained load/soak benchmark, throughput claim, p95/p99 latency, measured memory-per-job limit or CPU cost per inference; the only timing figures are the medians of sequential jobs below, warm after one cold first job. The peak memory of a child holding all four ONNX models while running the worst-case rerank batch is not measured: the benchmark loads the other models after that batch, and the model worker's 1536 MiB is a limit, which grows with `BRIDGE_CONCURRENCY` children each holding its own copies.
+- No sustained load/soak benchmark, throughput claim, p95/p99 latency, measured memory-per-job limit or CPU cost per inference; the only timing figures are the medians of sequential jobs below, warm after one cold first job. The peak of a child holding all four ONNX models during the worst-case rerank batch is measured once, on one machine, under [Measured model worker memory](#measured-model-worker-memory-informational); the model worker's 1536 MiB is a limit, which grows with `BRIDGE_CONCURRENCY` children each holding its own copies.
 - No representative ranking-quality evaluation (for example NDCG/MRR), multilingual accuracy evaluation, NER quality on real data or GPU benchmark; the NER figures below come from 48 invented sentences by the same author as the development set used to tune the redact task.
 - No repeated or semantic LLM evaluation. The one recorded run below is a single session per question per model on the demo worker, so it shows that the tools can be used, not a success rate or retrieval quality.
 - No verified native Windows/macOS service execution or ARM runtime; Docker tests target Linux amd64/Python 3.12.
@@ -106,6 +106,28 @@ Every model smoke run prints a fresh table to its job summary. To reproduce loca
 ```sh
 docker compose -f docker/compose.yaml up -d worker model-worker
 docker compose -f docker/compose.yaml run --rm --no-deps -T model-bench
+docker compose -f docker/compose.yaml --profile model down
+```
+
+## Measured model worker memory (informational)
+
+Measured 2026-10-20 UTC locally at `5d3ceb3` with this change's `BENCH_ORDER=worst-last`, on Windows 11 with Docker Desktop 29.8.2 (cgroup v2), CPU AMD Ryzen 9 9950X 16-Core Processor, with the compose limits: model-worker cpus=1, mem_limit=1536m, BRIDGE_CONCURRENCY=1, `onnx` backend. That order runs embed, redact with PER, ORG and LOC, the two smaller rerank cases and the worst rerank batch (32 documents of 6000 characters, every one at the 512-token limit) last, so the one child holds the embedding model, both NER models and the cross-encoder, with every arena ONNX Runtime has grown for them, when the widest batch runs. Each run starts from a recreated container. The container peak is the cgroup's `memory.peak`, read after the benchmark; the child's peak is its `VmHWM`; `docker stats --no-stream` was sampled throughout, and shows the usage during the worst batch.
+
+| Run | Container peak MiB | Child peak MiB | `docker stats` in the worst batch |
+| --- | --- | --- | --- |
+| worst-last, N=5 | 1464 | 1286 | 1.425 GiB |
+| worst-last, N=20 | 1460 | 1273 | 1.42 GiB, flat over the 20 batches |
+| default order, N=5 | 1446 | 1268 | not sampled in that batch |
+
+The container peak carries more than the child: the wheels the model worker installs into its `/deps` tmpfs are charged to the cgroup as shared memory (167 MiB), and the server and multiprocessing's resource tracker take another 45 MiB or so, so the idle container uses 222 MiB with the child at 29 MiB. On the worst-last run the child grew to 240 MiB with the embedding model, 776 MiB with both NER models and 822 MiB with the cross-encoder, and the worst batch added about 465 MiB of arena on top; in the default order the same batch, with only the cross-encoder loaded, took the child from 108 to 572 MiB. The arena does not shrink but did not grow over 20 repeated worst batches either. No run reached the limit: `memory.events` counted no `high`, `max` or `oom` event and swap stayed at zero, leaving 72 MiB, about 5 %, between the highest peak and 1536 MiB.
+
+Each child loads its own copies, so the limit's budget is about 180 MiB for the container itself plus up to 1290 MiB per child at this peak: 1536 MiB allows `BRIDGE_CONCURRENCY=1` on the `onnx` backend and no more, and two children would need at most about 2.7 GiB (an upper bound: the `/deps` libraries are charged once) before any margin. The limit in `docker/compose.yaml` stays as it is: it holds the configured concurrency with every model and the worst rerank batch together, and a higher concurrency must raise it with it. Only the benchmark's inputs were measured, so a wider embed or redact batch on top of these, or another CPU, may sit closer to the limit. To reproduce after acquiring the models, recreating the worker first so that the peak starts at zero (on cgroup v1 the file is `/sys/fs/cgroup/memory/memory.max_usage_in_bytes`). The fourth command prints the child's `VmHWM`: a child is a process whose command line runs multiprocessing's `spawn_main`, one per `BRIDGE_CONCURRENCY`; the others are the init, the server and the resource tracker:
+
+```sh
+docker compose -f docker/compose.yaml up -d --force-recreate worker model-worker
+docker compose -f docker/compose.yaml run --rm --no-deps -T -e BENCH_ORDER=worst-last model-bench
+docker exec "$(docker compose -f docker/compose.yaml ps -q model-worker)" cat /sys/fs/cgroup/memory.peak
+docker compose -f docker/compose.yaml exec model-worker sh -c 'for p in /proc/[0-9]*; do grep -q "spawn_mai[n]" $p/cmdline 2>/dev/null && grep -H VmHWM $p/status; done'
 docker compose -f docker/compose.yaml --profile model down
 ```
 
