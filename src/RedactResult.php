@@ -6,6 +6,7 @@ namespace PhpAiBridge;
 
 final readonly class RedactResult
 {
+    /** @param list<array{start: int, end: int, label: string, source: string, score: int|float}> $spans */
     private function __construct(public string $text, public array $spans, public string $model) {}
 
     /** Pass the original text so span offsets, counted in code points, can be checked against it. */
@@ -40,6 +41,8 @@ final readonly class RedactResult
             }
             $cursor = $end;
         }
-        return new self($result['text'], $result['spans'], $result['model']);
+        /** @var list<array{start: int, end: int, label: string, source: string, score: int|float}> $spans checked above */
+        $spans = $result['spans'];
+        return new self($result['text'], $spans, $result['model']);
     }
 }

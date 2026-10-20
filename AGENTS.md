@@ -37,11 +37,13 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml --profile test down
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model config
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher   # network once: wheels into .cache/
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 docker compose -f docker/compose.yaml run --rm --no-deps composer-install   # offline consumer install of the library
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch down
+docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher   # network once: PHPStan into .cache/
+docker compose -f docker/compose.yaml run --rm --no-deps php-analysis   # offline PHPStan at level max
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev down
 ```
 
 CI runs the PHP steps on each of PHP 8.2, 8.3, 8.4 and 8.5 with `BRIDGE_PHP_IMAGE` set to the matrix's

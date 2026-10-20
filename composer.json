@@ -4,6 +4,7 @@
   "type": "library",
   "license": "MIT",
   "require": {"php": ">=8.2 <8.6", "ext-curl": "*", "ext-json": "*"},
+  "require-dev": {"phpstan/phpstan": "2.3.1"},
   "autoload": {"psr-4": {"PhpAiBridge\\": "src/"}},
   "scripts": {"test": "php tests/php/run.php"}
 }

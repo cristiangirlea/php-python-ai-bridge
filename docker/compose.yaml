@@ -115,6 +115,38 @@ services:
         composer install --no-interaction
         php /work/tests/php/consumer/check.php
 
+  # PHPStan from composer.lock into .cache, the only PHP step with network; php-analysis then runs it offline.
+  php-fetcher:
+    <<: *limits
+    image: composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac
+    profiles: [php-dev]
+    network_mode: bridge
+    entrypoint: []
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache
+    environment:
+      COMPOSER_HOME: /tmp/composer
+      COMPOSER_VENDOR_DIR: /cache/php-vendor
+      COMPOSER_NO_INTERACTION: "1"
+    command: [composer, install, --no-interaction, --prefer-dist, --no-scripts, --no-plugins]
+
+  php-analysis:
+    <<: *limits
+    image: composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac
+    profiles: [php-dev]
+    network_mode: none
+    entrypoint: []
+    mem_limit: 768m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache:ro
+    command: [php, /cache/php-vendor/bin/phpstan, analyse, --no-progress, --memory-limit=512M, -c, phpstan.neon]
+
   integration:
     <<: *python
     profiles: [test]

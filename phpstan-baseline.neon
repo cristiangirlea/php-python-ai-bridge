@@ -1,0 +1,50 @@
+parameters:
+    ignoreErrors:
+        # parse_url() returns false only for an unparsable URI; handling it would change what the example answers.
+        -
+            message: '#^Parameter \#2 \$subject of function preg_match expects string, string\|false given\.$#'
+            identifier: argument.type
+            count: 1
+            path: examples/frankenphp/index.php
+
+        # The consumer's Composer autoloader exists only inside the composer-install container.
+        -
+            message: '#^Cannot call method findFile\(\) on mixed\.$#'
+            identifier: method.nonObject
+            count: 1
+            path: tests/php/consumer/check.php
+
+        # The check proves the installed copy's constant, which PHPStan can only read from src.
+        -
+            message: '#^Strict comparison using \!\=\= between 512 and 512 will always evaluate to false\.$#'
+            identifier: notIdentical.alwaysFalse
+            count: 1
+            path: tests/php/consumer/check.php
+
+        # The integration checks read the worker's JSON directly; a missing key fails them through the error handler.
+        -
+            message: '#^Cannot access offset ''marker'' on mixed\.$#'
+            identifier: offsetAccess.nonOffsetAccessible
+            count: 1
+            path: tests/php/integration.php
+
+        # As above, for the error code of a failed job.
+        -
+            message: '#^Offset ''code'' might not exist on array\<mixed\>\|null\.$#'
+            identifier: offsetAccess.notFound
+            count: 2
+            path: tests/php/integration.php
+
+        # As above, for a test task's echoed value.
+        -
+            message: '#^Offset ''value'' might not exist on array\<mixed\>\|null\.$#'
+            identifier: offsetAccess.notFound
+            count: 2
+            path: tests/php/integration.php
+
+        # array_map() over two arrays hands its callback mixed; EmbedResult has already checked every value is a number.
+        -
+            message: '#^Binary operation "\*" between mixed and mixed results in an error\.$#'
+            identifier: binaryOp.invalid
+            count: 1
+            path: tests/php/model.php

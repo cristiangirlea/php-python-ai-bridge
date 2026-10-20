@@ -6,6 +6,7 @@ namespace PhpAiBridge;
 
 final readonly class RerankResult
 {
+    /** @param list<array{index: int, score: int|float}> $rankings */
     private function __construct(public array $rankings, public string $model) {}
 
     /** Pass the top_k that was requested so the response is checked against it; null expects every document. */
@@ -43,6 +44,8 @@ final readonly class RerankResult
             $previousScore = $score;
             $previousIndex = $index;
         }
-        return new self($result['rankings'], $result['model']);
+        /** @var list<array{index: int, score: int|float}> $rankings checked above */
+        $rankings = $result['rankings'];
+        return new self($rankings, $result['model']);
     }
 }
