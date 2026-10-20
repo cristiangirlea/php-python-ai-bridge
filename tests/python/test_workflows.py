@@ -262,6 +262,13 @@ env:
         self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 2)
         self.assertEqual(text.count("BENCH_RUNNER:"), 2)
 
+    def test_dependabot_updates_github_actions_weekly(self):
+        text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        self.assertIn("package-ecosystem: github-actions\n", text)
+        self.assertIn("directory: /\n", text)
+        self.assertIn("schedule:\n      interval: weekly\n", text)
+        self.assertIn("commit-message:\n      prefix: ci\n", text)
+
 
 if __name__ == "__main__":
     unittest.main()

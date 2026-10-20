@@ -1,0 +1,9 @@
+# Keep the workflows' commit-pinned actions and version comments current through pull requests that still go through CI and review.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

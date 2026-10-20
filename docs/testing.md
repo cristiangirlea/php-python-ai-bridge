@@ -40,7 +40,7 @@ CI runs on GitHub's hosted runners, `ubuntu-latest` for every job, because the r
 
 Every job starts on a fresh runner with an empty image store and pulls `python:3.12-bookworm` and the FrankenPHP images, and the MCP job `composer:2`, from Docker Hub, which limits unauthenticated pulls per IP; GitHub's runners share address ranges, so a pull that fails with a rate-limit error is a rerun, not a regression. The model workflow keeps both model workers up, each allowed 1536 MiB with its wheels in tmpfs, beside FrankenPHP, the MCP server, the demo worker and one client, whose limits add up to about 5 GiB; a Docker daemon that reproduces that workflow locally needs about 6 GiB.
 
-CI checks the actual PHP minor before testing so a misconfigured image cannot silently test the default version four times. The stable required check `deterministic` depends on all four matrix jobs and on the MCP server job, which also runs the consumer install, and rejects any of them failed, cancelled or skipped. PHP contract/HTTP tests promote warnings and deprecations to exceptions.
+CI checks the actual PHP minor before testing so a misconfigured image cannot silently test the default version four times. The stable required check `deterministic` depends on all four matrix jobs and on the MCP server job, which also runs the consumer install, and rejects any of them failed, cancelled or skipped. PHP contract/HTTP tests promote warnings and deprecations to exceptions. Dependabot proposes action-pin bumps weekly through `.github/dependabot.yml`.
 
 ## What the tests establish
 
