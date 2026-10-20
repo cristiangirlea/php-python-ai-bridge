@@ -10,9 +10,12 @@
 /AGENTS.md export-ignore
 /CLAUDE.md export-ignore
 /CONTRIBUTING.md export-ignore
+/composer.lock export-ignore
 /docker export-ignore
 /examples export-ignore
 /mcp_server export-ignore
+/phpstan-baseline.neon export-ignore
+/phpstan.neon export-ignore
 /requirements-mcp.lock export-ignore
 /requirements-mcp.txt export-ignore
 /requirements-model.lock export-ignore
