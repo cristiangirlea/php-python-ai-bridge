@@ -30,8 +30,10 @@ docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profil
 ```
 
 The `composer-install` step is the consumer-install check: `composer validate --strict` on the library, then a
-throwaway consumer project in tmpfs installs it from a path repository with Packagist disabled and autoloads
-`PhpAiBridge\Client`; it needs no network and no cache.
+throwaway consumer project in tmpfs installs its `git archive` zip from an `artifact` repository (or from a path
+repository in a git worktree whose git directory is outside the mount) with Packagist disabled, checks what shipped in
+`vendor/`, and autoloads `PhpAiBridge\Client`; the archive is built from the committed `HEAD`, so an uncommitted change
+is not what it tests, and it needs no network and no cache.
 
 `php-fetcher` installs the PHPStan that `composer.lock` pins into `.cache/php-vendor`, with network, and
 `php-analysis` runs it offline at level max over `src`, `examples` and `tests/php` with `phpstan.neon`;
@@ -39,7 +41,8 @@ throwaway consumer project in tmpfs installs it from a path repository with Pack
 
 The `python-tests` step also runs both hooks' tests (`tests/python/test_repo_rules_hook.py` and
 `tests/python/test_push_guard_hook.py`, which runs `.claude/hooks/push-guard.test.sh`); the containers
-mount `/tmp` noexec, so the guard's killed-git case is skipped there and runs only on a host.
+mount `/tmp` noexec, so the guard's killed-git case is skipped there, with its skip line printed in the
+`python-tests` output, and runs only on a host.
 
 This runs the PHP steps on compose's default image, PHP 8.5. CI runs them on 8.2, 8.3, 8.4 and 8.5
 and first checks that the image's PHP minor is the one the matrix expects; to reproduce another branch,

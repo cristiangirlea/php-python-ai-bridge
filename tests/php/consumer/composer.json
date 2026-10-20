@@ -1,6 +1,6 @@
 {
     "repositories": [
-        {"type": "path", "url": "/work", "options": {"symlink": true}},
+        {"type": "artifact", "url": "/tmp/archive"},
         {"packagist.org": false}
     ],
     "require": {

@@ -19,20 +19,23 @@ RUNS_ON = "runs-on: ubuntu-latest"
 USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 # Every spelling of the key YAML accepts (quoted, a space before the colon, a flow-style step), so that a line
 # USES cannot read is counted, not passed over.
-ANY_USES = re.compile(r"""^\s*(?:-\s+)?(?:\{\s*)?['"]?uses['"]?\s*:""")
+ANY_USES = re.compile(r"""^\s*(?:-\s+)?(?:\{.*)?['"]?uses['"]?\s*:""")
 # `owner/repo@<commit>`, and the version that commit is, as a comment, for the human reading the workflow.
 PINNED = re.compile(r"""^['"]?[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+@[0-9a-f]{40}['"]?(?: +# v\d+\.\d+\.\d+)?$""")
 
 
-def jobs(text: str) -> dict:
+def jobs(text: str, workflow: str = "<workflow>") -> dict:
     """Each job's name and its lines.
 
     A job's header is its key two spaces in, quoted or not, with nothing after the colon but a comment. A header
     this does not recognise drops the lines of a first job, or adds a later job's lines to the job before it,
     which is why the number of jobs read is checked against the `runs-on:` lines of the file.
     """
+    parts = re.split(r"^jobs:[ \t]*(?:#.*)?$", text, maxsplit=1, flags=re.MULTILINE)
+    if len(parts) < 2:
+        raise AssertionError(f"{workflow}: missing jobs: header")
     found, name = {}, None
-    for line in text.split("\njobs:\n", 1)[1].splitlines():
+    for line in parts[1].splitlines():
         header = re.match(r"""^  (['"]?)([A-Za-z0-9_-]+)\1:\s*(?:#.*)?$""", line)
         if header:
             name = header.group(2)
@@ -99,7 +102,7 @@ class WorkflowTests(unittest.TestCase):
     def test_the_workflows_are_found(self):
         self.assertEqual([path.name for path in WORKFLOWS], ["model-smoke.yml", "tests.yml"])
         for path in WORKFLOWS:
-            self.assertTrue(jobs(path.read_text(encoding="utf-8")), path.name)
+            self.assertTrue(jobs(path.read_text(encoding="utf-8"), path.name), path.name)
 
     def test_the_job_reader_sees_every_job(self):
         # Every job of these workflows runs on a runner, so it has exactly one `runs-on:` line: a job whose header
@@ -108,7 +111,7 @@ class WorkflowTests(unittest.TestCase):
         for path in WORKFLOWS:
             text = path.read_text(encoding="utf-8")
             with self.subTest(workflow=path.name):
-                self.assertEqual(len(jobs(text)), runs_on_lines(text))
+                self.assertEqual(len(jobs(text, path.name)), runs_on_lines(text))
 
     def test_the_job_reader_on_the_headers_it_must_tell_apart(self):
         text = """name: x
@@ -140,10 +143,19 @@ env:
         self.assertEqual(found["gate"][:2], ["needs: [php, mcp]", "runs-on: ubuntu-latest"])
         self.assertEqual(runs_on_lines(text), 6)
         self.assertNotEqual(len(found), runs_on_lines(text))
+        commented = """name: x
+on: push
+jobs:  # the jobs
+  one:
+    runs-on: ubuntu-latest
+"""
+        self.assertEqual(jobs(commented), {"one": ["runs-on: ubuntu-latest"]})
+        with self.assertRaisesRegex(AssertionError, r"missing\.yml.*jobs:"):
+            jobs("name: x\non: push\n", "missing.yml")
 
     def test_every_job_runs_on_github_hosted_ubuntu(self):
         for path in WORKFLOWS:
-            for name, lines in jobs(path.read_text(encoding="utf-8")).items():
+            for name, lines in jobs(path.read_text(encoding="utf-8"), path.name).items():
                 with self.subTest(workflow=path.name, job=name):
                     self.assertEqual([line for line in lines if line.startswith("runs-on:")], [RUNS_ON])
 
@@ -166,14 +178,14 @@ env:
         # GitHub's runner images ship the Docker Compose plugin; the lab-only install action is gone with the lab.
         # What matters is that no step runs one, not whether a directory exists in a checkout.
         for path in WORKFLOWS:
-            for name, lines in jobs(path.read_text(encoding="utf-8")).items():
+            for name, lines in jobs(path.read_text(encoding="utf-8"), path.name).items():
                 with self.subTest(workflow=path.name, job=name):
                     # A step's `uses:` may follow its `name:` (no dash once stripped) and may quote the path.
                     self.assertEqual([line for line in lines if re.match(r"""(?:-\s+)?uses:\s*['"]?\./""", line)], [])
 
     def test_every_job_that_runs_compose_checks_the_repository_out_first(self):
         for path in WORKFLOWS:
-            for name, lines in jobs(path.read_text(encoding="utf-8")).items():
+            for name, lines in jobs(path.read_text(encoding="utf-8"), path.name).items():
                 commands = [i for i, line in enumerate(lines) if "docker compose" in line and not line.startswith("#")]
                 if not commands:
                     continue
@@ -248,7 +260,20 @@ env:
         self.assertEqual(inputs(found[2]), ["persist-credentials: true"])
         self.assertEqual(inputs(found[3]), [])
         self.assertEqual(len([line for line in text.splitlines() if ANY_USES.match(line)]), 3)
-        for line in ("- { uses: actions/checkout@v4 }", '- "uses": actions/checkout@v4', "uses : actions/checkout@v4"):
+        flow = """jobs:
+  one:
+    runs-on: ubuntu-latest
+    steps:
+      - { name: x, uses: actions/checkout@v4 }
+"""
+        self.assertEqual([line for line in flow.splitlines() if USES.match(line)], [])
+        self.assertEqual(len([line for line in flow.splitlines() if ANY_USES.match(line)]), 1)
+        for line in (
+            "- { uses: actions/checkout@v4 }",
+            "- { name: x, uses: actions/checkout@v4 }",
+            '- "uses": actions/checkout@v4',
+            "uses : actions/checkout@v4",
+        ):
             self.assertTrue(ANY_USES.match(line), line)
             self.assertIsNone(USES.match(line), line)
 
@@ -261,6 +286,13 @@ env:
         text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
         self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 2)
         self.assertEqual(text.count("BENCH_RUNNER:"), 2)
+
+    def test_dependabot_updates_github_actions_weekly(self):
+        text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        self.assertIn("package-ecosystem: github-actions\n", text)
+        self.assertIn("directory: /\n", text)
+        self.assertIn("schedule:\n      interval: weekly\n", text)
+        self.assertIn("commit-message:\n      prefix: ci\n", text)
 
 
 if __name__ == "__main__":
