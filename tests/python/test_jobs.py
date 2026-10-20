@@ -1202,6 +1202,19 @@ class WarmPoolTests(unittest.TestCase):
             self.assertIn("BRIDGE_TOKEN", os.environ)
         self.assertFalse(report["token_in_environment"])
 
+    @unittest.skipUnless(os.path.exists("/proc/self/environ"), "needs /proc to read a child's environment block")
+    def test_a_child_inherits_one_thread_pins(self):
+        # The pools size themselves when their library loads, so only the block the child starts with counts;
+        # an operator's larger value is overridden too.
+        self.store.close()
+        with patch.dict(os.environ, {"OMP_NUM_THREADS": "24", "OPENBLAS_NUM_THREADS": "24", "RAYON_NUM_THREADS": "24"}):
+            self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+            pid = self.inspect()["pid"]
+            block = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        # Only these three are compared, so a failure never prints the rest of the block.
+        pins = [entry for entry in block if entry.startswith((b"OMP_NUM_THREADS=", b"OPENBLAS_NUM_THREADS=", b"RAYON_NUM_THREADS="))]
+        self.assertEqual(sorted(pins), [b"OMP_NUM_THREADS=1", b"OPENBLAS_NUM_THREADS=1", b"RAYON_NUM_THREADS=1"])
+
     @unittest.skipIf(os.name == "nt", "os.kill cannot deliver SIGINT to a process on Windows")
     def test_a_child_ignores_sigint_idle_and_running(self):
         pid = self.inspect()["pid"]
