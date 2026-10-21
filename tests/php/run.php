@@ -85,12 +85,18 @@ rejects(fn () => $client->submitRedact('x', [1]), InvalidArgumentException::clas
 rejects(fn () => $client->submitRedact('x', minScore: 1.5), InvalidArgumentException::class);
 rejects(fn () => $client->submitRedact('x', minScore: -0.1), InvalidArgumentException::class);
 rejects(fn () => $client->submitRedact('x', minScore: NAN), InvalidArgumentException::class);
+foreach (['', str_repeat('a', 129), 'has space', "line\nbreak", "\t", "\x7f", 'café'] as $badKey) {
+    rejects(fn () => $client->submit('rerank', ['query' => 'x', 'documents' => ['x']], 30000, $badKey), InvalidArgumentException::class);
+    rejects(fn () => $client->submitRerank('x', ['x'], idempotencyKey: $badKey), InvalidArgumentException::class);
+    rejects(fn () => $client->submitEmbed(['x'], idempotencyKey: $badKey), InvalidArgumentException::class);
+    rejects(fn () => $client->submitRedact('x', idempotencyKey: $badKey), InvalidArgumentException::class);
+}
 check(Client::codePoints('café: x') === 7 && Client::codePoints('') === 0, 'code points are counted without mbstring');
 foreach ([fn () => $unreachable->submitRerank('x', array_fill(0, 512, 'doc')),
-          fn () => $unreachable->submitRerank('x', ['a', 'b'], topK: 2),
-          fn () => $unreachable->submitEmbed(array_fill(0, 32, 'text')),
+          fn () => $unreachable->submitRerank('x', ['a', 'b'], topK: 2, idempotencyKey: '!'),
+          fn () => $unreachable->submitEmbed(array_fill(0, 32, 'text'), idempotencyKey: str_repeat('~', 128)),
           // 8192 code points of two bytes each is the largest accepted text.
-          fn () => $unreachable->submitRedact(str_repeat('é', 8192), ['PER', 'ORG', 'LOC'], 0.5)] as $accepted) {
+          fn () => $unreachable->submitRedact(str_repeat('é', 8192), ['PER', 'ORG', 'LOC'], 0.5, idempotencyKey: 'key-1')] as $accepted) {
     try {
         $accepted();
         throw new RuntimeException('Expected transport failure');
@@ -234,5 +240,54 @@ try {
     proc_terminate($peer);
     proc_close($peer);
 }
+// A submission response with a non-queued status is rejected normally, but accepted when an idempotency key was sent.
+$serverCode = <<<'PHP'
+$server = stream_socket_server('tcp://127.0.0.1:0');
+echo stream_socket_get_name($server, false) . "\n";
+fflush(STDOUT);
+for ($i = 0; $i < 4; ++$i) {
+    $conn = stream_socket_accept($server, 5);
+    $raw = '';
+    while (!str_contains($raw, "\r\n\r\n")) {
+        $raw .= (string) fread($conn, 4096);
+    }
+    [$headers, $rest] = explode("\r\n\r\n", $raw, 2);
+    preg_match('/Content-Length: (\d+)/i', $headers, $m);
+    while (strlen($rest) < (int) $m[1]) {
+        $rest .= (string) fread($conn, 4096);
+    }
+    $req = json_decode($rest, true);
+    $reply = json_encode([
+        'id' => str_repeat('a', 32), 'task' => 'rerank', 'status' => 'succeeded',
+        'result' => ['model' => $req['idempotency_key'] ?? 'none', 'rankings' => [['index' => 0, 'score' => 1.0]]],
+        'error' => null, 'progress' => ['completed' => 1, 'total' => 1], 'timeout_ms' => 30000,
+    ]);
+    fwrite($conn, "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: " . strlen($reply) . "\r\nConnection: close\r\n\r\n" . $reply);
+    fclose($conn);
+}
+PHP;
+$pipes = [];
+$proc = proc_open([PHP_BINARY, '-r', $serverCode], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+if (!is_resource($proc)) {
+    throw new RuntimeException('Could not start the stub server');
+}
+$address = trim((string) fgets($pipes[1]));
+$stubClient = new Client('http://' . $address, $token);
+rejects(fn () => $stubClient->submitRerank('x', ['x']), BridgeException::class);
+$replayed = $stubClient->submitRerank('x', ['x'], idempotencyKey: 'retry-key-1');
+check($replayed->status === 'succeeded' && is_array($replayed->result) && isset($replayed->result['model']) && $replayed->result['model'] === 'retry-key-1', 'idempotency key sends field and accepts non-queued 202 status');
+// The stub always answers a rerank job of 30000 ms, as a worker would for a key first used that way.
+foreach ([fn () => $stubClient->submitEmbed(['x'], idempotencyKey: 'retry-key-1'),
+          fn () => $stubClient->submitRerank('x', ['x'], 5000, idempotencyKey: 'retry-key-1')] as $mismatched) {
+    try {
+        $mismatched();
+        throw new RuntimeException('Expected invalid_response');
+    } catch (BridgeException $error) {
+        check($error->errorCode === 'invalid_response', 'a key reused with another task or timeout is refused');
+    }
+}
+fclose($pipes[1]);
+fclose($pipes[2]);
+proc_close($proc);
 
 echo "PASS: $count PHP contract checks\n";

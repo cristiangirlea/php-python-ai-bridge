@@ -61,11 +61,23 @@ class SampleTests(unittest.TestCase):
                     self.assertEqual(item["text"].count(text), 1)
 
     def test_importing_the_script_ignores_the_benchmark_s_settings(self):
-        # It borrows the benchmark's protocol helpers; a malformed BENCH_TARGETS is the benchmark's business.
+        # It borrows the benchmark's protocol helpers; a malformed BENCH_TARGETS or BENCH_ORDER is the benchmark's business.
         sys.modules.pop("benchmark", None)
         fresh = importlib.util.spec_from_file_location("ner_measure_fresh", REPO / "scripts" / "ner_measure.py")
-        with mock.patch.dict(os.environ, {"BENCH_TARGETS": "not-a-target"}):
+        with mock.patch.dict(os.environ, {"BENCH_TARGETS": "not-a-target", "BENCH_ORDER": "bogus"}):
             fresh.loader.exec_module(importlib.util.module_from_spec(fresh))
+
+    def test_the_benchmark_s_order_is_checked_when_it_runs(self):
+        import benchmark  # on sys.path since ner_measure put scripts/ there
+        with mock.patch.dict(os.environ, {"BENCH_ORDER": ""}):
+            self.assertEqual(benchmark.cases(), benchmark.CASES)
+        with mock.patch.dict(os.environ, {"BENCH_ORDER": "worst-last"}):
+            reordered = benchmark.cases()
+        self.assertEqual(sorted(reordered), sorted(benchmark.CASES))
+        self.assertEqual([task for _, task, _, _ in reordered[:2]], ["embed", "redact"])
+        self.assertIn("the worst case", reordered[-1][3])
+        with mock.patch.dict(os.environ, {"BENCH_ORDER": "bogus"}), self.assertRaises(SystemExit):
+            benchmark.cases()
 
 
 class ScoringTests(unittest.TestCase):

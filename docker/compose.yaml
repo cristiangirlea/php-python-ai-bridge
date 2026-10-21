@@ -45,8 +45,15 @@ x-php: &php
     XDG_DATA_HOME: /tmp/data
 
 services:
+  # The job table goes to disk here so the integration tests exercise that path; tmpfs keeps it off the host.
   worker:
     <<: *python
+    environment:
+      <<: *python-env
+      BRIDGE_STATE_DIR: /state
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /state:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700
     networks: [isolated]
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
 
@@ -267,6 +274,7 @@ services:
       <<: *python-env
       BENCH_TARGETS: onnx=http://model-worker:8090,lexical=http://worker:8090
       BENCH_RUNS: "5"
+      BENCH_ORDER: ${BENCH_ORDER:-}
       BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
       BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
     command: [python, scripts/benchmark.py]

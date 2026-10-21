@@ -101,6 +101,13 @@ $text = 'Mail me at a@b.co or on +44 20 7946 0958 today';
 $job = $real->submitRedact($text);
 $redaction = RedactResult::fromJob($real->wait($job->id), $text);
 check($redaction->text === 'Mail me at [EMAIL] or on [PHONE] today' && count($redaction->spans) === 2, 'redaction round trip through the PHP client');
+$idempotencyKey = 'php-key-' . bin2hex(random_bytes(8));
+$first = $real->submitRerank('needle token', ['other words', 'needle token'], idempotencyKey: $idempotencyKey);
+$firstDone = $real->wait($first->id);
+$repeated = $real->submitRerank('needle token', ['other words', 'needle token'], idempotencyKey: $idempotencyKey);
+check($repeated->id === $first->id && $repeated->status === 'succeeded' && $repeated->result === $firstDone->result, 'repeated idempotency key returns the same job');
+$different = $real->submitRerank('needle token', ['other words', 'needle token'], idempotencyKey: $idempotencyKey . '-2');
+check($different->id !== $first->id, 'different idempotency key runs a new job');
 // Last, since the fault-worker then stays full for its 300 s retention: its default capacity is 128 jobs, and the
 // jobs above have finished, so the earliest of them to expire says when a slot returns.
 $refusal = null;

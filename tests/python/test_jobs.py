@@ -1,9 +1,12 @@
+import contextlib
 import hashlib
 import json
 import math
 import multiprocessing
 import os
 import signal
+import sqlite3
+import tempfile
 import threading
 import time
 import unittest
@@ -16,6 +19,40 @@ from ai_bridge import jobs, tasks
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
 from ai_bridge.server import BridgeServer
 from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, _entities, _merge, execute, validate
+
+
+class FailingDatabase:
+    """Stands in for a store's connection and fails the statements starting with `verb`, `times` times (None:
+    always), as a full or broken disk would."""
+
+    def __init__(self, store, verb, times=1):
+        self.verb, self.times, self.failed = verb, times, False
+        with store._lock:
+            self.db, store._db = store._db, self
+
+    def __getattr__(self, name):
+        return getattr(self.db, name)
+
+    def __enter__(self):
+        return self.db.__enter__()
+
+    def __exit__(self, *details):
+        return self.db.__exit__(*details)
+
+    def _check(self, sql):
+        if sql.startswith(self.verb) and self.times != 0:
+            self.failed = True
+            if self.times is not None:
+                self.times -= 1
+            raise sqlite3.OperationalError("disk I/O error")
+
+    def execute(self, sql, *args):
+        self._check(sql)
+        return self.db.execute(sql, *args)
+
+    def executemany(self, sql, *args):
+        self._check(sql)
+        return self.db.executemany(sql, *args)
 
 
 class ValidationTests(unittest.TestCase):
@@ -898,6 +935,10 @@ class JobsTests(unittest.TestCase):
             self.assertEqual(done["result"]["value"], "completed-before-exit")
             self.assertEqual(len(connection.sent), 1)
             self.assertTrue(connection.closed)
+            # The coordinator reaps outside the lock, after a reader may already have seen the result.
+            deadline = time.monotonic() + 5
+            while not processes[0].closed and time.monotonic() < deadline:
+                time.sleep(0.01)
             self.assertTrue(processes[0].closed)
             self.assertEqual(len(processes), 2)
 
@@ -1087,6 +1128,129 @@ class JobsTests(unittest.TestCase):
             self.store.submit("test.delay", {})
         self.assertEqual(caught.exception.retry_after, 1)
 
+    def test_reopen_marks_unfinished_jobs_service_restarted_and_keeps_retained_results(self):
+        self.store.close()
+        secret = "secret-input-" + uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as state_dir:
+            first = JobStore(Settings(concurrency=1, retention_seconds=10, test_tasks=True, state_dir=state_dir))
+            try:
+                expired = first.submit("test.delay", {"seconds": 0, "value": "old"}, idempotency_key="expired-key")
+                self.assertEqual(self.wait_for(first, expired["id"])["status"], "succeeded")
+                time.sleep(1.5)
+                kept = first.submit("test.delay", {"seconds": 0, "value": "kept"}, idempotency_key="kept-key")
+                self.assertEqual(self.wait_for(first, kept["id"])["result"], {"value": "kept"})
+                running = first.submit("test.delay", {"seconds": 5, "value": secret}, idempotency_key="running-key")
+                self.wait_for(first, running["id"], {"running"})
+                queued = first.submit("test.delay", {"seconds": 5, "value": secret}, idempotency_key="queued-key")
+                self.assertEqual(queued["status"], "queued")
+            finally:
+                first.close()
+            db_bytes = b"".join(
+                Path(state_dir, name).read_bytes() for name in os.listdir(state_dir) if name.startswith("jobs.sqlite")
+            )
+            self.assertNotIn(secret.encode(), db_bytes)
+            reopened = JobStore(Settings(concurrency=1, retention_seconds=1.2, test_tasks=True, state_dir=state_dir))
+            try:
+                self.assertEqual(self.row_ids(state_dir), {kept["id"], running["id"], queued["id"]})
+                self.assertIsNone(reopened.get(expired["id"]))
+                survived = reopened.get(kept["id"])
+                self.assertEqual((survived["status"], survived["result"]), ("succeeded", {"value": "kept"}))
+                self.assertEqual(
+                    reopened.submit("test.delay", {"seconds": 0}, idempotency_key="kept-key"), survived
+                )
+                for unfinished_id, key in ((running["id"], "running-key"), (queued["id"], "queued-key")):
+                    failed = reopened.get(unfinished_id)
+                    self.assertEqual(failed["status"], "failed")
+                    self.assertEqual(
+                        failed["error"], {"code": "service_restarted", "message": "Task did not complete"}
+                    )
+                    self.assertIsNone(failed["result"])
+                    self.assertEqual(reopened.submit("test.delay", {"seconds": 0}, idempotency_key=key), failed)
+                # Once retention elapses on the reopened store, kept and restarted rows expire and keys run again.
+                time.sleep(1.3)
+                self.assertIsNone(reopened.get(kept["id"]))
+                self.assertIsNone(reopened.get(running["id"]))
+                self.assertEqual(self.row_ids(state_dir), set())
+                rerun =reopened.submit("test.delay", {"seconds": 0, "value": "rerun"}, idempotency_key="kept-key")
+                self.assertNotEqual(rerun["id"], kept["id"])
+                self.assertEqual(self.wait_for(reopened, rerun["id"])["result"], {"value": "rerun"})
+            finally:
+                reopened.close()
+
+    def test_idempotency_key_returns_same_job_until_expired(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, capacity=2, retention_seconds=0.15, test_tasks=True))
+        first = self.store.submit("test.delay", {"seconds": 0.2, "value": "one"}, idempotency_key="key-1")
+        repeated = self.store.submit("test.delay", {"seconds": 0, "value": "ignored"}, idempotency_key="key-1")
+        self.assertEqual(repeated["id"], first["id"])
+        other = self.store.submit("test.delay", {"seconds": 0, "value": "two"}, idempotency_key="key-2")
+        self.assertNotEqual(other["id"], first["id"])
+        # Repeating a retained key still answers when capacity is full.
+        self.assertEqual(self.store.submit("test.delay", {"seconds": 0}, idempotency_key="key-1")["id"], first["id"])
+        done = self.wait(first["id"])
+        self.assertEqual(done["result"], {"value": "one"})
+        self.assertEqual(self.store.submit("test.delay", {"seconds": 0}, idempotency_key="key-1"), done)
+        self.wait(other["id"])
+        time.sleep(0.2)
+        self.assertIsNone(self.store.get(first["id"]))
+        again = self.store.submit("test.delay", {"seconds": 0, "value": "three"}, idempotency_key="key-1")
+        self.assertNotEqual(again["id"], first["id"])
+        self.assertEqual(self.wait(again["id"])["result"], {"value": "three"})
+
+    def test_invalid_idempotency_keys_are_rejected(self):
+        for key in ["", "a" * 129, "has space", "tab\there", "line\nbreak", "\x00", "\x1f", "\x7f", "café",
+                    123, True, ["a"], {"a": 1}]:
+            with self.subTest(key=repr(key)), self.assertRaises(ValueError):
+                self.store.submit("test.delay", {"seconds": 0}, idempotency_key=key)
+        for valid in ["!", "~" * 128]:
+            with self.subTest(valid=len(valid)):
+                job = self.store.submit("test.delay", {"seconds": 0}, idempotency_key=valid)
+                self.assertEqual(self.wait(job["id"])["status"], "succeeded")
+
+    def test_a_key_whose_row_outlived_a_failed_delete_runs_again(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, retention_seconds=0.1, test_tasks=True))
+        first = self.store.submit("test.delay", {"seconds": 0, "value": "one"}, idempotency_key="stale-key")
+        self.wait(first["id"])
+        failing = FailingDatabase(self.store, "DELETE")
+        deadline = time.monotonic() + 5
+        while not failing.failed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(failing.failed)
+        self.assertIsNone(self.store.get(first["id"]))
+        again = self.store.submit("test.delay", {"seconds": 0, "value": "two"}, idempotency_key="stale-key")
+        self.assertNotEqual(again["id"], first["id"])
+        self.assertEqual(self.wait(again["id"])["result"], {"value": "two"})
+
+    def test_a_submission_that_cannot_be_written_is_refused(self):
+        FailingDatabase(self.store, "INSERT", times=None)
+        with self.assertRaisesRegex(CapacityError, "job table cannot be written"):
+            self.store.submit("test.delay", {"seconds": 0}, idempotency_key="unwritten-key")
+        self.assertEqual(self.store._jobs, {})
+        self.assertEqual(self.store._keys, {})
+
+    def test_a_failed_write_from_the_coordinator_keeps_the_job_served(self):
+        job = self.store.submit("test.delay", {"seconds": 0, "value": "kept"})
+        FailingDatabase(self.store, "UPDATE", times=None)
+        done = self.wait(job["id"])
+        self.assertEqual((done["status"], done["result"]), ("succeeded", {"value": "kept"}))
+        with self.store._lock:
+            row = self.store._db.execute("SELECT status FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+        self.assertEqual(row, ("queued",))
+
+    def row_ids(self, state_dir):
+        with contextlib.closing(sqlite3.connect(os.path.join(state_dir, "jobs.sqlite"))) as db:
+            return {job_id for (job_id,) in db.execute("SELECT id FROM jobs")}
+
+    def wait_for(self, store, job_id, states=TERMINAL, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = store.get(job_id)
+            if job["status"] in states:
+                return job
+            time.sleep(0.01)
+        self.fail(f"job did not reach {states}")
+
 
 class WarmPoolTests(unittest.TestCase):
     """The children are started once and kept; what a test may ask one through test.inspect is its process id,
@@ -1230,6 +1394,19 @@ class WarmPoolTests(unittest.TestCase):
             report = self.inspect()
             self.assertIn("BRIDGE_TOKEN", os.environ)
         self.assertFalse(report["token_in_environment"])
+
+    @unittest.skipUnless(os.path.exists("/proc/self/environ"), "needs /proc to read a child's environment block")
+    def test_a_child_inherits_one_thread_pins(self):
+        # The pools size themselves when their library loads, so only the block the child starts with counts;
+        # an operator's larger value is overridden too.
+        self.store.close()
+        with patch.dict(os.environ, {"OMP_NUM_THREADS": "24", "OPENBLAS_NUM_THREADS": "24", "RAYON_NUM_THREADS": "24"}):
+            self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+            pid = self.inspect()["pid"]
+            block = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        # Only these three are compared, so a failure never prints the rest of the block.
+        pins = [entry for entry in block if entry.startswith((b"OMP_NUM_THREADS=", b"OPENBLAS_NUM_THREADS=", b"RAYON_NUM_THREADS="))]
+        self.assertEqual(sorted(pins), [b"OMP_NUM_THREADS=1", b"OPENBLAS_NUM_THREADS=1", b"RAYON_NUM_THREADS=1"])
 
     @unittest.skipIf(os.name == "nt", "os.kill cannot deliver SIGINT to a process on Windows")
     def test_a_child_ignores_sigint_idle_and_running(self):
