@@ -20,9 +20,11 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from .tasks import MODEL_NAMES, execute, validate
+from . import metrics
+from .tasks import MODEL_NAMES, TEST_TASKS, execute, validate
 
-TERMINAL = frozenset({"succeeded", "failed", "timed_out", "cancelled"})
+STATUSES = ("succeeded", "failed", "timed_out", "cancelled")
+TERMINAL = frozenset(STATUSES)
 # How long a retired child gets to exit on its own, after terminate() or after being told to stop, before kill().
 GRACE_SECONDS = 0.2
 # How long a started child gets to say it is ready before it is given up on; and how long the store waits before
@@ -137,6 +139,14 @@ class JobStore:
                 or self.settings.retention_seconds <= 0):
             raise ValueError("invalid worker settings")
         self._context = multiprocessing.get_context("spawn")
+        # Aggregates for GET /metrics, since this process started; every series exists from the start, at zero.
+        tasks = tuple(MODEL_NAMES[self.settings.backend]) + (TEST_TASKS if self.settings.test_tasks else ())
+        self._tasks = tasks
+        self._ended = {(task, status): 0 for task in tasks for status in STATUSES}
+        self._submitted = dict.fromkeys(tasks, 0)
+        self._rejected = {"capacity": 0}
+        self._durations = {task: metrics.new_histogram() for task in tasks}
+        self._waits = {task: metrics.new_histogram() for task in tasks}
         self._jobs = {}
         self._keys = {}  # idempotency key -> job id, for retained jobs only
         self._active = {}  # job id -> the worker it was sent to
@@ -226,27 +236,36 @@ class JobStore:
             raise ValueError("idempotency_key must be 1-128 printable ASCII characters")
         payload = validate(task, payload, self.settings.test_tasks)
         with self._lock:
-            if self._stopping.is_set():
-                raise CapacityError("worker is shutting down")
-            self._expire()
-            # A repeat adds no job, so it is answered even at capacity.
-            if idempotency_key in self._keys:
-                return self._public(self._jobs[self._keys[idempotency_key]])
-            if len(self._jobs) >= self.settings.capacity:
-                raise CapacityError("job capacity reached; wait for retained jobs to expire", self._retry_after())
-            now = time.monotonic()
-            job_id = uuid.uuid4().hex
-            job = {
-                "id": job_id, "task": task, "status": "queued", "result": None,
-                "error": None, "progress": None, "timeout_ms": timeout_ms,
-                "_input": copy.deepcopy(payload), "_deadline": now + timeout_ms / 1000,
-                "_finished": None, "_retried": False, "_key": idempotency_key,
-            }
-            self._write(job, submitted=True)
-            self._jobs[job_id] = job
-            if idempotency_key is not None:
-                self._keys[idempotency_key] = job_id
-            return self._public(job)
+            try:
+                return self._accept(task, payload, timeout_ms, idempotency_key)
+            except CapacityError:
+                # Every 429 the service sends comes from here, so each is counted exactly once.
+                self._rejected["capacity"] += 1
+                raise
+
+    def _accept(self, task, payload, timeout_ms, idempotency_key):
+        if self._stopping.is_set():
+            raise CapacityError("worker is shutting down")
+        self._expire()
+        # A repeat adds no job, so it is answered even at capacity.
+        if idempotency_key in self._keys:
+            return self._public(self._jobs[self._keys[idempotency_key]])
+        if len(self._jobs) >= self.settings.capacity:
+            raise CapacityError("job capacity reached; wait for retained jobs to expire", self._retry_after())
+        now = time.monotonic()
+        job_id = uuid.uuid4().hex
+        job = {
+            "id": job_id, "task": task, "status": "queued", "result": None,
+            "error": None, "progress": None, "timeout_ms": timeout_ms,
+            "_input": copy.deepcopy(payload), "_deadline": now + timeout_ms / 1000,
+            "_finished": None, "_retried": False, "_key": idempotency_key, "_submitted_at": now,
+        }
+        self._write(job, submitted=True)
+        self._jobs[job_id] = job
+        if idempotency_key is not None:
+            self._keys[idempotency_key] = job_id
+        self._submitted[task] += 1
+        return self._public(job)
 
     def get(self, job_id):
         with self._lock:
@@ -262,6 +281,20 @@ class JobStore:
             if job["status"] not in TERMINAL:
                 self._abort(job, "cancelled")
             return self._public(job)
+
+    def snapshot(self):
+        """The aggregates for GET /metrics as plain values, copied under the lock so the caller formats them without
+        holding it."""
+        with self._lock:
+            statuses = [job["status"] for job in self._jobs.values()]
+            return {
+                "backend": self.settings.backend, "concurrency": self.settings.concurrency,
+                "capacity": self.settings.capacity, "tasks": self._tasks, "jobs": dict(self._ended),
+                "submitted": dict(self._submitted), "rejected": dict(self._rejected),
+                "queued": statuses.count("queued"), "running": statuses.count("running"),
+                "pool_size": len(self._pool), "pool_ready": sum(worker.ready for worker in self._pool),
+                "duration": copy.deepcopy(self._durations), "queue": copy.deepcopy(self._waits),
+            }
 
     def _retry_after(self):
         """Seconds until the first retained job expires; a store holding only unfinished jobs gives a short default,
@@ -294,6 +327,9 @@ class JobStore:
         job["_input"] = None
         job["_finished"] = time.monotonic()
         self._write(job)
+        # A job read back from the table finished in an earlier process and never ends here.
+        self._ended[job["task"], status] += 1
+        metrics.observe(self._durations[job["task"]], job["_finished"] - job["_submitted_at"])
 
     def _abort(self, job, status, code=None):
         """End a job before its child has: the child is retired, since it may be halfway through the input."""
@@ -474,6 +510,7 @@ class JobStore:
         if kind == "started":
             # Not written through: a restart fails a running job exactly as it fails a queued one.
             job["status"] = "running"
+            metrics.observe(self._waits[job["task"]], time.monotonic() - job["_submitted_at"])
             return False
         if kind == "progress":
             job["progress"] = value

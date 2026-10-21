@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 BASE = os.environ.get("FRANKENPHP_URL", "http://frankenphp:8080")
+WORKER = os.environ.get("WORKER_URL", "http://worker:8090")
 
 
 def request(path, body=None):
@@ -15,6 +16,20 @@ def request(path, body=None):
     req = Request(BASE + path, data=data, headers={"Content-Type": "application/json"})
     with urlopen(req, timeout=5) as response:
         return response.status, json.load(response), int(response.headers["X-Demo-Worker-Requests"])
+
+
+def metrics(token=None):
+    """The worker's counters as {(name, labels): value}; the format itself is checked by the unit tests."""
+    headers = {"Authorization": "Bearer " + (token if token is not None else os.environ["BRIDGE_TOKEN"])}
+    with urlopen(Request(WORKER + "/metrics", headers=headers), timeout=5) as response:
+        assert response.headers["Content-Type"] == "text/plain; version=0.0.4; charset=utf-8"
+        text = response.read().decode("utf-8")
+    samples = {}
+    for line in text.splitlines():
+        if not line.startswith("#"):
+            series, value = line.rsplit(" ", 1)
+            samples[series] = float(value)
+    return text, samples
 
 
 def wait_ready():
@@ -56,6 +71,7 @@ def scenario(index):
 
 def main():
     wait_ready()
+    _, counted = metrics()
     _, _, before = request("/healthz")
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         ids = list(pool.map(scenario, range(12)))
@@ -132,7 +148,21 @@ def main():
             assert error.code == 400, (body, error.code)
         else:
             raise AssertionError("Out-of-contract redact input was accepted")
-    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; redaction; invalid and missing-job cases")
+    # The worker counted those jobs, and its metrics hold numbers only, none of the documents.
+    try:
+        metrics("not-the-token")
+    except HTTPError as error:
+        assert error.code == 401, error.code
+    else:
+        raise AssertionError("Metrics were served without the token")
+    text, moved = metrics()
+    for task, least in [("rerank", 13), ("embed", 1), ("redact", 1)]:
+        for name in [f'bridge_jobs_total{{task="{task}",status="succeeded"}}', f'bridge_jobs_submitted_total{{task="{task}"}}',
+                     f'bridge_job_duration_seconds_count{{task="{task}"}}']:
+            assert moved[name] - counted[name] >= least, (name, counted[name], moved[name])
+    for document in ["unique0 token0", "needle token", "x@y.io", "4111 1111 1111 1111", "red apple", "café"]:
+        assert document not in text, document
+    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; redaction; invalid and missing-job cases; worker metrics")
 
 
 if __name__ == "__main__":
