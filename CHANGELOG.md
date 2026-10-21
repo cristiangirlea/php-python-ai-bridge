@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- `GET /metrics` on the worker, in the Prometheus text format and behind the service token: jobs by task and terminal status, submissions, 429 refusals, queue depth, running jobs, pool size and readiness, the concurrency and capacity settings, and per-task histograms of job and queue durations. Aggregates only, with labels from fixed sets; they live in memory and reset when the worker restarts.
+
 ## [0.2.0] - 2026-10-21
 
 ### Added
