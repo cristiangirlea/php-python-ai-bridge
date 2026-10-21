@@ -58,7 +58,7 @@ BRIDGE_REQUEST_TIMEOUT_MS=2000
 
 The placeholder is not a usable token. Generate at least 32 non-whitespace ASCII characters, for example using the commands in the README, and give the same token to PHP and Python. `worker` resolves only for containers attached to the Compose network; it is not a hostname on your laptop. Do not point the client at the FrankenPHP demo's port 8080: the client talks directly to Python on port 8090.
 
-The supplied Compose file publishes no host ports. To evaluate your own app, attach its container to the same private network (the default project creates `php-python-ai-bridge_isolated`; a custom Compose project name changes that prefix). For cross-host deployment, use an authenticated TLS boundary, as [Cross-host use behind TLS](#cross-host-use-behind-tls) shows. Do not expose the demo or Python HTTP server directly to the internet. Configure a trusted origin, never a URL supplied by an end user.
+The supplied Compose file publishes no host ports. To evaluate your own app, attach its container to the same private network (the default project creates `php-python-ai-bridge_isolated`; a custom Compose project name changes that prefix). To deploy the worker without a checkout, run its [published image](../README.md#run-the-published-image) on a private network your application joins. For cross-host deployment, use an authenticated TLS boundary, as [Cross-host use behind TLS](#cross-host-use-behind-tls) shows. Do not expose the demo or Python HTTP server directly to the internet. Configure a trusted origin, never a URL supplied by an end user.
 
 ## Cross-host use behind TLS
 

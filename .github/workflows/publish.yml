@@ -1,0 +1,102 @@
+name: Publish images
+
+# A version tag publishes the worker images and the source archive. A manual run publishes too, so it must be
+# started on a version tag: the first step refuses a branch.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+# GitHub's hosted runners, as in tests.yml: the repository is public, and no step here needs more than the job's own
+# token.
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/cristiangirlea/php-python-ai-bridge-worker
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Require a version tag
+        id: version
+        run: |
+          case "$GITHUB_REF" in refs/tags/v*) ;; *) echo "Run this on a v* tag, not $GITHUB_REF" >&2; exit 1 ;; esac
+          version="${TAG#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A pre-release (v1.2.0-rc.1) gets its version tag only; latest stays on the last release.
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT"
+                 printf 'worker=%s\nonnx=%s\n' "$IMAGE:$version" "$IMAGE-onnx:$version" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT"
+                 printf 'worker=%s\nonnx=%s\n' "$IMAGE:$version,$IMAGE:latest" "$IMAGE-onnx:$version,$IMAGE-onnx:latest" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the worker image
+        id: worker
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.worker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ${{ steps.version.outputs.worker }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.worker.outputs.digest }}
+          push-to-registry: true
+      - name: Build and push the ONNX worker image
+        id: onnx
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.worker-onnx
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ${{ steps.version.outputs.onnx }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}-onnx
+          subject-digest: ${{ steps.onnx.outputs.digest }}
+          push-to-registry: true
+      # The archive is what Composer installs: .gitattributes leaves the worker, Docker and test files out of it.
+      - name: Attach the source archive to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          archive="php-python-ai-bridge-$VERSION.tar.gz"
+          git archive --format=tar.gz --prefix="php-python-ai-bridge-$VERSION/" -o "$archive" "$GITHUB_SHA"
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            flags=""
+            if [ "$PRERELEASE" = true ]; then flags="--prerelease"; fi
+            gh release create "$TAG" --verify-tag --notes-from-tag --title "$TAG" $flags
+          fi
+          gh release upload "$TAG" "$archive" --clobber
