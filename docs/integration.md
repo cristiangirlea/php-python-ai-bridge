@@ -148,7 +148,23 @@ Implement the following in your application, for either framework:
 4. On a later status request, verify ownership **before** calling `get()`. Handle `queued`/`running`, `succeeded`, `failed`, `timed_out` and `cancelled`. For success, validate using `RerankResult::fromJob()` with the original document count; indexes refer to the original order.
 5. Authorize cancellation the same way before calling `cancel()`. A job may complete before cancellation arrives; the returned snapshot is authoritative.
 
-The service token authorizes every job. Do not send it to a browser or rely on random job IDs for authorization. Do not blindly publish the example routes as your production API. Capture required results before retention expires; the worker is in-memory and restart loses all jobs/results. A 404 cannot distinguish expiry, restart loss and an unknown job.
+The service token authorizes every job. Do not send it to a browser or rely on random job IDs for authorization. Do not blindly publish the example routes as your production API. Capture required results before retention expires. Without `BRIDGE_STATE_DIR` the worker is in-memory and a restart loses all jobs and results; with it, finished results survive a restart until retention ends, and jobs that were unfinished become `failed` with `service_restarted`. A 404 cannot distinguish expiry, restart loss and an unknown job.
+
+When a submission's outcome is uncertain (`transport_error`, or the PHP process died before it stored the job ID), resubmit with the same idempotency key instead of a fresh request: the worker returns the job the first request created, in whatever state it is now, or creates it if the first request never arrived. Pick the key per unit of work (for example a hash of your own record ID and the task) and store it before the first POST:
+
+```php
+$key = 'rerank-' . hash('sha256', $documentSetId);
+try {
+    $job = $client->submitRerank($query, $documents, idempotencyKey: $key);
+} catch (PhpAiBridge\BridgeException $e) {
+    if ($e->errorCode !== 'transport_error') {
+        throw $e;
+    }
+    $job = $client->submitRerank($query, $documents, idempotencyKey: $key);
+}
+```
+
+With a key, `submit()` accepts any valid status in the response, since a repeat can return a running or finished job. A key only covers the job's retention: once it expires, the same key runs the task again. A job that failed with `service_restarted` is also retained, so the same key returns that failure until retention ends: resubmit it with a new key.
 
 PHP objects reused by a long-lived worker must not retain per-user inputs, authentication state or results. The supplied FrankenPHP test checks the standalone demo's request isolation; it is not a Symfony Runtime or Laravel Octane test.
 
@@ -159,7 +175,7 @@ PHP objects reused by a long-lived worker must not retain per-user inputs, authe
 | Client `requestTimeoutMs` | Maximum duration of one HTTP call; default 2000 ms | Keep separate from the job deadline |
 | Submission `timeoutMs` | Queue + process startup + execution; default 30000 ms | Choose a bound appropriate to the task |
 | `waitTimeoutMs` / `wait_timeout` | Local polling budget exhausted | Remote job may still run; inspect it or explicitly cancel |
-| `transport_error` during submission | Response unknown; a job may have been created | Do not automatically retry: no idempotency keys exist |
+| `transport_error` during submission | Response unknown; a job may have been created | Resubmit with the same `idempotencyKey` while the job would still be retained; never retry without one |
 | `http_error`, status 401 | Service credentials rejected | Fix server-side configuration, do not forward service secrets |
 | `http_error`, status 400/413 | Invalid or oversized request | Reject/correct input |
 | `http_error`, status 429 | Total queued/running/retained capacity exhausted | Apply backpressure; completed retained jobs also occupy capacity |
@@ -170,4 +186,4 @@ The current default limits are two warm task processes, 128 total job slots and 
 
 ## Before shipping a framework integration
 
-Run a fresh Composer installation, framework container boot/configuration-cache tests, authenticated submit/status/cancel tests, cross-user ownership rejection and reused-worker isolation tests in your target PHP/framework versions. Test the real model if enabled. See [verification status and missing measurements](testing.md). Do not add Messenger or Laravel queue retries without addressing uncertain submission outcomes and duplicate work.
+Run a fresh Composer installation, framework container boot/configuration-cache tests, authenticated submit/status/cancel tests, cross-user ownership rejection and reused-worker isolation tests in your target PHP/framework versions. Test the real model if enabled. See [verification status and missing measurements](testing.md). Do not add Messenger or Laravel queue retries without an idempotency key per message, or uncertain submission outcomes become duplicate work.

@@ -1,4 +1,5 @@
-"""In-memory, bounded job lifecycle on a pool of warm worker processes. Not a durable queue.
+"""Bounded job lifecycle on a pool of warm worker processes. Not a durable queue: the job table (never an input)
+can live in SQLite so results and idempotency keys outlive a restart, but unfinished jobs are not replayed.
 
 The store keeps `concurrency` child processes alive and sends each job to an idle one over a pipe. A child keeps
 the models it has loaded, so only its first job pays for imports and model loading. A child that is interrupted
@@ -9,8 +10,11 @@ child takes its place. A child is also retired after `max_jobs` jobs to bound me
 import copy
 import math
 import multiprocessing
+import json
 import os
+import re
 import signal
+import sqlite3
 import threading
 import time
 import uuid
@@ -27,6 +31,11 @@ GRACE_SECONDS = 0.2
 READY_SECONDS = 30.0
 BACKOFF_SECONDS = 1.0
 MAX_JOBS_PER_WORKER = 1000
+IDEMPOTENCY_KEY = re.compile(r"[\x21-\x7e]{1,128}")
+_SCHEMA = """CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT, progress TEXT,
+    timeout_ms INTEGER NOT NULL, idempotency_key TEXT, submitted_at REAL NOT NULL, finished_at REAL);
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_idempotency_key ON jobs (idempotency_key);"""
 
 
 class CapacityError(Exception):
@@ -43,6 +52,8 @@ class Settings:
     test_tasks: bool = False
     # Jobs a child serves before it is replaced by a fresh one; BRIDGE_WORKER_MAX_JOBS in the service.
     max_jobs: int = MAX_JOBS_PER_WORKER
+    # Where jobs.sqlite lives; BRIDGE_STATE_DIR in the service. None keeps the table in memory only.
+    state_dir: str | None = None
 
 
 def _serve(connection, backend, model_dir):
@@ -125,39 +136,115 @@ class JobStore:
             raise ValueError("invalid worker settings")
         self._context = multiprocessing.get_context("spawn")
         self._jobs = {}
+        self._keys = {}  # idempotency key -> job id, for retained jobs only
         self._active = {}  # job id -> the worker it was sent to
         self._pool = []  # children that may take a job, idle or running one
         self._retiring = []  # children that never serve again, until they are gone
         self._backoff_until = 0.0  # no child is started before this time
         self._lock = threading.RLock()
         self._stopping = threading.Event()
+        self._db = None
+        self._open_db()
         # A child that cannot start now is tried again once the backoff ends; a job that finds no child up
         # meanwhile fails as worker_start_failed, so the service still answers.
         self._replenish()
         self._thread = threading.Thread(target=self._coordinate, daemon=True)
         self._thread.start()
 
-    def submit(self, task, payload, timeout_ms=30000):
+    def _open_db(self):
+        """One connection for the store's life, used only under the lock. A file left by an earlier run keeps its
+        retained results; what it still holds as unfinished never completed and is failed, not replayed."""
+        if self.settings.state_dir is None:
+            self._db = sqlite3.connect(":memory:", check_same_thread=False)
+        else:
+            path = os.path.join(self.settings.state_dir, "jobs.sqlite")
+            self._db = sqlite3.connect(path, check_same_thread=False)
+        try:
+            with self._lock:
+                if self.settings.state_dir is not None:
+                    self._db.execute("PRAGMA journal_mode=WAL")
+                # An expired result is overwritten in the file, not left in a free page.
+                self._db.execute("PRAGMA secure_delete=ON")
+                self._db.executescript(_SCHEMA)
+                with self._db:
+                    self._db.execute(
+                        "UPDATE jobs SET status = 'failed', result = 'null', error = ?, finished_at = ? "
+                        "WHERE status NOT IN ('succeeded', 'failed', 'timed_out', 'cancelled')",
+                        (json.dumps({"code": "service_restarted", "message": "Task did not complete"}), time.time()))
+                    self._db.execute("DELETE FROM jobs WHERE finished_at IS NULL OR finished_at <= ?",
+                                     (time.time() - self.settings.retention_seconds,))
+                rows = self._db.execute("SELECT id, task, status, result, error, progress, timeout_ms, "
+                                        "idempotency_key, finished_at FROM jobs").fetchall()
+        except Exception:
+            self._db.close()
+            raise
+        wall, now = time.time(), time.monotonic()
+        for job_id, task, status, result, error, progress, timeout_ms, key, finished_at in rows:
+            self._jobs[job_id] = {
+                "id": job_id, "task": task, "status": status, "result": json.loads(result),
+                "error": json.loads(error), "progress": json.loads(progress), "timeout_ms": timeout_ms,
+                # Retention counts from the wall-clock finish, carried over to this process's monotonic clock.
+                "_input": None, "_deadline": now, "_finished": now - max(0.0, wall - finished_at),
+                "_retried": True, "_key": key,
+            }
+            if key is not None:
+                self._keys[key] = job_id
+
+    def _write(self, job, submitted=False):
+        """Write a job's row through; a no-op once close() has let go of the connection. A submission that cannot
+        be recorded is refused; a later write that fails leaves this process's copy answering, since the
+        coordinator must not stop over a full disk."""
+        if self._db is None:
+            return
+        finished = None if job["_finished"] is None else time.time()
+        values = (job["status"], json.dumps(job["result"]), json.dumps(job["error"]), json.dumps(job["progress"]),
+                  finished, job["id"])
+        try:
+            with self._db:
+                if submitted:
+                    # REPLACE drops a row an earlier failed delete left holding this key, which memory no longer has.
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO jobs (task, timeout_ms, idempotency_key, submitted_at, status, result, "
+                        "error, progress, finished_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (job["task"], job["timeout_ms"], job["_key"], time.time()) + values)
+                else:
+                    self._db.execute("UPDATE jobs SET status = ?, result = ?, error = ?, progress = ?, "
+                                     "finished_at = ? WHERE id = ?", values)
+        except sqlite3.Error:
+            if submitted:
+                raise CapacityError("job table cannot be written") from None
+
+    def submit(self, task, payload, timeout_ms=30000, idempotency_key=None):
         if not isinstance(task, str):
             raise ValueError("task must be a string")
         if type(timeout_ms) is not int or not 100 <= timeout_ms <= 300000:
             raise ValueError("timeout_ms must be an integer between 100 and 300000")
+        if idempotency_key is not None and (type(idempotency_key) is not str
+                                            or not IDEMPOTENCY_KEY.fullmatch(idempotency_key)):
+            raise ValueError("idempotency_key must be 1-128 printable ASCII characters")
         payload = validate(task, payload, self.settings.test_tasks)
         with self._lock:
             if self._stopping.is_set():
                 raise CapacityError("worker is shutting down")
             self._expire()
+            # A repeat adds no job, so it is answered even at capacity.
+            if idempotency_key in self._keys:
+                return self._public(self._jobs[self._keys[idempotency_key]])
             if len(self._jobs) >= self.settings.capacity:
                 raise CapacityError("job capacity reached; wait for retained jobs to expire")
             now = time.monotonic()
             job_id = uuid.uuid4().hex
-            self._jobs[job_id] = {
+            job = {
                 "id": job_id, "task": task, "status": "queued", "result": None,
                 "error": None, "progress": None, "timeout_ms": timeout_ms,
                 "_input": copy.deepcopy(payload), "_deadline": now + timeout_ms / 1000,
-                "_finished": None, "_retried": False,
+                "_finished": None, "_retried": False, "_key": idempotency_key,
             }
-            return self._public(self._jobs[job_id])
+            self._write(job, submitted=True)
+            self._jobs[job_id] = job
+            if idempotency_key is not None:
+                self._keys[idempotency_key] = job_id
+            return self._public(job)
 
     def get(self, job_id):
         with self._lock:
@@ -179,15 +266,24 @@ class JobStore:
 
     def _expire(self):
         now = time.monotonic()
+        expired = []
         for job_id in list(self._jobs):
             finished = self._jobs[job_id]["_finished"]
             if finished is not None and now - finished >= self.settings.retention_seconds:
-                del self._jobs[job_id]
+                self._keys.pop(self._jobs.pop(job_id)["_key"], None)
+                expired.append((job_id,))
+        if expired and self._db is not None:
+            try:
+                with self._db:
+                    self._db.executemany("DELETE FROM jobs WHERE id = ?", expired)
+            except sqlite3.Error:
+                pass  # the next open deletes them by their finish time
 
     def _finish(self, job, status, result=None, code=None):
         job.update(status=status, result=result, error={"code": code, "message": "Task did not complete"} if code else None)
         job["_input"] = None
         job["_finished"] = time.monotonic()
+        self._write(job)
 
     def _abort(self, job, status, code=None):
         """End a job before its child has: the child is retired, since it may be halfway through the input."""
@@ -366,6 +462,7 @@ class JobStore:
         if job_id != worker.job_id or job is None or job["status"] in TERMINAL:
             return False
         if kind == "started":
+            # Not written through: a restart fails a running job exactly as it fails a queued one.
             job["status"] = "running"
             return False
         if kind == "progress":
@@ -404,6 +501,11 @@ class JobStore:
         self._stopping.set()
         self._thread.join(timeout=2)
         with self._lock:
+            # The file keeps unfinished jobs as they were, so the next start reports them as service_restarted;
+            # this process answers for them as cancelled until it exits.
+            if self._db is not None:
+                self._db.close()
+                self._db = None
             for job in self._jobs.values():
                 if job["status"] not in TERMINAL:
                     self._abort(job, "cancelled")

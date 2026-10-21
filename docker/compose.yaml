@@ -45,8 +45,15 @@ x-php: &php
     XDG_DATA_HOME: /tmp/data
 
 services:
+  # The job table goes to disk here so the integration tests exercise that path; tmpfs keeps it off the host.
   worker:
     <<: *python
+    environment:
+      <<: *python-env
+      BRIDGE_STATE_DIR: /state
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /state:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700
     networks: [isolated]
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
 

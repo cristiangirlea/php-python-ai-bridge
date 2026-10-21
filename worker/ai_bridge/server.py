@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import socket
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -138,9 +139,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self._body()
             if self.path == "/v1/jobs":
-                if not {"task", "input"} <= body.keys() or body.keys() - {"task", "input", "timeout_ms"}:
-                    raise ValueError("Expected task, input and optional timeout_ms")
-                job = self.server.jobs.submit(body["task"], body["input"], body.get("timeout_ms", 30000))
+                if (not {"task", "input"} <= body.keys()
+                        or body.keys() - {"task", "input", "timeout_ms", "idempotency_key"}):
+                    raise ValueError("Expected task, input, optional timeout_ms and optional idempotency_key")
+                # The store reads None as no key, so an explicit null is refused here rather than ignored.
+                if "idempotency_key" in body and body["idempotency_key"] is None:
+                    raise ValueError("idempotency_key must be a string")
+                job = self.server.jobs.submit(body["task"], body["input"], body.get("timeout_ms", 30000),
+                                              body.get("idempotency_key"))
                 self._reply(202, job)
                 return
             match = re.fullmatch(r"/v1/jobs/([a-f0-9]{32})/cancel", self.path)
@@ -182,6 +188,7 @@ def main():
         model_dir=os.environ.get("BRIDGE_MODEL_DIR", "/models"),
         test_tasks=os.environ.get("BRIDGE_TEST_TASKS") == "1",
         max_jobs=_number("BRIDGE_WORKER_MAX_JOBS", "1000", int),
+        state_dir=os.environ.get("BRIDGE_STATE_DIR") or None,
     )
     # Without its files every job needing a model would fail as task_failed, which cannot say why: a cache fetched
     # before a model was added has no directory for it.
@@ -189,7 +196,12 @@ def main():
     if missing:
         raise SystemExit(f"{settings.model_dir} lacks the model files for {', '.join(missing)}; acquire them with "
                          "the fetcher: docker compose -f docker/compose.yaml run --rm --no-deps fetcher")
-    with BridgeServer((args.host, args.port), os.environ.pop("BRIDGE_TOKEN", ""), settings) as server:
+    try:
+        bridge = BridgeServer((args.host, args.port), os.environ.pop("BRIDGE_TOKEN", ""), settings)
+    except sqlite3.Error:
+        raise SystemExit(f"BRIDGE_STATE_DIR {settings.state_dir} must be a directory the service can write "
+                         "jobs.sqlite in") from None
+    with bridge as server:
         def stop(*_):
             threading.Thread(target=server.shutdown, daemon=True).start()
 
