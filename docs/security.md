@@ -1,6 +1,6 @@
 # Security boundaries
 
-This experimental service is designed for trusted application-to-service traffic on a private network. Do not expose the example routes or Python server directly to the internet.
+This experimental service is designed for trusted application-to-service traffic on a private network. Do not expose the example routes or Python server directly to the internet. Across hosts, put a TLS proxy in front of the worker as [Cross-host use behind TLS](integration.md#cross-host-use-behind-tls) shows.
 
 - Generate a service token of at least 32 non-whitespace ASCII characters. Never commit it. A token grants access to every job in that service instance.
 - Enforce end-user authentication and per-job ownership in the PHP application. The example deliberately omits those application-specific policies and publishes no ports.

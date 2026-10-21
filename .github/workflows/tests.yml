@@ -69,7 +69,7 @@ jobs:
       - name: Prepare disposable cache
         run: mkdir -p .cache && chmod 777 .cache
       - name: Inspect sandbox configuration
-        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile php-frameworks config
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile php-frameworks --profile tls config
       - name: Acquire hash-pinned MCP wheels
         run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
       - name: Offline MCP server tests
@@ -91,9 +91,13 @@ jobs:
           docker compose -f docker/compose.yaml up -d worker
           docker compose -f docker/compose.yaml run --rm --no-deps laravel-tests
           docker compose -f docker/compose.yaml run --rm --no-deps symfony-tests
+      - name: The client through the TLS proxy, verified against the example CA only
+        run: |
+          docker compose -f docker/compose.yaml up -d tls-proxy
+          docker compose -f docker/compose.yaml run --rm --no-deps tls-check
       - name: Stop test containers
         if: always()
-        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile php-frameworks down
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile php-frameworks --profile tls down
 
   # Keep the required branch-protection check stable as the matrix changes.
   deterministic:

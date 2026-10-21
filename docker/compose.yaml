@@ -67,6 +67,24 @@ services:
     depends_on: [worker]
     command: [run, --config, /work/examples/frankenphp/Caddyfile, --adapter, caddyfile]
 
+  # TLS in front of the worker for a client on another host; it holds no token, and its CA is on the tls-ca volume.
+  tls-proxy:
+    <<: *php
+    profiles: [tls]
+    entrypoint: [sh, /work/scripts/run_frankenphp.sh]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /runtime:rw,exec,nosuid,size=256m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - tls-ca:/data
+    networks: [isolated]
+    environment:
+      HOME: /tmp
+      XDG_CONFIG_HOME: /tmp/config
+      XDG_DATA_HOME: /data
+    command: [run, --config, /work/examples/tls/Caddyfile, --adapter, caddyfile]
+
   python-tests:
     <<: *python
     profiles: [test]
@@ -201,6 +219,28 @@ services:
   symfony-tests:
     <<: *framework-tests
     command: [php, tests/php/frameworks/symfony.php]
+
+  # The system CA store is emptied so the trusted run can pass only through the example root.
+  tls-check:
+    <<: *php
+    profiles: [tls]
+    networks: [isolated]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /etc/ssl/certs:ro,noexec,nosuid,size=1m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - tls-ca:/ca:ro
+    environment:
+      <<: *php-env
+      BRIDGE_TLS_URL: https://tls-proxy:8443
+      BRIDGE_TLS_CA: /ca/caddy/pki/authorities/local/root.crt
+    command:
+      - sh
+      - -ec
+      - |
+        php -d curl.cainfo="$$BRIDGE_TLS_CA" -d openssl.cafile="$$BRIDGE_TLS_CA" tests/php/tls.php trusted
+        php tests/php/tls.php untrusted
 
   integration:
     <<: *python
@@ -479,3 +519,11 @@ services:
 networks:
   isolated:
     internal: true
+
+volumes:
+  tls-ca:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=65532,gid=65532,mode=0700"
