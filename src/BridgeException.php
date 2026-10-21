@@ -10,6 +10,8 @@ class BridgeException extends \RuntimeException
         string $message,
         public readonly string $errorCode = 'bridge_error',
         public readonly ?int $httpStatus = null,
+        /** On a 429, the worker's Retry-After in whole seconds; null when absent or not 1 to 6 digits. */
+        public readonly ?int $retryAfterSeconds = null,
     ) {
         parent::__construct($message);
     }

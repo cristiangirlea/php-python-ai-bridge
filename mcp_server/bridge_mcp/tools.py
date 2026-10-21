@@ -32,7 +32,8 @@ REQUEST_BYTES = 262144 - 4096
 MAX_FILE_BYTES = 4 * 1024 * 1024
 SNIPPET_CHARACTERS = 160
 # A full worker refuses submissions until finished jobs age out of its retention; a tool waits within its own call,
-# pausing this long at first and doubling, and retries for the last time when the last amount of the call remains.
+# for the worker's Retry-After or else this long at first and doubling, and retries for the last time when the last
+# amount of the call remains.
 CAPACITY_PAUSE_S, CAPACITY_MAX_PAUSE_S, CAPACITY_LAST_S = 0.25, 5.0, 1.0
 PAIRS = 10
 MAX_SEARCH_TOP_K = 50
@@ -385,9 +386,15 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             except BridgeError as error:
                 if error.code != "capacity_exceeded":
                     raise ToolError(_explain(error)) from None
+                retry_after = error.retry_after
             # The last retry comes when the final CAPACITY_LAST_S of the call is left for the job itself. The jitter
-            # keeps calls refused together from retrying together.
-            wait = min(pause * random.uniform(0.5, 1.0), deadline - time.monotonic() - CAPACITY_LAST_S)
+            # keeps calls refused together from retrying together; a Retry-After of 0 still pauses, never spins.
+            if retry_after is None:
+                wanted = pause * random.uniform(0.5, 1.0)
+                pause = min(pause * 2, CAPACITY_MAX_PAUSE_S)
+            else:
+                wanted = max(retry_after, CAPACITY_PAUSE_S)
+            wait = min(wanted, deadline - time.monotonic() - CAPACITY_LAST_S)
             if wait <= 0:
                 raise ToolError(f"The worker stayed at capacity (HTTP 429) for the whole call; the tool waited "
                                 f"{time.monotonic() - started:.1f} s of its {seconds:g} s. Finished jobs hold capacity "
@@ -395,7 +402,6 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             # Nothing is sent to the host meanwhile: MCP logging is deprecated as of the 2026-07-28 specification,
             # and progress must only increase while each job's own starts at zero.
             await anyio.sleep(wait)
-            pause = min(pause * 2, CAPACITY_MAX_PAUSE_S)
 
     @mcp.tool(
         name="bridge_health", title="Bridge worker health",

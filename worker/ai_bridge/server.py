@@ -69,9 +69,11 @@ class Handler(BaseHTTPRequestHandler):
         # Do not log URLs, credentials, inputs or model results.
         pass
 
-    def _reply(self, status, value):
+    def _reply(self, status, value, headers=()):
         body = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
         self.send_response(status)
+        for name, header in headers:
+            self.send_header(name, header)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -80,8 +82,8 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.wfile.write(body)
 
-    def _error(self, status, code, message):
-        self._reply(status, {"error": {"code": code, "message": message}})
+    def _error(self, status, code, message, headers=()):
+        self._reply(status, {"error": {"code": code, "message": message}}, headers)
 
     def _authorized(self):
         values = self.headers.get_all("Authorization", [])
@@ -157,8 +159,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(404, "not_found", "Job or route not found")
             else:
                 self._reply(200, job)
-        except CapacityError:
-            self._error(429, "capacity_exceeded", "Worker capacity reached")
+        except CapacityError as error:
+            # Delay seconds, never an HTTP date: a client's clock need not agree with this one.
+            self._error(429, "capacity_exceeded", "Worker capacity reached", [("Retry-After", str(int(error.retry_after)))])
         except OverflowError:
             self._error(413, "body_too_large", "Request exceeds 262144 bytes")
         except (ValueError, UnicodeError, RecursionError):

@@ -42,8 +42,10 @@ final class Client
     }
 
     /**
-     * With an idempotency key, a repeat while the worker retains the first job returns that job as it is now,
-     * so resubmitting after an uncertain POST cannot run the task twice.
+     * A full worker refuses with HTTP 429 and says in retryAfterSeconds when capacity returns. The client never
+     * retries by itself: whether and when to resubmit is the application's decision. With an idempotency key, a
+     * repeat while the worker retains the first job returns that job as it is now, so resubmitting after an
+     * uncertain POST cannot run the task twice.
      *
      * @param array<mixed> $input
      */

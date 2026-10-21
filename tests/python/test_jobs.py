@@ -1083,6 +1083,34 @@ class JobsTests(unittest.TestCase):
         self.assertIsNone(self.store.get(job["id"]))
         self.store.submit("test.delay", {"seconds": 0})
 
+    def test_a_full_store_says_when_its_first_retained_job_expires(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, capacity=2, retention_seconds=2.5, test_tasks=True))
+        self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
+        self.store.submit("test.delay", {"seconds": 5})
+        time.sleep(1)
+        with self.assertRaises(CapacityError) as caught:
+            self.store.submit("test.delay", {"seconds": 0})
+        # About 1.5 s of the finished job's retention is left, rounded up; the running job does not count.
+        self.assertEqual(caught.exception.retry_after, 2)
+
+    def test_a_store_full_of_unfinished_jobs_says_one_second(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, capacity=1, retention_seconds=300, test_tasks=True))
+        self.store.submit("test.delay", {"seconds": 5})
+        with self.assertRaises(CapacityError) as caught:
+            self.store.submit("test.delay", {"seconds": 0})
+        self.assertEqual(caught.exception.retry_after, 1)
+
+    def test_a_store_full_of_long_retained_jobs_says_their_retention(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, capacity=1, retention_seconds=300, test_tasks=True))
+        self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
+        with self.assertRaises(CapacityError) as caught:
+            self.store.submit("test.delay", {"seconds": 0})
+        self.assertIs(type(caught.exception.retry_after), int)
+        self.assertIn(caught.exception.retry_after, (299, 300))
+
     def test_unknown_jobs(self):
         self.assertIsNone(self.store.get("a" * 32))
         self.assertIsNone(self.store.cancel("a" * 32))
@@ -1096,8 +1124,9 @@ class JobsTests(unittest.TestCase):
         job = self.store.submit("test.delay", {"seconds": 5})
         self.store.close()
         self.assertEqual(self.store.get(job["id"])["status"], "cancelled")
-        with self.assertRaises(CapacityError):
+        with self.assertRaises(CapacityError) as caught:
             self.store.submit("test.delay", {})
+        self.assertEqual(caught.exception.retry_after, 1)
 
     def test_reopen_marks_unfinished_jobs_service_restarted_and_keeps_retained_results(self):
         self.store.close()

@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
-from bridge_mcp.protocol import Bridge
+from bridge_mcp.protocol import Bridge, BridgeError
 from bridge_mcp.tools import BY_VALUE_DOCUMENTS, TOOL_NAMES, _rankings, _snippet, _spans, _vectors, build_server
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
@@ -228,6 +229,55 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         result = await self.call("bridge_rerank", {"query": "x" * 8001, "documents_path": "budget.txt"})
         self.assertTrue(result.is_error)
         self.assertIn("200000", result.content[0].text)
+
+    def full_once(self, retry_after):
+        """The shared worker behind a bridge whose first job is refused for capacity with this Retry-After."""
+        real = self.bridge
+
+        class FullOnce:
+            calls = 0
+
+            def health(self):
+                return real.health()
+
+            def run(self, *args, **kwargs):
+                FullOnce.calls += 1
+                if FullOnce.calls == 1:
+                    raise BridgeError("full", "capacity_exceeded", 429, retry_after=retry_after)
+                return real.run(*args, **kwargs)
+
+        return FullOnce()
+
+    async def test_a_full_worker_is_waited_for_as_long_as_its_retry_after_says(self):
+        server = build_server(self.full_once(1), backend="lexical", root=None, timeout_ms=10000)
+        started = time.monotonic()
+        result = await self.call("bridge_rerank", {"query": "needle", "documents": ["needle"]}, server=server)
+        self.assertFalse(result.is_error, result.content)
+        # The fallback's first pause is at most a quarter of a second, so a wait this long is the header's.
+        self.assertGreater(time.monotonic() - started, 0.9)
+
+    async def test_without_retry_after_the_wait_is_the_tools_own_backoff(self):
+        server = build_server(self.full_once(None), backend="lexical", root=None, timeout_ms=10000)
+        started = time.monotonic()
+        result = await self.call("bridge_rerank", {"query": "needle", "documents": ["needle"]}, server=server)
+        self.assertFalse(result.is_error, result.content)
+        self.assertLess(time.monotonic() - started, 0.8)
+
+    async def test_a_retry_after_of_zero_still_pauses_and_then_retries(self):
+        server = build_server(self.full_once(0), backend="lexical", root=None, timeout_ms=10000)
+        started = time.monotonic()
+        result = await self.call("bridge_rerank", {"query": "needle", "documents": ["needle"]}, server=server)
+        self.assertFalse(result.is_error, result.content)
+        self.assertGreater(time.monotonic() - started, 0.2)
+
+    async def test_a_retry_after_beyond_the_call_is_bounded_by_its_budget(self):
+        server = build_server(self.full_once(60), backend="lexical", root=None, timeout_ms=3000)
+        started = time.monotonic()
+        result = await self.call("bridge_rerank", {"query": "needle", "documents": ["needle"]}, server=server)
+        # One wait to the last second of the call, then the job runs in what is left.
+        self.assertFalse(result.is_error, result.content)
+        self.assertGreater(time.monotonic() - started, 1.8)
+        self.assertLess(time.monotonic() - started, 3)
 
     async def test_worker_failures_become_tool_errors_without_internals(self):
         broken = build_server(Bridge("http://127.0.0.1:1", TOKEN, request_timeout_s=0.5), backend="lexical", root=None, timeout_ms=10000)

@@ -222,9 +222,27 @@ PHP objects reused by a long-lived worker must not retain per-user inputs, authe
 | `transport_error` during submission | Response unknown; a job may have been created | Resubmit with the same `idempotencyKey` while the job would still be retained; never retry without one |
 | `http_error`, status 401 | Service credentials rejected | Fix server-side configuration, do not forward service secrets |
 | `http_error`, status 400/413 | Invalid or oversized request | Reject/correct input |
-| `http_error`, status 429 | Total queued/running/retained capacity exhausted | Apply backpressure; completed retained jobs also occupy capacity |
+| `http_error`, status 429 | Total queued/running/retained capacity exhausted; no job was created | Apply backpressure; resubmit no sooner than `retryAfterSeconds` (below). Completed retained jobs also occupy capacity |
 | `invalid_response` | Peer violated the client contract | Treat as an integration failure, not a valid task result |
 | Terminal `failed` or `timed_out` | Task did not succeed | Report a safe failure; retries require an application policy |
+
+When the worker is full, `submit()` throws a `BridgeException` with `httpStatus` 429 and, from the worker's `Retry-After` header, `retryAfterSeconds`: when capacity is expected back. The client never retries by itself. Unlike a `transport_error`, a 429 means no job exists, so scheduling the submission again is safe; how is the application's choice, for instance a delayed message on its own queue:
+
+```php
+try {
+    $job = $client->submitRerank($query, $documents);
+} catch (\PhpAiBridge\BridgeException $error) {
+    if ($error->httpStatus !== 429) {
+        throw $error;
+    }
+    // Null when the header was missing or malformed (a proxy answered, say): fall back to your own delay.
+    $delaySeconds = $error->retryAfterSeconds ?? 5;
+    $this->queue->dispatchLater(new SubmitRerank($applicationJobId), $delaySeconds);
+    return new Response('', 503, ['Retry-After' => (string) $delaySeconds]);
+}
+```
+
+`dispatchLater()` and `SubmitRerank` stand for your framework's delayed dispatch (Symfony Messenger's `DelayStamp`, Laravel's `->delay()`); cap the attempts, since a worker kept full by other callers can refuse again.
 
 The current default limits are two warm task processes, 128 total job slots and 300 seconds of terminal retention. These are settings, not measured throughput or a production SLA. The model profile keeps one task process, which loads each model on its first job of that kind and keeps it.
 
