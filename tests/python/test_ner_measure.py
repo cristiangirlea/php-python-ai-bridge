@@ -196,6 +196,10 @@ class Wnut17Tests(unittest.TestCase):
                  {"start": 12, "end": 16, "label": "ORG", "source": "model:ORG", "score": 0.9}]
         counts = {name: value for _, name, value in measure.tally(items, {0.85: [found]})}
         self.assertEqual(counts["all labels"], {"gold": 2, "predicted": 2, "exact": 1, "overlapping": 1, "masked": 2})
+        # A label's row sees only that label's predictions, so the ORG span over Oslo masks nothing in LOC's row.
+        self.assertEqual(counts["LOC"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts["ORG"], {"gold": 0, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts["PER"], {"gold": 1, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
 
     def test_f1_is_the_harmonic_mean_of_precision_and_recall(self):
         self.assertEqual(measure.f1(3, 4, 6), "0.60")  # precision 0.5, recall 0.75

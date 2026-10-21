@@ -176,8 +176,9 @@ class FitTests(unittest.TestCase):
             measure.fit("q" * (measure.MAX_FIELD_CHARACTERS + 1), ["document"])
 
     def test_a_query_that_leaves_no_room_ends_the_run(self):
-        with self.assertRaises(SystemExit):
-            measure.fit("q" * (measure.MAX_TOTAL_CHARACTERS - 10), ["document"] * 100)
+        # A valid query whose body alone is over the byte limit cuts every document to nothing.
+        with mock.patch.object(measure, "MAX_BODY", 10), self.assertRaisesRegex(SystemExit, "no room"):
+            measure.fit("query", ["document"] * 100)
 
     def test_a_reranked_order_must_hold_every_candidate_once(self):
         good = {"model": "m", "rankings": [{"index": 1, "score": 2.0}, {"index": 0, "score": 1.0}]}

@@ -114,8 +114,7 @@ jobs:
         if: always()
         run: docker compose -f docker/compose.yaml --profile model --profile mcp-model down
 
-  # Ranking quality on ArguAna and NER quality on WNUT-17, public and hash-pinned. On demand only: some 2800 model
-  # jobs that report figures and gate on nothing but each job succeeding.
+  # Public, hash-pinned quality figures; on demand only, as some 2800 model jobs gate on nothing but succeeding.
   quality:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
