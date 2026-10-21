@@ -58,7 +58,34 @@ BRIDGE_REQUEST_TIMEOUT_MS=2000
 
 The placeholder is not a usable token. Generate at least 32 non-whitespace ASCII characters, for example using the commands in the README, and give the same token to PHP and Python. `worker` resolves only for containers attached to the Compose network; it is not a hostname on your laptop. Do not point the client at the FrankenPHP demo's port 8080: the client talks directly to Python on port 8090.
 
-The supplied Compose file publishes no host ports. To evaluate your own app, attach its container to the same private network (the default project creates `php-python-ai-bridge_isolated`; a custom Compose project name changes that prefix). For cross-host deployment, use an authenticated TLS boundary. Do not expose the demo or Python HTTP server directly to the internet. Configure a trusted origin, never a URL supplied by an end user.
+The supplied Compose file publishes no host ports. To evaluate your own app, attach its container to the same private network (the default project creates `php-python-ai-bridge_isolated`; a custom Compose project name changes that prefix). For cross-host deployment, use an authenticated TLS boundary, as [Cross-host use behind TLS](#cross-host-use-behind-tls) shows. Do not expose the demo or Python HTTP server directly to the internet. Configure a trusted origin, never a URL supplied by an end user.
+
+## Cross-host use behind TLS
+
+When the application and the worker run on different hosts, put a TLS proxy in front of the worker on the worker's host and point the client at it; the plain-HTTP hop is then only the one inside that host:
+
+```text
+application host                         worker host
+PHP client --- HTTPS + Bearer token ---> TLS proxy :8443 --- HTTP ---> worker :8090
+```
+
+The proxy terminates TLS and passes the request through, `Authorization` header included; it holds no token and checks none, and the worker checks the token as it does on a private network. Compose's `tls` profile is a worked example: `tls-proxy` runs Caddy from the pinned FrankenPHP image with [examples/tls/Caddyfile](../examples/tls/Caddyfile) (`tls internal`, so Caddy signs the site certificate with its own local CA, no admin endpoint, no HTTP listener and no redirect), and `tls-check` runs [tests/php/tls.php](../tests/php/tls.php) with the unchanged client against `https://tls-proxy:8443`, trusting only that CA's root through PHP's settings:
+
+```sh
+docker compose -f docker/compose.yaml --profile tls up -d tls-proxy worker
+docker compose -f docker/compose.yaml run --rm --no-deps tls-check
+docker compose -f docker/compose.yaml --profile tls down -v
+```
+
+The check proves that a rerank completes over HTTPS with the certificate verified against the example CA, that a wrong token and a request with no `Authorization` header both get the worker's 401 through the proxy, that the client trusts only the example root (the check empties the system CA store, and without the example CA the client fails as `transport_error`), and that the proxy serves no plain HTTP: `http://` to its TLS port gets Caddy's own 400 and reaches nothing, and port 80 has no listener. An `http://` URL still sends the token in clear before that 400, so configure the client with `https://` only. Both containers run on the internal network with no published port; the CA lives on a tmpfs volume that `down -v` removes, and `tls-check` mounts that whole CA directory read-only, its keys included, which only a throwaway example may do.
+
+For production, change what the example takes for granted:
+
+- **Certificate:** one from your CA or from ACME for the worker host's real name instead of `tls internal`, and the client's `BRIDGE_URL` naming that host.
+- **Trust store:** give the client only the CA that signs the proxy's certificate (`curl.cainfo` and `openssl.cafile` in `php.ini`, or the system store if a public CA signs it), never the CA's key; never turn verification off.
+- **Binding:** publish the proxy on the worker host's private interface only (for example `127.0.0.1` or a private address in a port mapping), firewall it to the application hosts, and keep the worker itself unpublished.
+- **Trust in the proxy:** it sees every token and payload in clear, so run, patch and restrict it like the worker; it must not log `Authorization`.
+- **Beyond the example:** mutual TLS, a client certificate checked by the proxy in addition to the token, is the next step; the example does not test it.
 
 ## Plain PHP
 

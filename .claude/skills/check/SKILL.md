@@ -20,7 +20,7 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml --profile test down
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile php-frameworks config
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile php-frameworks --profile tls config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 docker compose -f docker/compose.yaml run --rm --no-deps composer-install
@@ -31,7 +31,9 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-psr18-tests
 docker compose -f docker/compose.yaml up -d worker
 docker compose -f docker/compose.yaml run --rm --no-deps laravel-tests
 docker compose -f docker/compose.yaml run --rm --no-deps symfony-tests
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile php-frameworks down
+docker compose -f docker/compose.yaml up -d tls-proxy
+docker compose -f docker/compose.yaml run --rm --no-deps tls-check
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile php-frameworks --profile tls down
 ```
 
 The `composer-install` step is the consumer-install check: `composer validate --strict` on the library, then a
@@ -52,6 +54,12 @@ it runs before `php-analysis`. `laravel-tests` boots a Laravel application that 
 its configuration, and `symfony-tests` a bare Symfony kernel with the bundle; both resolve the client and rerank
 against `worker`, offline. If the Laravel test says the lock no longer carries the library's `composer.json`, lock
 it again as `docs/testing.md` says.
+
+`tls-proxy` is Caddy in front of `worker` on `:8443` with `tls internal`, and `tls-check` runs `tests/php/tls.php`
+twice with the system CA store emptied by a tmpfs, so the client trusts only the example root: once with
+`curl.cainfo` set to that root from the `tls-ca` volume (the store is empty, a rerank over HTTPS, 401 for a wrong token
+and for no `Authorization` header, Caddy's 400 for plain HTTP on the TLS port, nothing listening on port 80), once
+without it, where the client must fail as `transport_error`. `down -v` removes the volume and with it the example CA.
 
 The `python-tests` step also runs both hooks' tests (`tests/python/test_repo_rules_hook.py` and
 `tests/python/test_push_guard_hook.py`, which runs `.claude/hooks/push-guard.test.sh`); the containers

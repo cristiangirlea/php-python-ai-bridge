@@ -1,0 +1,12 @@
+# The token passes through to the worker, which checks it; `tls internal` signs with a local CA the client must trust.
+{
+    admin off
+    # Only the port 80 redirect goes: `auto_https off` would also stop Caddy issuing the `tls internal` certificate.
+    auto_https disable_redirects
+    skip_install_trust
+}
+
+tls-proxy:8443 {
+    tls internal
+    reverse_proxy worker:8090
+}
