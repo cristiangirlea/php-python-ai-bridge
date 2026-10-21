@@ -22,6 +22,7 @@ on:
       - worker/ai_bridge/metrics.py
       - scripts/benchmark.py
       - scripts/ner_measure.py
+      - scripts/public_data.py
       - tests/fixtures/ner-sample.json
       - tests/php/model.php
       - tests/model_integration.py
@@ -112,3 +113,39 @@ jobs:
       - name: Stop test containers
         if: always()
         run: docker compose -f docker/compose.yaml --profile model --profile mcp-model down
+
+  # Ranking quality on ArguAna and NER quality on WNUT-17, public and hash-pinned. On demand only: some 2800 model
+  # jobs that report figures and gate on nothing but each job succeeding.
+  quality:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+      # Each result is read as its job ends, so a short retention keeps the jobs inside the worker's capacity.
+      BRIDGE_MODEL_RETENTION_SECONDS: "15"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare disposable cache
+        run: mkdir -p .cache && chmod 777 .cache
+      - name: Acquire hash-pinned wheels, model files and datasets
+        run: |
+          docker compose -f docker/compose.yaml run --rm --no-deps fetcher
+          docker compose -f docker/compose.yaml run --rm --no-deps quality-fetcher
+      - name: Reranking and NER quality on public data (informational, correctness gating)
+        shell: bash
+        env:
+          BENCH_COMMIT: ${{ github.sha }}
+          BENCH_RUNNER: GitHub-hosted ubuntu-latest
+        run: |
+          docker compose -f docker/compose.yaml up -d model-worker
+          docker compose -f docker/compose.yaml run --rm --no-deps -T model-quality | tee quality.md
+          { echo "## Quality on public datasets (informational)"; echo; cat quality.md; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose -f docker/compose.yaml --profile model logs --tail 100
+      - name: Stop test containers
+        if: always()
+        run: docker compose -f docker/compose.yaml --profile model down

@@ -334,6 +334,8 @@ services:
       BRIDGE_BACKEND: onnx
       BRIDGE_MODEL_DIR: /cache/models
       BRIDGE_CONCURRENCY: "1"
+      # model-quality reads each of its thousands of results as its job ends; a shorter retention spares it the waits.
+      BRIDGE_RETENTION_SECONDS: ${BRIDGE_MODEL_RETENTION_SECONDS:-300}
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_CACHE_DIR: "1"
     command:
@@ -399,6 +401,36 @@ services:
       BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
       BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
     command: [python, scripts/ner_measure.py]
+
+  # The public datasets scripts/public_data.py pins, into .cache/datasets: the only quality step with network.
+  quality-fetcher:
+    <<: *python
+    profiles: [model-fetch]
+    network_mode: bridge
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      QUALITY_DATA_DIR: /cache/datasets
+    command: [python, scripts/public_data.py]
+
+  # Informational ranking quality on ArguAna and NER quality on WNUT-17, offline against model-worker.
+  model-quality:
+    <<: *python
+    profiles: [model]
+    networks: [isolated]
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache:ro
+    environment:
+      <<: *python-env
+      QUALITY_DATA_DIR: /cache/datasets
+      RELEVANCE_TARGET: http://model-worker:8090
+      NER_TARGET: http://model-worker:8090
+      BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
+      BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
+    command: [sh, -ec, 'python scripts/relevance_measure.py; echo; NER_DATASET=wnut17 python scripts/ner_measure.py']
 
   mcp-fetcher:
     <<: *python

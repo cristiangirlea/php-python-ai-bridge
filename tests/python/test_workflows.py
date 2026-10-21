@@ -284,8 +284,15 @@ jobs:  # the jobs
 
     def test_measurements_name_the_runner_they_ran_on(self):
         text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
-        self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 2)
-        self.assertEqual(text.count("BENCH_RUNNER:"), 2)
+        self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 3)
+        self.assertEqual(text.count("BENCH_RUNNER:"), 3)
+
+    def test_the_quality_job_runs_only_on_demand(self):
+        # It downloads the public datasets and runs some 2800 model jobs: worth a run when asked, not on every change.
+        lines = jobs((REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8"))["quality"]
+        self.assertEqual(lines[0], "if: github.event_name == 'workflow_dispatch'")
+        self.assertTrue(any("run --rm --no-deps quality-fetcher" in line for line in lines))
+        self.assertTrue(any("run --rm --no-deps -T model-quality" in line for line in lines))
 
     def test_dependabot_updates_github_actions_weekly(self):
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
