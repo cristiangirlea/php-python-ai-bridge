@@ -1,10 +1,10 @@
 """Bounded job lifecycle on a pool of warm worker processes. Not a durable queue: the job table (never an input)
 can live in SQLite so results and idempotency keys outlive a restart, but unfinished jobs are not replayed.
 
-The store keeps `concurrency` child processes alive and sends each job to an idle one over a pipe. A child keeps
-the models it has loaded, so only its first job pays for imports and model loading. A child that is interrupted
-(cancelled, past its deadline) or that crashes never serves again: it is terminated, then killed, and a fresh
-child takes its place. A child is also retired after `max_jobs` jobs to bound memory growth.
+The store keeps `concurrency` child processes alive and sends each job to an idle one over a pipe. A child loads its
+backend's models as it starts and keeps them, so only a job that arrives during that load waits for it. A child that
+is interrupted (cancelled, past its deadline) or that crashes never serves again: it is terminated, then killed, and a
+fresh child takes its place. A child is also retired after `max_jobs` jobs to bound memory growth.
 """
 
 import copy
@@ -19,8 +19,9 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
-from . import metrics
+from . import metrics, tasks
 from .tasks import MODEL_NAMES, TEST_TASKS, execute, validate
 
 STATUSES = ("succeeded", "failed", "timed_out", "cancelled")
@@ -34,6 +35,8 @@ READY_SECONDS = 30.0
 BACKOFF_SECONDS = 1.0
 MAX_JOBS_PER_WORKER = 1000
 IDEMPOTENCY_KEY = re.compile(r"[\x21-\x7e]{1,128}")
+# Each backend's warm-up, as the (directory, max_length, stride) keys tasks._onnx caches by; a test keeps both in step.
+WARM_UP = {"onnx": (("rerank", 512, 0), ("embed", 256, 0), ("redact", 512, 64), ("redact-uncased", 512, 64))}
 _SCHEMA = """CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT, progress TEXT,
     timeout_ms INTEGER NOT NULL, idempotency_key TEXT, submitted_at REAL NOT NULL, finished_at REAL);
@@ -44,6 +47,10 @@ class CapacityError(Exception):
     def __init__(self, message, retry_after=1):
         super().__init__(message)
         self.retry_after = retry_after  # whole seconds until a submission may be accepted, at least 1
+
+
+class DrainingError(Exception):
+    """The store is draining before the service stops and takes no new job."""
 
 
 @dataclass
@@ -67,9 +74,18 @@ def _serve(connection, backend, model_dir):
     # The service removes the token from its environment before it starts any child (server.py), so it is not
     # in the child's environment block; this second pop covers a store built by something that did not.
     os.environ.pop("BRIDGE_TOKEN", None)
+    # Ready only after the warm-up, so no job waits in a pipe nobody reads; a failed load still reports ready.
     try:
-        # Jobs come only once the child is here to read them: the parent never waits on a child still importing.
+        for name, max_length, stride in WARM_UP.get(backend, ()):
+            tasks._onnx(Path(model_dir) / name, max_length, stride)
+    except Exception:
+        loaded = False
+    else:
+        loaded = True
+    try:
         connection.send((None, "ready", None))
+        if loaded:
+            connection.send((None, "loaded", None))
     except (OSError, ValueError):
         return
     while True:
@@ -120,7 +136,9 @@ class _Worker:
         self.connection = connection
         self.started_at = time.monotonic()
         self.ready = False  # it has said so, and so reads a job the moment it is sent
+        self.loaded = False  # it has loaded every model its backend needs
         self.job_id = None  # the job sent to it, acknowledged or not
+        self.sending = False  # a send outside the lock owns the pipe until it returns
         self.served = 0  # jobs sent to it, towards max_jobs
         self.retired_at = None  # set once it must never serve again; it is then reaped outside the lock
         self.killed = False
@@ -155,6 +173,7 @@ class JobStore:
         self._backoff_until = 0.0  # no child is started before this time
         self._lock = threading.RLock()
         self._stopping = threading.Event()
+        self._draining = False
         self._db = None
         self._open_db()
         # A child that cannot start now is tried again once the backoff ends; a job that finds no child up
@@ -244,6 +263,8 @@ class JobStore:
                 raise
 
     def _accept(self, task, payload, timeout_ms, idempotency_key):
+        if self._draining:
+            raise DrainingError("worker is draining")
         if self._stopping.is_set():
             raise CapacityError("worker is shutting down")
         self._expire()
@@ -281,6 +302,36 @@ class JobStore:
             if job["status"] not in TERMINAL:
                 self._abort(job, "cancelled")
             return self._public(job)
+
+    @property
+    def draining(self):
+        return self._draining
+
+    def drain(self):
+        """Take no new job and fail every job no child has started, dropping its input; running jobs go on."""
+        with self._lock:
+            self._draining = True
+            # A start the parent has not read yet counts as a start.
+            for worker in list(self._pool):
+                self._drain(worker)
+            for job in list(self._jobs.values()):
+                if job["status"] == "queued":
+                    self._abort(job, "failed", code="service_restarted")
+
+    def busy(self):
+        """Whether any job has yet to end."""
+        with self._lock:
+            return any(job["status"] not in TERMINAL for job in self._jobs.values())
+
+    def readiness(self):
+        """None when a child is idle with its models loaded; otherwise why not, from a fixed set."""
+        with self._lock:
+            if self._draining:
+                return "draining"
+            idle = [worker for worker in self._pool if worker.ready and worker.job_id is None]
+            if any(worker.loaded for worker in idle):
+                return None
+            return "models_loading" if idle else "no_idle_child"
 
     def snapshot(self):
         """The aggregates for GET /metrics as plain values, copied under the lock so the caller formats them without
@@ -366,7 +417,8 @@ class JobStore:
         """A child could not be started, or died before it was ready: wait before trying again, and when no child
         is up to take them, tell the queued jobs now rather than at their deadline."""
         self._backoff_until = time.monotonic() + BACKOFF_SECONDS
-        if not self._pool:
+        # While draining, queued jobs end as service_restarted instead.
+        if not self._pool and not self._draining:
             for job in self._jobs.values():
                 if job["status"] == "queued" and job["id"] not in self._active:
                     self._finish(job, "failed", code="worker_start_failed")
@@ -376,7 +428,7 @@ class JobStore:
         Only the coordinator calls it once the store is built, so no two starts race for the same place."""
         while True:
             with self._lock:
-                if (self._stopping.is_set() or len(self._pool) >= self.settings.concurrency
+                if (self._stopping.is_set() or self._draining or len(self._pool) >= self.settings.concurrency
                         or time.monotonic() < self._backoff_until):
                     return
             worker = self._start_worker()
@@ -420,15 +472,18 @@ class JobStore:
         job = self._jobs.get(worker.job_id) if worker.job_id is not None else None
         self._active.pop(worker.job_id, None)
         worker.job_id = None
+        # A send in flight owns the pipe: the child is terminated instead, and the sender closes the pipe.
+        stop = stop and not worker.sending
         if stop:
             try:
                 worker.connection.send(None)
             except (OSError, ValueError):
                 pass
-        try:
-            worker.connection.close()
-        except (OSError, ValueError):
-            pass
+        if not worker.sending:
+            try:
+                worker.connection.close()
+            except (OSError, ValueError):
+                pass
         if not stop and worker.process.is_alive():
             worker.process.terminate()
         worker.retired_at = time.monotonic()
@@ -447,20 +502,42 @@ class JobStore:
     def _assign(self, job):
         """Send a queued job to an idle child that is ready for one; otherwise it waits for one, which the
         coordinator starts outside the lock when the pool has room."""
+        attached = self._attach(job)
+        if attached is not None:
+            self._send(*attached)
+
+    def _attach(self, job):
+        """Under the lock: give a queued job to an idle ready child; returns (worker, message) to send, or None."""
         worker = next((candidate for candidate in self._pool if candidate.ready and candidate.job_id is None), None)
         if worker is None:
-            return
+            return None
         worker.job_id = job["id"]
         worker.served += 1
+        worker.sending = True
         self._active[job["id"]] = worker
+        return worker, (job["id"], job["task"], job["_input"])
+
+    def _send(self, worker, message):
+        """Send what _attach returned; the coordinator calls it without the lock, so a full pipe never holds a GET."""
         try:
-            worker.connection.send((job["id"], job["task"], job["_input"]))
+            worker.connection.send(message)
+            failed = False
         except (OSError, ValueError):
-            # Its pipe is gone, so the child is: retired like one that died, and replaced.
-            self._retire(worker)
+            failed = True
+        with self._lock:
+            worker.sending = False
+            if worker.retired_at is not None:
+                try:
+                    worker.connection.close()
+                except (OSError, ValueError):
+                    pass
+            elif failed:
+                # Its pipe is gone, so the child is: retired like one that died, and replaced.
+                self._retire(worker)
 
     def _coordinate(self):
         while not self._stopping.wait(0.01):
+            sends = []
             with self._lock:
                 self._expire()
                 now = time.monotonic()
@@ -477,11 +554,18 @@ class JobStore:
                         continue
                     if now >= job["_deadline"]:
                         self._abort(job, "timed_out", code="deadline_exceeded")
+                    elif job["status"] == "queued" and self._draining:
+                        # Back in the queue after its child died before starting it, so no child will.
+                        self._abort(job, "failed", code="service_restarted")
                     elif job["status"] == "queued" and job["id"] not in self._active:
-                        self._assign(job)
+                        attached = self._attach(job)
+                        if attached is not None:
+                            sends.append(attached)
                 retiring = list(self._retiring)
             # Nothing that can wait on a process happens under the lock: a GET never waits for a child to start
             # or to die.
+            for attached in sends:
+                self._send(*attached)
             self._replenish()
             if self._stopping.is_set():
                 return  # close() reaps from here on; reaping too would touch processes it has closed
@@ -502,6 +586,9 @@ class JobStore:
         job_id, kind, value = message
         if kind == "ready":
             worker.ready = True
+            return False
+        if kind == "loaded":
+            worker.loaded = True
             return False
         job = self._jobs.get(job_id)
         # A message from a job the child no longer runs for us has nowhere to go.

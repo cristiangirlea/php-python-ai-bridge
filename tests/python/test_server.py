@@ -1,8 +1,12 @@
+import contextlib
 import http.client
 import json
 import os
 import re
+import signal
+import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -11,7 +15,7 @@ import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
-from ai_bridge import metrics, server, tasks
+from ai_bridge import jobs, metrics, server, tasks
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
 
@@ -193,6 +197,409 @@ class CapacityHttpTests(unittest.TestCase):
         self.assertEqual((status, retry_after), (429, "1"))
 
 
+def exchange(address, data=b"", wait=2):
+    """Send raw bytes, read until the server closes; (status, headers, body). Raw, so nothing a client library adds
+    or refuses gets in the way of the limits under test."""
+    with socket.create_connection(address, timeout=wait) as connection:
+        try:
+            connection.sendall(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # refused part way through; the answer is already on its way
+        received = b""
+        try:
+            while chunk := connection.recv(65536):
+                received += chunk
+        except ConnectionResetError:
+            # A refusal that left request bytes unread ends in a reset after the answer.
+            pass
+    head, _, body = received.partition(b"\r\n\r\n")
+    lines = head.decode("iso-8859-1").split("\r\n")
+    headers = dict(line.split(": ", 1) for line in lines[1:])
+    return int(lines[0].split(" ")[1]), headers, body
+
+
+def _stalled_serve(connection, backend, model_dir):
+    """A child whose warm-up takes about three seconds: the ONNX warm-up with every model load stalled."""
+    with patch.object(tasks, "_onnx", side_effect=lambda *_: time.sleep(0.75)):
+        jobs._serve(connection, "onnx", model_dir)
+
+
+class DrainHttpTests(unittest.TestCase):
+    """The first signal drains: submissions are refused, GETs answer, running jobs may finish until the deadline."""
+
+    def start(self, drain_seconds):
+        self.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(concurrency=1, test_tasks=True),
+                                   drain_seconds=drain_seconds)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.thread.join)
+        self.addCleanup(self.server.shutdown)
+
+    def raw(self, method, path, body=None):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        try:
+            connection.request(method, path, body, {"Authorization": "Bearer " + TOKEN,
+                                                    "Content-Type": "application/json"})
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), json.loads(response.read())
+        finally:
+            connection.close()
+
+    def submit(self, seconds):
+        status, _, job = self.raw("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {"seconds": seconds}}))
+        self.assertEqual(status, 202)
+        return job
+
+    def wait_running(self, job_id):
+        deadline = time.monotonic() + 5
+        while self.server.jobs.get(job_id)["status"] != "running":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
+    def test_a_running_job_finishes_inside_the_deadline_while_gets_answer_and_submissions_are_refused(self):
+        self.start(drain_seconds=10)
+        job = self.submit(1)
+        self.wait_running(job["id"])
+        self.server.stop()
+        status, headers, body = self.raw("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {}}))
+        self.assertEqual((status, body["error"]["code"]), (503, "draining"))
+        self.assertEqual((headers["Retry-After"], headers["Connection"]), ("1", "close"))
+        self.assertEqual(self.raw("GET", "/healthz")[0], 200)
+        status, _, body = self.raw("GET", "/readyz")
+        self.assertEqual((status, body), (503, {"status": "not_ready", "reason": "draining"}))
+        self.assertEqual(self.raw("GET", "/v1/jobs/" + job["id"])[2]["status"], "running")
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive(), "the drain did not end when the job did")
+        self.assertEqual(self.server.jobs.get(job["id"])["status"], "succeeded")
+
+    def test_a_queued_job_is_failed_as_service_restarted_at_once(self):
+        self.start(drain_seconds=10)
+        running = self.submit(1)
+        self.wait_running(running["id"])
+        queued = self.submit(0)
+        self.server.stop()
+        _, _, job = self.raw("GET", "/v1/jobs/" + queued["id"])
+        self.assertEqual((job["status"], job["error"]["code"]), ("failed", "service_restarted"))
+
+    def test_the_deadline_ends_the_drain_and_the_running_job_as_today(self):
+        self.start(drain_seconds=1)
+        job = self.submit(10)
+        self.wait_running(job["id"])
+        started = time.monotonic()
+        self.server.stop()
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 1)
+        self.assertLess(elapsed, 1.5)
+        self.server.server_close()
+        self.assertEqual(self.server.jobs.get(job["id"])["status"], "cancelled")
+
+    def test_a_second_signal_ends_the_drain_at_once(self):
+        self.start(drain_seconds=300)
+        job = self.submit(10)
+        self.wait_running(job["id"])
+        started = time.monotonic()
+        self.server.stop()
+        self.server.stop()
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_the_deadline_counts_from_the_signal_not_from_the_end_of_the_drain_call(self):
+        self.start(drain_seconds=1)
+        job = self.submit(10)
+        self.wait_running(job["id"])
+        drain = self.server.jobs.drain
+        with patch.object(self.server.jobs, "drain", side_effect=lambda: (time.sleep(0.8), drain())):
+            started = time.monotonic()
+            self.server.stop()
+            self.thread.join(5)
+        elapsed = time.monotonic() - started
+        self.assertFalse(self.thread.is_alive())
+        self.assertGreaterEqual(elapsed, 1)
+        self.assertLess(elapsed, 1.5)
+
+    def test_a_second_signal_stops_serving_while_the_drain_call_is_still_held(self):
+        self.start(drain_seconds=300)
+        job = self.submit(10)
+        self.wait_running(job["id"])
+        held = threading.Event()
+        self.addCleanup(held.set)
+        drain = self.server.jobs.drain
+        with patch.object(self.server.jobs, "drain", side_effect=lambda: (held.wait(5), drain())):
+            started = time.monotonic()
+            self.server.stop()
+            self.server.stop()
+            self.thread.join(2)
+        self.assertFalse(self.thread.is_alive())
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_a_malformed_body_during_the_drain_is_still_400(self):
+        self.start(drain_seconds=10)
+        job = self.submit(1)
+        self.wait_running(job["id"])
+        self.server.stop()
+        status, _, body = self.raw("POST", "/v1/jobs", "{")
+        self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
+
+    def test_a_child_still_loading_holds_neither_gets_nor_the_drain(self):
+        with patch.object(jobs, "_serve", _stalled_serve):
+            self.start(drain_seconds=1)
+            time.sleep(1)  # time for the child to start; it is still loading its models
+            # Larger than a pipe holds, so a send to a child that does not read would block.
+            status, _, job = self.raw("POST", "/v1/jobs", json.dumps(
+                {"task": "test.delay", "input": {"seconds": 0, "value": "a" * 250000}}))
+            self.assertEqual(status, 202)
+            time.sleep(0.3)
+            started = time.monotonic()
+            self.assertEqual(self.raw("GET", "/healthz")[0], 200)
+            self.assertEqual(self.raw("GET", "/v1/jobs/" + job["id"])[2]["status"], "queued")
+            self.assertLess(time.monotonic() - started, 0.5)
+            started = time.monotonic()
+            self.server.stop()
+            self.thread.join(3)
+            self.assertFalse(self.thread.is_alive())
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertEqual(self.server.jobs.get(job["id"])["error"]["code"], "service_restarted")
+
+    def test_a_drain_of_zero_seconds_stops_at_once(self):
+        self.start(drain_seconds=0)
+        job = self.submit(10)
+        self.wait_running(job["id"])
+        self.server.stop()
+        self.thread.join(2)
+        self.assertFalse(self.thread.is_alive())
+
+
+class ConnectionLimitTests(unittest.TestCase):
+    """What the server answers before a handler runs: a full connection budget, and a head over its limits."""
+
+    def setUp(self):
+        self.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=4))
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join()
+        self.server.server_close()
+
+    def get(self, extra=b"", path=b"/healthz"):
+        return exchange(self.server.server_address,
+                        b"GET " + path + b" HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + TOKEN.encode() + b"\r\n"
+                        + extra + b"\r\n")
+
+    def test_a_full_connection_budget_answers_503_without_reading(self):
+        idle = [socket.create_connection(self.server.server_address, timeout=2) for _ in range(32)]
+        try:
+            deadline = time.monotonic() + 5
+            while self.server.slots._value:
+                self.assertLess(time.monotonic(), deadline, "the idle connections were not all taken")
+                time.sleep(0.01)
+            # Nothing sent: the answer comes without the server reading anything.
+            status, headers, body = exchange(self.server.server_address)
+        finally:
+            for connection in idle:
+                connection.close()
+        self.assertEqual(status, 503)
+        self.assertEqual((headers["Retry-After"], headers["Connection"]), ("1", "close"))
+        self.assertEqual(headers["Content-Length"], str(len(body)))
+        self.assertEqual(json.loads(body)["error"]["code"], "service_busy")
+        # The slots come back as the idle connections end.
+        deadline = time.monotonic() + 5
+        while self.get()[0] != 200:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.05)
+
+    def test_a_header_block_over_16_kib_is_431(self):
+        status, headers, body = self.get(b"X-Pad: " + b"a" * 16384 + b"\r\n")
+        self.assertEqual(status, 431)
+        self.assertEqual(json.loads(body)["error"]["code"], "headers_too_large")
+        self.assertEqual(headers["Connection"], "close")
+        # Under the standard library's 100 header lines, so the byte budget is what refuses it.
+        many = b"".join(b"X-Pad-%d: %s\r\n" % (index, b"a" * 200) for index in range(90))
+        self.assertEqual(self.get(many)[0], 431)
+
+    def test_a_header_block_inside_the_limit_is_served(self):
+        used = len(b"Host: x\r\nAuthorization: Bearer " + TOKEN.encode() + b"\r\n")
+        filler = 16384 - used - len(b"X-Pad: \r\n")
+        self.assertEqual(self.get(b"X-Pad: " + b"a" * filler + b"\r\n")[0], 200)
+        self.assertEqual(self.get(b"X-Pad: " + b"a" * (filler + 1) + b"\r\n")[0], 431)
+
+    def test_carriage_returns_after_the_request_line_count_towards_its_limit(self):
+        status, _, body = exchange(self.server.server_address,
+                                   b"GET /healthz HTTP/1.1" + b"\r" * 9000 + b"\r\nHost: x\r\nAuthorization: Bearer "
+                                   + TOKEN.encode() + b"\r\n\r\n")
+        self.assertEqual(status, 431)
+        self.assertEqual(json.loads(body)["error"]["code"], "headers_too_large")
+
+    def test_a_request_line_over_8_kib_is_431(self):
+        status, _, body = self.get(path=b"/" + b"a" * 8192)
+        self.assertEqual(status, 431)
+        self.assertEqual(json.loads(body)["error"]["code"], "headers_too_large")
+        # One byte shorter it is an ordinary unknown route.
+        self.assertEqual(self.get(path=b"/" + b"a" * (8192 - len(b"GET / HTTP/1.1")))[0], 404)
+        self.assertEqual(self.get(path=b"/" + b"a" * 70000)[0], 431)
+
+
+class ReadinessHttpTests(unittest.TestCase):
+    def setUp(self):
+        self.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=4))
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join()
+        self.server.server_close()
+
+    def readyz(self, headers=None):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        try:
+            connection.request("GET", "/readyz", headers={"Authorization": "Bearer " + TOKEN}
+                               if headers is None else headers)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
+    def test_the_token_is_required(self):
+        self.assertEqual(self.readyz({})[0], 401)
+        self.assertEqual(self.readyz({"Authorization": "Bearer wrong"})[0], 401)
+
+    def test_ready_once_a_child_is_idle_and_warm_and_each_reason_otherwise(self):
+        deadline = time.monotonic() + 10
+        while (reading := self.readyz())[0] != 200:
+            status, body = reading
+            self.assertEqual((status, body["status"]), (503, "not_ready"))
+            self.assertIn(body["reason"], ("no_idle_child", "models_loading"))
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        self.assertEqual(self.readyz(), (200, {"status": "ready"}))
+        for reason in ("no_idle_child", "models_loading"):
+            with self.subTest(reason=reason), patch.object(self.server.jobs, "readiness", return_value=reason):
+                self.assertEqual(self.readyz(), (503, {"status": "not_ready", "reason": reason}))
+        self.server.jobs.drain()
+        self.assertEqual(self.readyz(), (503, {"status": "not_ready", "reason": "draining"}))
+
+
+def _children(pid):
+    """The processes whose parent is pid, from /proc."""
+    found = []
+    for entry in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open(f"/proc/{entry}/stat") as stat:
+                if int(stat.read().rsplit(")", 1)[1].split()[1]) == pid:
+                    found.append(int(entry))
+        except (OSError, IndexError, ValueError):
+            pass
+    return found
+
+
+def _gone(pid):
+    """Whether pid has exited; a zombie left to an init that does not reap counts as exited."""
+    try:
+        with open(f"/proc/{pid}/stat") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except OSError:
+        return True
+
+
+@unittest.skipUnless(os.path.isdir("/proc") and hasattr(signal, "SIGTERM"), "needs POSIX signals and /proc")
+class SignalShutdownTests(unittest.TestCase):
+    """main() in a process of its own under real signals: it drains, stops its children and closes the job table."""
+
+    def launch(self, drain_seconds):
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        self.database = os.path.join(state.name, "jobs.sqlite")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.address = probe.getsockname()
+        environment = {**os.environ, "BRIDGE_TOKEN": TOKEN, "BRIDGE_TEST_TASKS": "1", "BRIDGE_CONCURRENCY": "1",
+                       "BRIDGE_STATE_DIR": state.name, "BRIDGE_DRAIN_SECONDS": str(drain_seconds)}
+        self.process = subprocess.Popen([sys.executable, "-m", "ai_bridge.server", "--port", str(self.address[1])],
+                                        env=environment)
+        self.addCleanup(self.process.wait, 5)
+        self.addCleanup(lambda: self.process.poll() is None and self.process.kill())
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                if self.request("GET", "/readyz")[0] == 200:
+                    break
+            except OSError:
+                pass
+            self.assertLess(time.monotonic(), deadline, "the worker did not become ready")
+            time.sleep(0.05)
+
+    def request(self, method, path, body=None):
+        connection = http.client.HTTPConnection(*self.address, timeout=2)
+        try:
+            connection.request(method, path, body, {"Authorization": "Bearer " + TOKEN,
+                                                    "Content-Type": "application/json"})
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
+    def run_job(self, seconds):
+        body = json.dumps({"task": "test.delay", "input": {"seconds": seconds}})
+        status, job = self.request("POST", "/v1/jobs", body)
+        self.assertEqual(status, 202)
+        deadline = time.monotonic() + 5
+        while self.request("GET", "/v1/jobs/" + job["id"])[1]["status"] != "running":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        self.children = _children(self.process.pid)
+        self.assertTrue(self.children)
+        return job
+
+    def stopped(self, signals, within):
+        """Send the signals, wait for the exit, and check what a clean stop leaves; returns the seconds it took."""
+        started = time.monotonic()
+        for number in signals:
+            self.process.send_signal(number)
+            time.sleep(0.1)
+        self.assertEqual(self.process.wait(within + 5), 0)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, within)
+        deadline = time.monotonic() + 5
+        while not all(map(_gone, self.children)):
+            self.assertLess(time.monotonic(), deadline, "a child outlived the worker")
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(self.database))
+        self.assertFalse(os.path.exists(self.database + "-wal"), "the job table was not closed")
+        return elapsed
+
+    def test_a_running_job_completes_and_submissions_meanwhile_are_503_draining(self):
+        self.launch(drain_seconds=10)
+        job = self.run_job(1)
+        self.process.send_signal(signal.SIGTERM)
+        status, body = self.request("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {}}))
+        self.assertEqual((status, body["error"]["code"]), (503, "draining"))
+        self.stopped([], within=3)
+        with contextlib.closing(sqlite3.connect(self.database)) as database:
+            self.assertEqual(database.execute("SELECT status FROM jobs WHERE id = ?", (job["id"],)).fetchone(),
+                             ("succeeded",))
+
+    def test_the_deadline_ends_a_running_job(self):
+        self.launch(drain_seconds=1)
+        self.run_job(10)
+        self.assertGreaterEqual(self.stopped([signal.SIGTERM], within=2.5), 1)
+
+    def test_a_drain_of_zero_seconds_stops_at_once(self):
+        self.launch(drain_seconds=0)
+        self.run_job(10)
+        self.stopped([signal.SIGTERM], within=1.5)
+
+    def test_a_second_signal_stops_at_once(self):
+        self.launch(drain_seconds=300)
+        self.run_job(10)
+        self.stopped([signal.SIGTERM, signal.SIGINT], within=2)
+
+
 class StartupTests(unittest.TestCase):
     """An ONNX worker refuses to start without its model files, naming what is missing, rather than failing every job
     as task_failed: a cache fetched before a model was added holds no directory for it."""
@@ -259,7 +666,35 @@ class EnvironmentTests(unittest.TestCase):
                 return None
             with patch.object(server, "BridgeServer") as bridge:
                 server.main()
+        self.bridge = bridge
         return bridge.call_args.args[2]
+
+    def test_the_drain_deadline_is_read_and_defaults_to_30_seconds(self):
+        self.main({})
+        self.assertEqual(self.bridge.call_args.kwargs["drain_seconds"], 30)
+        for value in ("0", "300", "45"):
+            with self.subTest(value=value):
+                self.main({"BRIDGE_DRAIN_SECONDS": value})
+                self.assertEqual(self.bridge.call_args.kwargs["drain_seconds"], int(value))
+
+    def test_a_drain_deadline_outside_0_to_300_or_not_an_integer_names_its_variable(self):
+        for value in ("-1", "301", "1.5", "soon", ""):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit) as raised:
+                    self.main({"BRIDGE_DRAIN_SECONDS": value})
+                self.assertIn("BRIDGE_DRAIN_SECONDS", str(raised.exception.code))
+
+    def test_both_signals_reach_the_server_s_stop(self):
+        with patch.dict(os.environ, {"BRIDGE_TOKEN": TOKEN}), \
+                patch.object(sys, "argv", ["ai_bridge.server", "--port", "0"]), \
+                patch.object(server.signal, "signal") as handlers, patch.object(server, "BridgeServer") as bridge:
+            server.main()
+        registered = {call.args[0]: call.args[1] for call in handlers.call_args_list}
+        self.assertEqual(set(registered), {server.signal.SIGTERM, server.signal.SIGINT})
+        running = bridge.return_value.__enter__.return_value
+        registered[server.signal.SIGTERM](server.signal.SIGTERM, None)
+        registered[server.signal.SIGINT](server.signal.SIGINT, None)
+        self.assertEqual(running.stop.call_count, 2)
 
     def test_defaults_when_nothing_is_set(self):
         self.assertEqual(self.main({}), Settings())
