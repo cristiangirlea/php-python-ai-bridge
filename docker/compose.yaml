@@ -165,6 +165,43 @@ services:
       - ../.cache:/cache:ro
     command: [php, -d, include_path=/cache/php-vendor, tests/php/run.php]
 
+  # The frameworks tests/php/frameworks/composer.lock pins, with the library linked from /work as Composer would install
+  # it, into .cache: the only framework step with network. php-analysis and the framework tests then use them offline.
+  php-frameworks-fetcher:
+    <<: *limits
+    image: composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac
+    profiles: [php-frameworks]
+    network_mode: bridge
+    entrypoint: []
+    working_dir: /work/tests/php/frameworks
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache
+    environment:
+      COMPOSER_HOME: /tmp/composer
+      COMPOSER_VENDOR_DIR: /cache/php-frameworks-vendor
+      COMPOSER_NO_INTERACTION: "1"
+    command: [composer, install, --no-interaction, --prefer-dist, --no-scripts, --no-plugins]
+
+  # A Laravel application and a Symfony kernel booted around the library's provider and bundle, against the real worker.
+  laravel-tests: &framework-tests
+    <<: *php
+    profiles: [php-frameworks]
+    networks: [isolated]
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache:ro
+    environment:
+      <<: *php-env
+      COMPOSER_VENDOR_DIR: /cache/php-frameworks-vendor
+    command: [php, tests/php/frameworks/laravel.php]
+
+  symfony-tests:
+    <<: *framework-tests
+    command: [php, tests/php/frameworks/symfony.php]
+
   integration:
     <<: *python
     profiles: [test]

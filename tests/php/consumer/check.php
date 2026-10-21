@@ -23,6 +23,12 @@ if (PhpAiBridge\Client::MAX_DOCUMENTS !== 512) {
     throw new RuntimeException('Client::MAX_DOCUMENTS is not 512');
 }
 
+// The Laravel provider and the Symfony bundle ship in the library, but neither framework may come with it.
+$vendors = array_values(array_diff(scandir(getcwd() . '/vendor') ?: [], ['.', '..', 'autoload.php', 'composer', 'bin']));
+if ($vendors !== ['cristiangirlea']) {
+    throw new RuntimeException('Installing the library alone brought in other vendors: ' . implode(', ', $vendors));
+}
+
 $packageDir = getcwd() . '/vendor/cristiangirlea/php-python-ai-bridge';
 if (is_dir('/work/.git')) {
     if (!is_file($packageDir . '/src/Client.php') || !is_dir($packageDir . '/docs')) {

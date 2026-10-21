@@ -342,6 +342,15 @@ $slow = new class () implements Transport {
 check(failure(fn () => (new Client('http://worker:8090', $token, 2000, $slow))->wait(str_repeat('a', 32), 30, 1))->errorCode === 'wait_timeout', 'a transport failure at the wait deadline is wait_timeout');
 check(failure(fn () => (new Client('http://worker:8090', $token, 20, $slow))->wait(str_repeat('a', 32), 2000, 1))->errorCode === 'transport_error', 'a shorter request timeout stays transport_error');
 
+// The Laravel provider and the Symfony bundle load only inside their frameworks, so the rest of src/ must not name them.
+$frameworkNames = [];
+foreach (glob(dirname(__DIR__, 2) . '/src/*.php') ?: [] as $file) {
+    if (preg_match('/\b(?:Illuminate|Symfony|Laravel)\\\\/', (string) file_get_contents($file)) === 1) {
+        $frameworkNames[] = basename($file);
+    }
+}
+check($frameworkNames === [], 'no file in src/ outside Laravel/ and Symfony/ names a framework: ' . implode(', ', $frameworkNames));
+
 // The PSR-18 checks need the interfaces: the php-psr18-tests service puts the dev vendor directory on the include path.
 $devAutoload = stream_resolve_include_path('autoload.php');
 if ($devAutoload !== false) {

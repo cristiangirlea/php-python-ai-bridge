@@ -20,14 +20,18 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml --profile test down
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev config
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile php-frameworks config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 docker compose -f docker/compose.yaml run --rm --no-deps composer-install
 docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher
+docker compose -f docker/compose.yaml run --rm --no-deps php-frameworks-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps php-analysis
 docker compose -f docker/compose.yaml run --rm --no-deps php-psr18-tests
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev down
+docker compose -f docker/compose.yaml up -d worker
+docker compose -f docker/compose.yaml run --rm --no-deps laravel-tests
+docker compose -f docker/compose.yaml run --rm --no-deps symfony-tests
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile php-frameworks down
 ```
 
 The `composer-install` step is the consumer-install check: `composer validate --strict` on the library, then a
@@ -41,6 +45,13 @@ is not what it tests, and it needs no network and no cache.
 and `tests/php` with `phpstan.neon`; `phpstan-baseline.neon` holds the findings left on purpose, each with its
 reason. `php-psr18-tests` reruns `tests/php/run.php` with that vendor directory on the include path, so the
 PSR-18 transport checks that `php-tests` skips (with one printed line) run too, offline.
+
+`php-frameworks-fetcher` installs the Laravel and Symfony versions `tests/php/frameworks/composer.lock` pins into
+`.cache/php-frameworks-vendor`, with network, the library linked from the checkout; PHPStan loads that autoloader, so
+it runs before `php-analysis`. `laravel-tests` boots a Laravel application that discovers the provider and publishes
+its configuration, and `symfony-tests` a bare Symfony kernel with the bundle; both resolve the client and rerank
+against `worker`, offline. If the Laravel test says the lock no longer carries the library's `composer.json`, lock
+it again as `docs/testing.md` says.
 
 The `python-tests` step also runs both hooks' tests (`tests/python/test_repo_rules_hook.py` and
 `tests/python/test_push_guard_hook.py`, which runs `.claude/hooks/push-guard.test.sh`); the containers

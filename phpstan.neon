@@ -7,5 +7,8 @@ parameters:
         - src
         - examples
         - tests/php
+    # The Laravel provider, the Symfony bundle and their tests need the frameworks, which php-frameworks-fetcher installs.
+    bootstrapFiles:
+        - /cache/php-frameworks-vendor/autoload.php
     # The checkout is mounted read-only in the container, so the result cache lives in its tmpfs.
     tmpDir: /tmp/phpstan

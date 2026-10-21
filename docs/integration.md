@@ -1,6 +1,6 @@
 # Integrating the bridge
 
-This guide covers the existing framework-independent client. Dedicated Symfony bundles and Laravel packages do not exist yet. The manual framework examples below are configuration recipes, not framework integration tests or a promise of production readiness.
+This guide covers the framework-independent client and the two optional integrations shipped in the same package: a Laravel service provider and a Symfony bundle, each of which builds `PhpAiBridge\Client` from a URL and a token. Neither framework is a dependency of the library; install the bridge into an application that already has one. The manual recipes kept below each integration are configuration examples that no test runs, and nothing here is a promise of production readiness.
 
 ## What runs where
 
@@ -137,7 +137,31 @@ $client = new Client($url, $token, 2000, new Psr18Transport($http, $factory, $fa
 
 The repository's tests drive `Psr18Transport` through small in-repo fakes of the PSR interfaces (see [testing](testing.md)); neither Symfony HttpClient nor Guzzle is installed or run by them, so treat these two snippets as configuration recipes.
 
-## Symfony: manual service registration
+## Symfony: the bundle
+
+After `composer require cristiangirlea/php-python-ai-bridge`, register the bundle in `config/bundles.php` (there is no Flex recipe, so Flex does not add it):
+
+```php
+return [
+    // ...
+    PhpAiBridge\Symfony\PhpAiBridgeBundle::class => ['all' => true],
+];
+```
+
+Set `BRIDGE_URL` and `BRIDGE_TOKEN` in the deployment environment, and `BRIDGE_REQUEST_TIMEOUT_MS` if 2000 ms does not suit you. Those are the defaults of the bundle's configuration; write `config/packages/php_ai_bridge.yaml` only to read other variables or to fix a value:
+
+```yaml
+php_ai_bridge:
+    url: '%env(default::BRIDGE_URL)%'
+    token: '%env(default::BRIDGE_TOKEN)%'
+    request_timeout_ms: '%env(int:BRIDGE_REQUEST_TIMEOUT_MS)%'
+```
+
+The bundle registers `PhpAiBridge\Client` as a shared service under its class name, so constructor-inject it into a service or controller by type. Environment values are read when the client is first resolved: an unset or empty URL or token, a URL that is not a bare HTTP(S) origin, a token under 32 characters or a timeout outside 1 to 300000 fail with an `InvalidArgumentException` naming the `php_ai_bridge` setting. An empty URL or an out-of-range timeout written in the configuration fails the container build. No message quotes the token. Keep the token out of committed YAML; use deployment environment variables or Symfony's secret management.
+
+`symfony-tests` (see [testing](testing.md)) boots a bare `Kernel` with only this bundle, no FrameworkBundle, with debug off: it compiles and dumps the container, resolves the client and a service autowired with it, reranks against the real worker, loads the dumped container in a second kernel and resolves the client again, and checks every invalid case above. It runs Symfony 8.0 on PHP 8.5 only. It is not a full Symfony application: no FrameworkBundle, Flex, Messenger, Symfony Runtime or FrankenPHP worker mode is tested, and no older Symfony version, though the bundle uses only `AbstractBundle`, which Symfony has had since 6.1.
+
+### Without the bundle: manual service registration
 
 Add this service to your existing `config/services.yaml`:
 
@@ -150,11 +174,23 @@ services:
             $requestTimeoutMs: '%env(int:BRIDGE_REQUEST_TIMEOUT_MS)%'
 ```
 
-With normal application autowiring enabled, constructor-inject `PhpAiBridge\Client` into an application service or controller. No bundle or Flex recipe is needed for this manual setup. Keep secrets in deployment environment variables or Symfony's secret management; do not put a token in committed YAML. See [Symfony service configuration](https://symfony.com/doc/current/service_container.html) and [environment processors](https://symfony.com/doc/current/configuration/env_var_processors.html).
+With normal application autowiring enabled, constructor-inject `PhpAiBridge\Client` as above. See [Symfony service configuration](https://symfony.com/doc/current/service_container.html) and [environment processors](https://symfony.com/doc/current/configuration/env_var_processors.html).
 
-## Laravel: manual container binding
+## Laravel: the service provider
 
-Create `config/ai_bridge.php` in your application:
+`composer require cristiangirlea/php-python-ai-bridge` is enough: Laravel's package discovery registers `PhpAiBridge\Laravel\BridgeServiceProvider` from the package's `composer.json`. Set `BRIDGE_URL`, `BRIDGE_TOKEN` and, optionally, `BRIDGE_REQUEST_TIMEOUT_MS` (default 2000) in `.env` or the deployment environment. To change how they are read, publish the configuration:
+
+```sh
+php artisan vendor:publish --tag=ai-bridge-config
+```
+
+That writes `config/ai_bridge.php`, the only place the provider's settings call `env()`, so `php artisan config:cache` keeps working; never expose cached configuration, since it holds the token. The provider binds one `PhpAiBridge\Client` per application as a singleton: constructor-inject it by type. Settings are checked when the client is first resolved: a missing or empty URL or token, a URL that is not a bare HTTP(S) origin, a token under 32 characters, or a timeout that is not a whole number from 1 to 300000 fails with an `InvalidArgumentException` naming the setting, as in `ai_bridge.token (BRIDGE_TOKEN)`, never with the token's value.
+
+`laravel-tests` (see [testing](testing.md)) boots a Laravel 13 `Application` without a skeleton on PHP 8.5, with the provider coming from the package manifest Laravel builds out of Composer's `installed.json`, never from a `register()` call: it runs `vendor:publish` for the tag, resolves the client twice and gets one instance, reranks against the real worker, boots again from a configuration cache written as `config:cache` writes it, with the environment changed so only the cache can be right, and checks every invalid case above. It is not a full skeleton application, and no Octane, queue worker, facade or other Laravel version is tested.
+
+### Without discovery: manual container binding
+
+If your application lists the package under `extra.laravel.dont-discover`, create `config/ai_bridge.php` yourself:
 
 ```php
 <?php
@@ -180,7 +216,7 @@ $this->app->bind(\PhpAiBridge\Client::class, static function ($app): \PhpAiBridg
 });
 ```
 
-Constructor-inject `PhpAiBridge\Client` into your service/controller. This is not an auto-discovered package provider or facade. Read `env()` only in configuration files so Laravel configuration caching works; never expose cached configuration containing secrets. See [Laravel service providers](https://laravel.com/docs/13.x/providers) and [configuration caching](https://laravel.com/docs/13.x/configuration#configuration-caching). These snippets use manual container APIs, but no Laravel version matrix has been executed yet.
+Read `env()` only in configuration files so configuration caching works. See [Laravel service providers](https://laravel.com/docs/13.x/providers) and [configuration caching](https://laravel.com/docs/13.x/configuration#configuration-caching).
 
 ## Application HTTP lifecycle and ownership
 
