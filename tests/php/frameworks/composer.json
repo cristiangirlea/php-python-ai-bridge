@@ -1,0 +1,18 @@
+{
+    "description": "The framework test project: the library from the checkout, the frameworks from Packagist as composer.lock pins them",
+    "repositories": [
+        {"type": "path", "url": "/work", "options": {"symlink": true, "reference": "none", "versions": {"cristiangirlea/php-python-ai-bridge": "0.0.0"}}}
+    ],
+    "require": {
+        "cristiangirlea/php-python-ai-bridge": "0.0.0",
+        "laravel/framework": "^13.0",
+        "symfony/config": "^8.0",
+        "symfony/dependency-injection": "^8.0",
+        "symfony/filesystem": "^8.0",
+        "symfony/http-kernel": "^8.0"
+    },
+    "config": {
+        "platform": {"php": "8.4.0"},
+        "allow-plugins": false
+    }
+}

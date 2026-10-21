@@ -69,7 +69,7 @@ jobs:
       - name: Prepare disposable cache
         run: mkdir -p .cache && chmod 777 .cache
       - name: Inspect sandbox configuration
-        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev config
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile php-frameworks config
       - name: Acquire hash-pinned MCP wheels
         run: docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
       - name: Offline MCP server tests
@@ -78,13 +78,22 @@ jobs:
         run: docker compose -f docker/compose.yaml run --rm --no-deps -e BRIDGE_REQUIRE_ARCHIVE=1 composer-install
       - name: Acquire the locked PHPStan
         run: docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher
+      # PHPStan reads the provider and the bundle against these, so they come before it.
+      - name: Acquire the locked Laravel and Symfony
+        run: docker compose -f docker/compose.yaml run --rm --no-deps php-frameworks-fetcher
       - name: PHPStan at level max, offline
         run: docker compose -f docker/compose.yaml run --rm --no-deps php-analysis
       - name: PSR-18 transport checks with the dev interfaces, offline
         run: docker compose -f docker/compose.yaml run --rm --no-deps php-psr18-tests
+      # Once, on compose's default PHP 8.5: the locked Symfony 8 needs PHP 8.4 or later and Laravel 13 needs 8.3.
+      - name: Laravel provider and Symfony bundle against the worker, offline
+        run: |
+          docker compose -f docker/compose.yaml up -d worker
+          docker compose -f docker/compose.yaml run --rm --no-deps laravel-tests
+          docker compose -f docker/compose.yaml run --rm --no-deps symfony-tests
       - name: Stop test containers
         if: always()
-        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev down
+        run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile php-frameworks down
 
   # Keep the required branch-protection check stable as the matrix changes.
   deterministic:
