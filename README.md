@@ -139,7 +139,7 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 
 ## Important limits
 
-- **In-memory only:** a service restart loses jobs/results. Completed results expire after 300 seconds by default; 404 can mean expired, lost or unknown. There is no durable delivery, automatic retry or idempotency key support.
+- **Durable job table only when `BRIDGE_STATE_DIR` is set:** the worker then keeps its job table (never inputs) in SQLite, so finished results and idempotency keys survive a restart until retention ends and unfinished jobs become `failed` with `service_restarted`; unset, a restart loses everything. Completed results expire after 300 seconds by default; 404 can mean expired, lost or unknown. An optional `idempotency_key` makes resubmitting after an uncertain POST safe while the job is retained. There is still no replay of unfinished jobs, durable delivery or automatic retry.
 - **Trusted services only:** one bearer token authorizes all jobs. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
 - **Private HTTP transport:** deploy behind an authenticated TLS boundary for cross-host use. The sample Python HTTP server is not an internet-facing production server.
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
