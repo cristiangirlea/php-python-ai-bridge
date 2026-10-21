@@ -108,6 +108,34 @@ $repeated = $real->submitRerank('needle token', ['other words', 'needle token'],
 check($repeated->id === $first->id && $repeated->status === 'succeeded' && $repeated->result === $firstDone->result, 'repeated idempotency key returns the same job');
 $different = $real->submitRerank('needle token', ['other words', 'needle token'], idempotencyKey: $idempotencyKey . '-2');
 check($different->id !== $first->id, 'different idempotency key runs a new job');
+// A worker with two tokens: each client sees only the jobs its own token submitted.
+$tokensUrl = getenv('BRIDGE_TOKENS_URL') ?: throw new RuntimeException('Set BRIDGE_TOKENS_URL');
+$app = new Client($tokensUrl, getenv('BRIDGE_APP_TOKEN') ?: throw new RuntimeException('Set BRIDGE_APP_TOKEN'));
+$other = new Client($tokensUrl, getenv('BRIDGE_OTHER_TOKEN') ?: throw new RuntimeException('Set BRIDGE_OTHER_TOKEN'));
+ready($app);
+$owned = $app->submitRerank('needle token', ['other words', 'needle token']);
+foreach (['read' => fn () => $other->get($owned->id), 'cancel' => fn () => $other->cancel($owned->id)] as $call => $attempt) {
+    try {
+        $attempt();
+        throw new RuntimeException("Expected another token's $call to be refused");
+    } catch (BridgeException $error) {
+        check($error->httpStatus === 404, "another token's $call is 404 like an unknown job");
+    }
+}
+check($app->get($owned->id)->id === $owned->id, 'the submitting token reads its job');
+check($app->cancel($owned->id)->id === $owned->id, 'the submitting token cancels its job');
+$sharedKey = 'php-owner-' . bin2hex(random_bytes(8));
+$fromApp = $app->submitRerank('needle token', ['needle token'], idempotencyKey: $sharedKey);
+$fromOther = $other->submitRerank('needle token', ['needle token'], idempotencyKey: $sharedKey);
+check($fromApp->id !== $fromOther->id, 'the same idempotency key from two tokens is two jobs');
+check($app->submitRerank('needle token', ['needle token'], idempotencyKey: $sharedKey)->id === $fromApp->id,
+    'a repeated key returns the job of the token that sent it');
+try {
+    (new Client($tokensUrl, str_repeat('x', 32)))->get($owned->id);
+    throw new RuntimeException('Expected authentication failure on the two-token worker');
+} catch (BridgeException $error) {
+    check($error->httpStatus === 401, 'a token the worker does not hold is 401');
+}
 // Last, since the fault-worker then stays full for its 300 s retention: its default capacity is 128 jobs, and the
 // jobs above have finished, so the earliest of them to expire says when a slot returns.
 $refusal = null;

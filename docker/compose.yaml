@@ -250,6 +250,9 @@ services:
       <<: *python-env
       FRANKENPHP_URL: http://frankenphp:8080
       WORKER_URL: http://worker:8090
+      TOKENS_WORKER_URL: http://tokens-worker:8090
+      BRIDGE_APP_TOKEN: test-only-app-client-token-never-use-in-production
+      BRIDGE_OTHER_TOKEN: test-only-other-client-token-never-use-in-production
     command: [python, tests/integration.py]
 
   php-example:
@@ -268,6 +271,18 @@ services:
       BRIDGE_CONCURRENCY: "1"
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
 
+  # Two clients of one worker, each with its own test-only literal token, independent of the run's BRIDGE_TOKEN.
+  # The environment is written out rather than merged, since BRIDGE_TOKEN beside BRIDGE_TOKENS is a start error.
+  tokens-worker:
+    <<: *python
+    profiles: [test]
+    networks: [isolated]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: /work/worker
+      BRIDGE_TOKENS: app=test-only-app-client-token-never-use-in-production,other=test-only-other-client-token-never-use-in-production
+    command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
+
   hostile:
     <<: *python
     profiles: [test]
@@ -278,6 +293,11 @@ services:
     <<: *php
     profiles: [test]
     networks: [isolated]
+    environment:
+      <<: *php-env
+      BRIDGE_TOKENS_URL: http://tokens-worker:8090
+      BRIDGE_APP_TOKEN: test-only-app-client-token-never-use-in-production
+      BRIDGE_OTHER_TOKEN: test-only-other-client-token-never-use-in-production
     command: [php, tests/php/integration.php]
 
   fetcher:
