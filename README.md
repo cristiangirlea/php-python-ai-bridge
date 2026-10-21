@@ -68,7 +68,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps model-test
 docker compose -f docker/compose.yaml run --rm --no-deps model-integration
 ```
 
-`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational). Model scores are relevance logits, not probabilities.
+`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational), and throughput and latency percentiles under concurrent load beside them in [its load section](docs/testing.md#measured-throughput-and-latency-under-load-informational). Model scores are relevance logits, not probabilities.
 
 Stop this project's containers when finished:
 
