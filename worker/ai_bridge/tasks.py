@@ -40,6 +40,10 @@ NER_LABELS = ("O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LO
 MODEL_DIRECTORIES = ("rerank", "embed", "redact", "redact-uncased")
 
 
+# Present only with BRIDGE_TEST_TASKS=1, for the fault tests.
+TEST_TASKS = ("test.delay", "test.crash", "test.error", "test.inspect")
+
+
 class InvalidInput(ValueError):
     pass
 
@@ -65,7 +69,7 @@ def _strings(values: object, plural: str, singular: str, limit: int, extra: int 
 def validate(task: str, payload: object, test_tasks: bool = False) -> dict:
     if not isinstance(payload, dict):
         raise InvalidInput("input must be an object")
-    if test_tasks and task in {"test.delay", "test.crash", "test.error", "test.inspect"}:
+    if test_tasks and task in TEST_TASKS:
         if set(payload) - {"seconds", "value"}:
             raise InvalidInput("unknown input field")
         seconds = payload.get("seconds", 0.05)

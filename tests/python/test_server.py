@@ -1,15 +1,17 @@
 import http.client
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import uuid
 from unittest.mock import MagicMock, patch
 
-from ai_bridge import server, tasks
+from ai_bridge import metrics, server, tasks
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
 
@@ -169,6 +171,22 @@ class CapacityHttpTests(unittest.TestCase):
         self.assertRegex(retry_after, r"\A[1-9][0-9]*\Z")
         self.assertIn(int(retry_after), (299, 300))
 
+    def test_a_refusal_for_capacity_is_counted_once_per_429(self):
+        def rejected():
+            connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+            try:
+                connection.request("GET", "/metrics", headers={"Authorization": "Bearer " + TOKEN})
+                return sample(parse_metrics(connection.getresponse().read().decode()),
+                              "bridge_submissions_rejected_total", reason="capacity")
+            finally:
+                connection.close()
+
+        self.assertEqual(self.submit()[0], 202)
+        self.assertEqual(rejected(), 0)
+        for count in (1, 2):
+            self.assertEqual(self.submit()[0], 429)
+            self.assertEqual(rejected(), count)
+
     def test_a_shutting_down_store_says_one_second(self):
         self.server.jobs.close()
         status, retry_after, _ = self.submit()
@@ -299,3 +317,309 @@ class EnvironmentTests(unittest.TestCase):
         for value in ("0", "1000001", "-1"):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "invalid worker limits"):
                 self.main({"BRIDGE_WORKER_MAX_JOBS": value}, real_server=True)
+
+
+SAMPLE = re.compile(r"([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})? (\S+)")
+LABEL = r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\\n]|\\[\\"n])*)"'
+NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|\+Inf")
+
+
+def parse_metrics(text):
+    """A strict reading of the Prometheus text format, version 0.0.4: {family: (type, {(name, labels): value})}.
+    Raises ValueError for anything a scraper could misread."""
+    if not text.endswith("\n"):
+        raise ValueError("the body must end with a newline")
+    families, seen, current = {}, set(), None
+    for line in text[:-1].split("\n"):
+        if line.startswith("# HELP "):
+            if len(line.split(" ", 3)) != 4:
+                raise ValueError(f"HELP without text: {line!r}")
+            continue
+        if line.startswith("# TYPE "):
+            parts = line.split(" ")
+            if len(parts) != 4 or parts[3] not in {"counter", "gauge", "histogram"}:
+                raise ValueError(f"malformed TYPE: {line!r}")
+            if parts[2] in families:
+                raise ValueError(f"a second TYPE for {parts[2]}")
+            current = parts[2]
+            families[current] = (parts[3], {})
+            continue
+        match = SAMPLE.fullmatch(line)
+        if match is None or current is None:
+            raise ValueError(f"not a sample line under a TYPE: {line!r}")
+        name, labels_text, value = match.groups()
+        kind = families[current][0]
+        allowed = {current + suffix for suffix in ("_bucket", "_sum", "_count")} if kind == "histogram" else {current}
+        if name not in allowed:
+            raise ValueError(f"{name} outside its family {current}")
+        labels = {}
+        if labels_text is not None:
+            if not re.fullmatch(f"{LABEL}(?:,{LABEL})*", labels_text):
+                raise ValueError(f"malformed labels: {line!r}")
+            for key, label in re.findall(LABEL, labels_text):
+                if key in labels:
+                    raise ValueError(f"label {key} twice: {line!r}")
+                labels[key] = re.sub(r"\\(.)", lambda m: "\n" if m[1] == "n" else m[1], label)
+        if not NUMBER.fullmatch(value):
+            raise ValueError(f"malformed value: {line!r}")
+        key = (name, tuple(sorted(labels.items())))
+        if key in seen:
+            raise ValueError(f"duplicate series: {line!r}")
+        seen.add(key)
+        families[current][1][key] = float(value)
+    for family, (kind, samples) in families.items():
+        if kind == "histogram":
+            _check_histogram(family, samples)
+    return families
+
+
+def _check_histogram(family, samples):
+    series = {}
+    for (name, labels), value in samples.items():
+        rest = tuple(item for item in labels if item[0] != "le")
+        entry = series.setdefault(rest, {"buckets": [], "sum": None, "count": None})
+        if name.endswith("_bucket"):
+            bound = dict(labels).get("le")
+            if bound is None or not NUMBER.fullmatch(bound):
+                raise ValueError(f"a bucket of {family} without a numeric le")
+            entry["buckets"].append((float(bound), value))
+        else:
+            entry[name.rsplit("_", 1)[1]] = value
+    for rest, entry in series.items():
+        counts = [count for _, count in sorted(entry["buckets"])]
+        if not entry["buckets"] or max(entry["buckets"])[0] != float("inf"):
+            raise ValueError(f"{family}{rest} has no +Inf bucket")
+        if counts != sorted(counts):
+            raise ValueError(f"{family}{rest} buckets are not cumulative")
+        if entry["sum"] is None or entry["count"] is None or counts[-1] != entry["count"]:
+            raise ValueError(f"{family}{rest} +Inf bucket differs from _count, or a total is missing")
+
+
+def sample(families, name, **labels):
+    family = next(family for family in families if name == family or name.startswith(family + "_"))
+    return families[family][1][(name, tuple(sorted(labels.items())))]
+
+
+class MetricsParserTests(unittest.TestCase):
+    """The parser the endpoint's tests rely on refuses what a scraper would misread."""
+
+    GOOD = ("# HELP h_seconds Durations.\n# TYPE h_seconds histogram\n"
+            'h_seconds_bucket{task="a",le="1"} 1\nh_seconds_bucket{task="a",le="+Inf"} 2\n'
+            'h_seconds_sum{task="a"} 3.5\nh_seconds_count{task="a"} 2\n'
+            '# TYPE c_total counter\nc_total{x="q\\"\\\\\\n"} 4\n')
+
+    def test_a_well_formed_body_parses(self):
+        families = parse_metrics(self.GOOD)
+        self.assertEqual(sample(families, "h_seconds_count", task="a"), 2)
+        self.assertEqual(sample(families, "c_total", x='q"\\\n'), 4)
+
+    def test_malformed_bodies_are_refused(self):
+        for broken in [
+                self.GOOD.rstrip("\n"),
+                self.GOOD + "# TYPE c_total counter\n",
+                self.GOOD + 'c_total{x="q\\"\\\\\\n"} 5\n',
+                self.GOOD.replace('le="+Inf"} 2', 'le="9"} 2'),
+                self.GOOD.replace('le="1"} 1', 'le="1"} 3'),
+                self.GOOD.replace('h_seconds_count{task="a"} 2', 'h_seconds_count{task="a"} 5'),
+                self.GOOD.replace('h_seconds_sum{task="a"} 3.5\n', ""),
+                self.GOOD.replace("c_total{", "other_total{"),
+                "x 1\n", self.GOOD + "c_total 1 2\n", self.GOOD + "c_total NaN\n",
+                self.GOOD + 'c_total{x="a",x="b"} 1\n', self.GOOD + "c_total{x=unquoted} 1\n",
+                self.GOOD + "# TYPE s summary\n"]:
+            with self.subTest(broken=broken[-40:]), self.assertRaises(ValueError):
+                parse_metrics(broken)
+
+
+class MetricsRenderTests(unittest.TestCase):
+    def test_label_values_are_escaped(self):
+        self.assertEqual(metrics.escape('a\\b"c\nd'), 'a\\\\b\\"c\\nd')
+        families = parse_metrics(metrics.gauge("g", "A gauge.", [({"v": 'a\\b"c\nd'}, 1)]))
+        self.assertEqual(sample(families, "g", v='a\\b"c\nd'), 1)
+
+    def test_values_are_written_exactly(self):
+        self.assertEqual([metrics.number(value) for value in (0, 7, 0.1, 2.5, 1e-07, float("inf"))],
+                         ["0", "7", "0.1", "2.5", "1e-07", "+Inf"])
+
+    def test_a_histogram_is_cumulative_with_its_totals(self):
+        text = metrics.histogram("h_seconds", "Durations.", [({"task": "a"}, {
+            "buckets": [1, 0, 2] + [0] * 8 + [1], "sum": 400.5, "count": 4})])
+        families = parse_metrics(text)
+        self.assertEqual(sample(families, "h_seconds_bucket", task="a", le="0.05"), 1)
+        self.assertEqual(sample(families, "h_seconds_bucket", task="a", le="0.25"), 3)
+        self.assertEqual(sample(families, "h_seconds_bucket", task="a", le="300"), 3)
+        self.assertEqual(sample(families, "h_seconds_bucket", task="a", le="+Inf"), 4)
+        self.assertEqual(sample(families, "h_seconds_sum", task="a"), 400.5)
+
+
+class MetricsHttpTests(unittest.TestCase):
+    """GET /metrics on a store with the test tasks, so failures and timeouts can be produced."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(concurrency=1, capacity=16, test_tasks=True))
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.thread.join()
+        cls.server.server_close()
+
+    def raw(self, method, path, body=None, headers=None):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        try:
+            connection.request(method, path, body, headers or {})
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    def auth(self):
+        return {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"}
+
+    def scrape(self):
+        status, headers, body = self.raw("GET", "/metrics", headers=self.auth())
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/plain; version=0.0.4; charset=utf-8")
+        self.assertEqual(headers["Content-Length"], str(len(body)))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Connection"], "close")
+        return body.decode("utf-8"), parse_metrics(body.decode("utf-8"))
+
+    def submit(self, task, value, timeout_ms=30000, key=None):
+        body = {"task": task, "input": value, "timeout_ms": timeout_ms}
+        if key is not None:
+            body["idempotency_key"] = key
+        status, _, data = self.raw("POST", "/v1/jobs", json.dumps(body), self.auth())
+        self.assertEqual(status, 202, data)
+        return json.loads(data)
+
+    def wait(self, job_id, states=("succeeded", "failed", "timed_out", "cancelled"), timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = self.server.jobs.get(job_id)
+            if job["status"] in states:
+                return job
+            time.sleep(0.01)
+        self.fail(f"job did not reach {states}")
+
+    def test_the_token_is_required_exactly_as_on_every_route(self):
+        for index, headers in enumerate([{}, {"Authorization": "Bearer wrong"},
+                                         {"Authorization": "Bearer " + TOKEN + "x"},
+                                         {"Authorization": "Basic " + TOKEN}]):
+            with self.subTest(case=index):
+                status, _, body = self.raw("GET", "/metrics", headers=headers)
+                self.assertEqual(status, 401)
+                self.assertEqual(json.loads(body)["error"]["code"], "unauthorized")
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        try:
+            connection.putrequest("GET", "/metrics")
+            connection.putheader("Authorization", "Bearer " + TOKEN)
+            connection.putheader("Authorization", "Bearer " + TOKEN)
+            connection.endheaders()
+            self.assertEqual(connection.getresponse().status, 401)
+        finally:
+            connection.close()
+
+    def test_other_methods_and_spellings_are_unknown_routes(self):
+        self.assertEqual(self.raw("POST", "/metrics", "{}", self.auth())[0], 404)
+        self.assertEqual(self.raw("POST", "/unknown", "{}", self.auth())[0], 404)
+        for path in ["/metrics?x=1", "/metrics/", "/Metrics", "/v1/metrics"]:
+            with self.subTest(path=path):
+                self.assertEqual(self.raw("GET", path, headers=self.auth())[0], 404)
+
+    def test_the_body_parses_and_names_every_family(self):
+        _, families = self.scrape()
+        self.assertEqual({family: kind for family, (kind, _) in families.items()}, {
+            "bridge_jobs_total": "counter", "bridge_jobs_submitted_total": "counter",
+            "bridge_submissions_rejected_total": "counter", "bridge_queue_depth": "gauge",
+            "bridge_jobs_running": "gauge", "bridge_pool_size": "gauge", "bridge_pool_ready": "gauge",
+            "bridge_concurrency": "gauge", "bridge_capacity": "gauge",
+            "bridge_job_duration_seconds": "histogram", "bridge_job_queue_seconds": "histogram",
+            "bridge_info": "gauge"})
+        self.assertEqual(sample(families, "bridge_info", protocol="1", backend="lexical"), 1)
+        self.assertEqual(sample(families, "bridge_concurrency"), 1)
+        self.assertEqual(sample(families, "bridge_capacity"), 16)
+        self.assertIn(sample(families, "bridge_submissions_rejected_total", reason="capacity"), (0, 1, 2))
+        bounds = sorted({dict(labels)["le"] for name, labels in families["bridge_job_duration_seconds"][1]
+                         if name.endswith("_bucket")}, key=float)
+        self.assertEqual(bounds, ["0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30", "60", "300", "+Inf"])
+        statuses = {dict(labels)["status"] for _, labels in families["bridge_jobs_total"][1]}
+        self.assertEqual(statuses, {"succeeded", "failed", "timed_out", "cancelled"})
+        tasks = {dict(labels)["task"] for _, labels in families["bridge_jobs_total"][1]}
+        self.assertEqual(tasks, {"rerank", "embed", "redact", "test.delay", "test.crash", "test.error", "test.inspect"})
+
+    def test_counters_and_histograms_move_with_the_jobs_and_nothing_of_a_job_is_exposed(self):
+        _, before = self.scrape()
+        marker = "metrics-marker-" + uuid.uuid4().hex
+        key = "metrics-key-" + uuid.uuid4().hex
+        succeeded = self.submit("test.delay", {"seconds": 0, "value": marker}, key=key)
+        failed = self.submit("test.error", {"value": marker})
+        ids = [succeeded["id"], failed["id"]]
+        for job_id in ids:
+            self.wait(job_id)
+        cancelled = self.submit("test.delay", {"seconds": 5, "value": marker})
+        self.wait(cancelled["id"], {"running"})
+        self.raw("POST", "/v1/jobs/" + cancelled["id"] + "/cancel", "{}", self.auth())
+        # The cancelled job's child is replaced; the next one starts only on the fresh child.
+        deadline = time.monotonic() + 10
+        while self.server.jobs.snapshot()["pool_ready"] != 1:
+            self.assertLess(time.monotonic(), deadline, "no fresh child")
+            time.sleep(0.01)
+        timed_out = self.submit("test.delay", {"seconds": 5, "value": marker}, 150)
+        ids += [cancelled["id"], timed_out["id"]]
+        self.assertEqual(self.wait(timed_out["id"])["status"], "timed_out")
+        text, after = self.scrape()
+
+        def moved(name, **labels):
+            return sample(after, name, **labels) - sample(before, name, **labels)
+
+        self.assertEqual(moved("bridge_jobs_total", task="test.delay", status="succeeded"), 1)
+        self.assertEqual(moved("bridge_jobs_total", task="test.error", status="failed"), 1)
+        self.assertEqual(moved("bridge_jobs_total", task="test.delay", status="cancelled"), 1)
+        self.assertEqual(moved("bridge_jobs_total", task="test.delay", status="timed_out"), 1)
+        self.assertEqual(moved("bridge_jobs_submitted_total", task="test.delay"), 3)
+        self.assertEqual(moved("bridge_jobs_submitted_total", task="test.error"), 1)
+        self.assertEqual(moved("bridge_job_duration_seconds_count", task="test.delay"), 3)
+        self.assertEqual(moved("bridge_job_duration_seconds_count", task="test.error"), 1)
+        self.assertGreaterEqual(moved("bridge_job_duration_seconds_sum", task="test.delay"), 0.15)
+        self.assertEqual(moved("bridge_job_duration_seconds_bucket", task="test.delay", le="+Inf"), 3)
+        self.assertEqual(moved("bridge_job_queue_seconds_count", task="test.delay"), 3)
+        for secret in ids + [marker, key, TOKEN, "This internal exception", "task_failed", "deadline_exceeded",
+                             self.server.jobs.settings.model_dir]:
+            with self.subTest(secret=secret[:16]):
+                self.assertNotIn(secret, text)
+
+    def test_a_scrape_while_a_job_runs_answers_at_once(self):
+        job = self.submit("test.delay", {"seconds": 2})
+        self.wait(job["id"], {"running"})
+        started = time.monotonic()
+        _, families = self.scrape()
+        # Well inside the 2 s request timeout, while the job still runs.
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(sample(families, "bridge_jobs_running"), 1)
+        self.assertEqual(sample(families, "bridge_pool_size"), 1)
+        self.raw("POST", "/v1/jobs/" + job["id"] + "/cancel", "{}", self.auth())
+        self.wait(job["id"])
+
+    def test_the_body_is_formatted_outside_the_store_lock(self):
+        held = []
+        render = metrics.render
+
+        def checking(snapshot):
+            # Another thread can take the lock here, so the scrape held it only while it copied the numbers.
+            def probe():
+                taken = self.server.jobs._lock.acquire(blocking=False)
+                if taken:
+                    self.server.jobs._lock.release()
+                held.append(not taken)
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join()
+            return render(snapshot)
+
+        with patch.object(server, "render", checking):
+            self.scrape()
+        self.assertEqual(held, [False])

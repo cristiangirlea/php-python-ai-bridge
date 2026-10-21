@@ -1616,5 +1616,176 @@ class WarmPoolTests(unittest.TestCase):
         self.assertEqual(self.wait(running["id"])["result"]["value"], "kept")
 
 
+class MetricsSnapshotTests(unittest.TestCase):
+    """What the store counts for GET /metrics: plain numbers keyed only by task, status and reason."""
+
+    def setUp(self):
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+
+    def tearDown(self):
+        self.store.close()
+
+    def wait(self, job_id, states=TERMINAL, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = self.store.get(job_id)
+            if job["status"] in states:
+                return job
+            time.sleep(0.01)
+        self.fail(f"job did not reach {states}")
+
+    def wait_pool(self, size, ready, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            snapshot = self.store.snapshot()
+            if (snapshot["pool_size"], snapshot["pool_ready"]) == (size, ready):
+                return snapshot
+            time.sleep(0.01)
+        self.fail(f"the pool never reached {size} children, {ready} ready")
+
+    def test_a_fresh_store_reports_every_series_at_zero(self):
+        snapshot = self.wait_pool(1, 1)
+        tasks = ("rerank", "embed", "redact", "test.delay", "test.crash", "test.error", "test.inspect")
+        self.assertEqual(snapshot["tasks"], tasks)
+        self.assertEqual(snapshot["jobs"], {(task, status): 0 for task in tasks
+                                            for status in ("succeeded", "failed", "timed_out", "cancelled")})
+        self.assertEqual(snapshot["submitted"], dict.fromkeys(tasks, 0))
+        self.assertEqual(snapshot["rejected"], {"capacity": 0})
+        self.assertEqual((snapshot["queued"], snapshot["running"]), (0, 0))
+        self.assertEqual((snapshot["backend"], snapshot["concurrency"], snapshot["capacity"]), ("lexical", 1, 128))
+        for histogram in list(snapshot["duration"].values()) + list(snapshot["queue"].values()):
+            self.assertEqual(histogram, {"buckets": [0] * 12, "sum": 0.0, "count": 0})
+
+    def test_the_test_tasks_are_labels_only_where_they_exist(self):
+        store = JobStore(Settings(concurrency=1))
+        try:
+            snapshot = store.snapshot()
+        finally:
+            store.close()
+        self.assertEqual(snapshot["tasks"], ("rerank", "embed", "redact"))
+        self.assertEqual(set(snapshot["duration"]), {"rerank", "embed", "redact"})
+
+    def test_each_terminal_status_is_counted_once(self):
+        succeeded = self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
+        failed = self.wait(self.store.submit("test.error", {})["id"])
+        cancelled = self.store.submit("test.delay", {"seconds": 5})
+        self.wait(cancelled["id"], {"running"})
+        self.store.cancel(cancelled["id"])
+        self.store.cancel(cancelled["id"])  # a repeat changes nothing, so it counts nothing
+        timed_out = self.wait(self.store.submit("test.delay", {"seconds": 5}, 150)["id"])
+        crashed = self.wait(self.store.submit("test.crash", {})["id"])
+        self.assertEqual([job["status"] for job in (succeeded, failed, timed_out, crashed)],
+                         ["succeeded", "failed", "timed_out", "failed"])
+        snapshot = self.store.snapshot()
+        self.assertEqual({key: count for key, count in snapshot["jobs"].items() if count}, {
+            ("test.delay", "succeeded"): 1, ("test.error", "failed"): 1, ("test.delay", "cancelled"): 1,
+            ("test.delay", "timed_out"): 1, ("test.crash", "failed"): 1})
+        self.assertEqual({task: count for task, count in snapshot["submitted"].items() if count},
+                         {"test.delay": 3, "test.error": 1, "test.crash": 1})
+
+    def test_histograms_agree_with_the_jobs_run(self):
+        started = time.monotonic()
+        self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
+        self.wait(self.store.submit("test.delay", {"seconds": 0.3})["id"])
+        # Ends at its deadline while queued behind nothing but a long job: never started, so no queue time.
+        first = self.store.submit("test.delay", {"seconds": 5}, 150)
+        never_started = self.store.submit("test.delay", {"seconds": 0}, 100)
+        self.wait(first["id"])
+        self.assertEqual(self.wait(never_started["id"])["status"], "timed_out")
+        elapsed = time.monotonic() - started
+        snapshot = self.store.snapshot()
+        duration, queue = snapshot["duration"]["test.delay"], snapshot["queue"]["test.delay"]
+        self.assertEqual(duration["count"], 4)
+        self.assertEqual(sum(duration["buckets"]), 4)
+        # 0.3 s of sleep and a 0.15 s deadline are lower bounds; the wall clock of the test bounds the sum.
+        self.assertGreaterEqual(duration["sum"], 0.3 + 0.15 + 0.1)
+        self.assertLessEqual(duration["sum"], 4 * elapsed)
+        self.assertLessEqual(duration["buckets"][0] + duration["buckets"][1], 2)  # le=0.1 cannot hold the 0.3 s job
+        self.assertEqual(queue["count"], 3)
+        self.assertEqual(sum(queue["buckets"]), 3)
+        self.assertGreaterEqual(queue["sum"], 0.0)
+        self.assertLessEqual(queue["sum"], duration["sum"])
+        self.assertEqual(snapshot["queue"]["rerank"]["count"], 0)
+
+    def test_queue_depth_while_a_job_waits_for_the_single_child(self):
+        running = self.store.submit("test.delay", {"seconds": 5})
+        self.wait(running["id"], {"running"})
+        waiting = self.store.submit("test.delay", {"seconds": 0})
+        snapshot = self.store.snapshot()
+        self.assertEqual((snapshot["queued"], snapshot["running"]), (1, 1))
+        self.assertEqual((snapshot["pool_size"], snapshot["pool_ready"]), (1, 1))
+        self.store.cancel(waiting["id"])
+        self.store.cancel(running["id"])
+        snapshot = self.store.snapshot()
+        self.assertEqual((snapshot["queued"], snapshot["running"]), (0, 0))
+
+    def test_pool_gauges_follow_a_crash_and_the_replacement(self):
+        self.wait_pool(1, 1)
+        with patch.object(self.store._context, "Pipe", side_effect=OSError(24, "Too many open files")):
+            self.wait(self.store.submit("test.crash", {})["id"])
+            # The crashed child is gone and no replacement can start yet.
+            self.wait_pool(0, 0)
+        self.wait_pool(1, 1)
+        self.assertEqual(self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])["status"], "succeeded")
+
+    def test_a_capacity_refusal_is_counted_and_a_repeat_or_invalid_input_is_not(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, capacity=1, test_tasks=True))
+        self.store.submit("test.delay", {"seconds": 5}, idempotency_key="only")
+        self.store.submit("test.delay", {"seconds": 5}, idempotency_key="only")
+        for _ in range(2):
+            with self.assertRaises(CapacityError):
+                self.store.submit("test.delay", {"seconds": 0})
+        for bad in ({"seconds": -1}, {"unknown": 1}):
+            with self.assertRaises(ValueError):
+                self.store.submit("test.delay", bad)
+        with self.assertRaises(ValueError):
+            self.store.submit("rerank", {"query": "", "documents": ["x"]})
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["rejected"], {"capacity": 2})
+        self.assertEqual(snapshot["submitted"]["test.delay"], 1)
+        self.assertEqual(snapshot["submitted"]["rerank"], 0)
+
+    def test_a_submission_the_table_refuses_counts_as_a_refusal(self):
+        FailingDatabase(self.store, "INSERT")
+        with self.assertRaises(CapacityError):
+            self.store.submit("test.delay", {"seconds": 0})
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["rejected"], {"capacity": 1})
+        self.assertEqual(snapshot["submitted"]["test.delay"], 0)
+
+    def test_the_snapshot_is_a_copy(self):
+        self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
+        snapshot = self.store.snapshot()
+        snapshot["duration"]["test.delay"]["buckets"][0] = 99
+        snapshot["jobs"][("test.delay", "succeeded")] = 99
+        again = self.store.snapshot()
+        self.assertNotEqual(again["duration"]["test.delay"]["buckets"][0], 99)
+        self.assertEqual(again["jobs"][("test.delay", "succeeded")], 1)
+
+    def test_jobs_restored_from_the_table_count_nothing(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            first = JobStore(Settings(concurrency=1, test_tasks=True, state_dir=state_dir))
+            try:
+                job = first.submit("test.delay", {"seconds": 0})
+                self.wait_for_store(first, job["id"])
+            finally:
+                first.close()
+            second = JobStore(Settings(concurrency=1, test_tasks=True, state_dir=state_dir))
+            try:
+                self.assertEqual(second.get(job["id"])["status"], "succeeded")
+                snapshot = second.snapshot()
+            finally:
+                second.close()
+        self.assertEqual(sum(snapshot["jobs"].values()), 0)
+        self.assertEqual(snapshot["duration"]["test.delay"]["count"], 0)
+
+    def wait_for_store(self, store, job_id, timeout=5):
+        deadline = time.monotonic() + timeout
+        while store.get(job_id)["status"] not in TERMINAL:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
+
 if __name__ == "__main__":
     unittest.main()

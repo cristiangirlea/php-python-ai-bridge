@@ -12,6 +12,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .jobs import CapacityError, JobStore, Settings
+from .metrics import CONTENT_TYPE, render
 from .tasks import missing_models
 
 MAX_BODY = 262144
@@ -70,11 +71,17 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _reply(self, status, value, headers=()):
-        body = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
+        self._send(status, json.dumps(value, allow_nan=False, separators=(",", ":")).encode(), "application/json",
+                   headers)
+
+    def _text(self, status, text):
+        self._send(status, text.encode("utf-8"), CONTENT_TYPE)
+
+    def _send(self, status, body, content_type, headers=()):
         self.send_response(status)
         for name, header in headers:
             self.send_header(name, header)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
@@ -127,6 +134,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/healthz":
             self._reply(200, {"status": "ok", "protocol": 1, "backend": self.server.jobs.settings.backend})
+            return
+        if self.path == "/metrics":
+            # The snapshot is taken under the store's lock; the formatting is not.
+            self._text(200, render(self.server.jobs.snapshot()))
             return
         match = re.fullmatch(r"/v1/jobs/([a-f0-9]{32})", self.path)
         job = self.server.jobs.get(match[1]) if match else None

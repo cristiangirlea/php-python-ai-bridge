@@ -5,6 +5,7 @@ Every route requires `Authorization: Bearer <service token>`. JSON requests requ
 | Route | Result |
 | --- | --- |
 | `GET /healthz` | 200 with protocol version and configured backend; process liveness only, not model readiness |
+| `GET /metrics` | 200 with aggregate counts and timings in the Prometheus text format ([below](#metrics)) |
 | `POST /v1/jobs` | 202 with a queued job, or with the retained job a repeated `idempotency_key` names |
 | `GET /v1/jobs/{id}` | 200 with a snapshot, or 404 |
 | `POST /v1/jobs/{id}/cancel` | Send `{}`; returns the terminal/current snapshot, or 404 |
@@ -40,3 +41,24 @@ With `BRIDGE_STATE_DIR` set, the job table (never a job's input) is written thro
 The PHP client uses a fresh cURL handle per call, refuses redirects, ignores proxy environment variables, caps response bytes, and verifies that GET/cancel responses match the requested ID. Configure its request timeout separately from job execution and local waiting deadlines. There are no transparent submission retries, a 429 included. The MCP server in `mcp_server/` is a second, independent client with the same checks; unlike the PHP client it cancels a job whose local wait expires, because no later request will collect it.
 
 Adding a task requires trusted source changes to `worker/ai_bridge/tasks.py`: an explicit name, input validation, bounded output and execution logic. Add a PHP result type where useful, plus successful, malformed-input and lifecycle tests. Task imports, file paths and command strings must not come from request data.
+
+## Metrics
+
+`GET /metrics` takes the same bearer token as every other route (401 without it; a `POST` is answered as on any unknown route, 404 for `{}`, and another spelling, a query string included, is 404) and answers `Content-Type: text/plain; version=0.0.4; charset=utf-8`, the Prometheus text exposition format, written by the standard library. Every value is an aggregate since the worker process started, held in memory only: a restart resets every counter and histogram to zero, the job table in `BRIDGE_STATE_DIR` does not feed them, and a job read back from that table counts nothing. Each family has one `# HELP` and one `# TYPE` line, and every series exists from the start, at zero. Label values come only from fixed sets: `task` is a task of the allowlist (`rerank`, `embed`, `redact`, plus the test tasks on a worker started with `BRIDGE_TEST_TASKS=1`), `status` one of the four terminal statuses, `reason` is `capacity`, and `backend` the configured backend; no job ID, idempotency key, input, result, error, model path or token appears.
+
+| Family | Type | Labels | What it holds |
+| --- | --- | --- | --- |
+| `bridge_jobs_total` | counter | `task`, `status` | Jobs that reached `succeeded`, `failed`, `timed_out` or `cancelled` |
+| `bridge_jobs_submitted_total` | counter | `task` | Accepted submissions that created a job; a repeated `idempotency_key` creates none and is not counted |
+| `bridge_submissions_rejected_total` | counter | `reason="capacity"` | Submissions answered 429, for every cause the 429 section names |
+| `bridge_queue_depth` | gauge | | Jobs `queued` now |
+| `bridge_jobs_running` | gauge | | Jobs `running` now |
+| `bridge_pool_size` | gauge | | Child processes in the pool, starting or started |
+| `bridge_pool_ready` | gauge | | Of those, the ones that have said they are ready, idle or running a job |
+| `bridge_concurrency` | gauge | | The `BRIDGE_CONCURRENCY` setting |
+| `bridge_capacity` | gauge | | The `BRIDGE_CAPACITY` setting |
+| `bridge_job_duration_seconds` | histogram | `task` | Seconds from submission to terminal status, for every job counted by `bridge_jobs_total` |
+| `bridge_job_queue_seconds` | histogram | `task` | Seconds from submission to `running`, for jobs a child started; one that ended while queued adds nothing |
+| `bridge_info` | gauge | `protocol="1"`, `backend` | Always 1 |
+
+Both histograms have the buckets 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60 and 300 seconds and `+Inf`, cumulative as the format requires, with `_sum` and `_count`. A scrape copies the numbers under the store's lock and formats them without it, so it never waits for a job. An invalid submission (400) creates no job and counts nothing.

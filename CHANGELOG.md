@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file. The format foll
 - `PhpAiBridge\Laravel\BridgeServiceProvider`, registered by Laravel's package discovery, binds one `Client` built from a publishable `config/ai_bridge.php` (`BRIDGE_URL`, `BRIDGE_TOKEN`, `BRIDGE_REQUEST_TIMEOUT_MS`; `vendor:publish --tag=ai-bridge-config`), so configuration caching works.
 - `PhpAiBridge\Symfony\PhpAiBridgeBundle` registers `Client` as an autowirable service from a `php_ai_bridge` configuration whose `url`, `token` and `request_timeout_ms` default to the same environment variables.
 - Both fail on a missing or invalid setting with a message that names it and never quotes the token. `laravel/framework` and `symfony/http-kernel` are suggested, not required: the library's requirements are unchanged.
+- `GET /metrics` on the worker, in the Prometheus text format and behind the service token: jobs by task and terminal status, submissions, 429 refusals, queue depth, running jobs, pool size and readiness, the concurrency and capacity settings, and per-task histograms of job and queue durations. Aggregates only, with labels from fixed sets; they live in memory and reset when the worker restarts.
 
 ## [0.2.0] - 2026-10-21
 
