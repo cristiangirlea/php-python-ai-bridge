@@ -112,7 +112,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps python-tests
 docker compose -f docker/compose.yaml run --rm --no-deps php-tests
 
 # Internal-only HTTP peers, including intentionally broken peers:
-docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hostile
+docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hostile tokens-worker
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 
@@ -141,7 +141,7 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 ## Important limits
 
 - **Durable job table only when `BRIDGE_STATE_DIR` is set:** the worker then keeps its job table (never inputs) in SQLite, so finished results and idempotency keys survive a restart until retention ends and unfinished jobs become `failed` with `service_restarted`; unset, a restart loses everything. Completed results expire after 300 seconds by default; 404 can mean expired, lost or unknown. An optional `idempotency_key` makes resubmitting after an uncertain POST safe while the job is retained. There is still no replay of unfinished jobs, durable delivery or automatic retry.
-- **Trusted services only:** one bearer token authorizes all jobs. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
+- **Trusted services only:** a bearer token reaches only the jobs it submitted; give each application its own (`BRIDGE_TOKENS`, [the protocol](docs/protocol.md#tokens)), since they still share one worker's capacity. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
 - **Private HTTP transport:** deploy behind an authenticated TLS boundary for cross-host use; the [integration guide](docs/integration.md#cross-host-use-behind-tls) has a tested example with Caddy in front of the worker. The sample Python HTTP server is not an internet-facing production server.
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
 - **One job per warm child, no sharing across jobs:** the worker keeps `BRIDGE_CONCURRENCY` child processes alive and each keeps the models it has loaded, so only a child's first job of a kind pays for imports and model loading; a child is replaced after a cancellation, a deadline or a crash, and after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no sharing of a loaded model between children, and no claim of GPU support, multi-host scaling or stateful agents.
