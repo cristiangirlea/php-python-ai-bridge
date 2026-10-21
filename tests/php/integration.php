@@ -108,5 +108,21 @@ $repeated = $real->submitRerank('needle token', ['other words', 'needle token'],
 check($repeated->id === $first->id && $repeated->status === 'succeeded' && $repeated->result === $firstDone->result, 'repeated idempotency key returns the same job');
 $different = $real->submitRerank('needle token', ['other words', 'needle token'], idempotencyKey: $idempotencyKey . '-2');
 check($different->id !== $first->id, 'different idempotency key runs a new job');
+// Last, since the fault-worker then stays full for its 300 s retention: its default capacity is 128 jobs, and the
+// jobs above have finished, so the earliest of them to expire says when a slot returns.
+$refusal = null;
+for ($submitted = 0; $submitted <= 128 && $refusal === null; ++$submitted) {
+    try {
+        $client->submit('test.delay', ['seconds' => 0]);
+    } catch (BridgeException $error) {
+        $refusal = $error;
+    }
+}
+if ($refusal === null) {
+    throw new RuntimeException('Expected the fault-worker to fill up');
+}
+check($refusal->httpStatus === 429, 'a full worker refuses with HTTP 429');
+check($refusal->retryAfterSeconds !== null && $refusal->retryAfterSeconds >= 1 && $refusal->retryAfterSeconds <= 300,
+    'the real worker\'s Retry-After reaches the PHP client in whole seconds within its retention');
 /** @var int $count counted by check() in run.php */
 echo "PASS: $count total PHP checks including real HTTP failure cases\n";

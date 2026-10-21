@@ -39,7 +39,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_idempotency_key ON jobs (idempotency_key)
 
 
 class CapacityError(Exception):
-    pass
+    def __init__(self, message, retry_after=1):
+        super().__init__(message)
+        self.retry_after = retry_after  # whole seconds until a submission may be accepted, at least 1
 
 
 @dataclass
@@ -231,7 +233,7 @@ class JobStore:
             if idempotency_key in self._keys:
                 return self._public(self._jobs[self._keys[idempotency_key]])
             if len(self._jobs) >= self.settings.capacity:
-                raise CapacityError("job capacity reached; wait for retained jobs to expire")
+                raise CapacityError("job capacity reached; wait for retained jobs to expire", self._retry_after())
             now = time.monotonic()
             job_id = uuid.uuid4().hex
             job = {
@@ -260,6 +262,14 @@ class JobStore:
             if job["status"] not in TERMINAL:
                 self._abort(job, "cancelled")
             return self._public(job)
+
+    def _retry_after(self):
+        """Seconds until the first retained job expires; a store holding only unfinished jobs gives a short default,
+        since none of them has a known end."""
+        finished = [job["_finished"] for job in self._jobs.values() if job["_finished"] is not None]
+        if not finished:
+            return 1
+        return max(1, math.ceil(min(finished) + self.settings.retention_seconds - time.monotonic()))
 
     def _public(self, job):
         return copy.deepcopy({key: value for key, value in job.items() if not key.startswith("_")})
