@@ -6,11 +6,17 @@ namespace PhpAiBridge;
 
 final class CurlTransport implements Transport
 {
+    private const MAX_HEADER_BYTES = 16384;
+
     public function send(string $method, string $url, #[\SensitiveParameter] array $headers, ?string $body, int $timeoutMs): TransportResponse
     {
         $handle = curl_init($url);
         $response = '';
         $tooLarge = false;
+        $headerBytes = 0;
+        $headersTooLarge = false;
+        $retryAfter = null;
+        $retryAfterSeen = false;
         $lines = [];
         foreach ($headers as $name => $value) {
             $lines[] = $name . ': ' . $value;
@@ -32,6 +38,26 @@ final class CurlTransport implements Transport
                 $response .= $chunk;
                 return strlen($chunk);
             },
+            CURLOPT_HEADERFUNCTION => static function ($curl, string $line) use (&$headerBytes, &$headersTooLarge, &$retryAfter, &$retryAfterSeen): int {
+                // An interim response such as 100 Continue starts a new block; only the final one counts.
+                if (str_starts_with($line, 'HTTP/')) {
+                    $headerBytes = 0;
+                    $retryAfter = null;
+                    $retryAfterSeen = false;
+                }
+                $headerBytes += strlen($line);
+                if ($headerBytes > self::MAX_HEADER_BYTES) {
+                    $headersTooLarge = true;
+                    return 0;
+                }
+                if (preg_match('/\Aretry-after:(.*)\z/is', $line, $match) === 1) {
+                    // Delay seconds only: an HTTP date would need this host's clock to agree with the worker's.
+                    // A repeated header is a conflict the caller cannot trust, so it counts as absent.
+                    $retryAfter = !$retryAfterSeen && preg_match('/\A[ \t]*([0-9]{1,6})[ \t]*\r?\n?\z/', $match[1], $digits) === 1 ? (int) $digits[1] : null;
+                    $retryAfterSeen = true;
+                }
+                return strlen($line);
+            },
         ]);
         if ($body !== null) {
             curl_setopt($handle, CURLOPT_POSTFIELDS, $body);
@@ -40,13 +66,16 @@ final class CurlTransport implements Transport
             $ok = curl_exec($handle);
             $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
             $contentType = curl_getinfo($handle, CURLINFO_CONTENT_TYPE);
+            if ($headersTooLarge) {
+                throw new BridgeException('Response headers exceed ' . self::MAX_HEADER_BYTES . ' bytes', 'invalid_response');
+            }
             if ($tooLarge) {
                 throw new BridgeException('Response exceeds ' . self::MAX_RESPONSE_BYTES . ' bytes', 'invalid_response');
             }
             if ($ok === false) {
                 throw new BridgeException('Bridge transport failed; submission outcome may be unknown', 'transport_error');
             }
-            return new TransportResponse($status, is_string($contentType) ? $contentType : null, $response);
+            return new TransportResponse($status, is_string($contentType) ? $contentType : null, $response, $retryAfter);
         } finally {
             // PHP 8 releases CurlHandle objects; curl_close() is deprecated in 8.5.
             unset($handle);

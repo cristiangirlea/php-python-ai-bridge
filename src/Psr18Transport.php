@@ -51,7 +51,10 @@ final class Psr18Transport implements Transport
                     throw new BridgeException('Response exceeds ' . self::MAX_RESPONSE_BYTES . ' bytes', 'invalid_response');
                 }
                 $contentType = $response->getHeaderLine('Content-Type');
-                return new TransportResponse($status, $contentType === '' ? null : $contentType, $content);
+                // The same rule as CurlTransport: delay seconds only, and a repeated header counts as absent.
+                $retryAfter = $response->getHeader('Retry-After');
+                $retryAfterSeconds = count($retryAfter) === 1 && preg_match('/\A[ \t]*([0-9]{1,6})[ \t]*\z/', $retryAfter[0], $digits) === 1 ? (int) $digits[1] : null;
+                return new TransportResponse($status, $contentType === '' ? null : $contentType, $content, $retryAfterSeconds);
             } finally {
                 $stream->close();
             }

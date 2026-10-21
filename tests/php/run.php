@@ -387,6 +387,11 @@ if (!interface_exists(ClientInterface::class) || !interface_exists(RequestFactor
         check(count($http->requests) === 1 && (string) $http->requests[0]->getUri() === 'http://worker:8090/v1/jobs/' . str_repeat('a', 32), 'PSR-18 sends one request for a redirect: ' . $status);
     }
     check(failure(fn () => $psr(new FakeResponse(500, $json, new FakeStream('{}')))[0]->get(str_repeat('a', 32)))->httpStatus === 500, 'PSR-18 passes other statuses to the client');
+    /** @param array<string, string|list<string>> $headers */
+    $refusedWith = static fn (array $headers): BridgeException => failure(fn () => $psr(new FakeResponse(429, $json + $headers, new FakeStream('{}')))[0]->get(str_repeat('a', 32)));
+    check($refusedWith(['Retry-After' => '7'])->retryAfterSeconds === 7, 'PSR-18 429 carries its Retry-After seconds');
+    check($refusedWith(['Retry-After' => ['7', '3']])->retryAfterSeconds === null, 'PSR-18 repeated Retry-After is ignored');
+    check($refusedWith([])->retryAfterSeconds === null, 'PSR-18 429 without Retry-After has none');
     foreach ([['Content-Type' => 'text/html'], []] as $headers) {
         $error = failure(fn () => $psr(new FakeResponse(200, $headers, new FakeStream(json_encode(sample(), JSON_THROW_ON_ERROR))))[0]->get(str_repeat('a', 32)));
         check($error->errorCode === 'invalid_response', 'PSR-18 refuses a non-JSON content type');

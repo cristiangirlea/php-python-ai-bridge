@@ -235,7 +235,7 @@ final class Client
         }
         if ($response->status < 200 || $response->status >= 300) {
             // Do not reflect server-supplied text that may contain secrets or markup.
-            throw new BridgeException('Bridge returned HTTP ' . $response->status, 'http_error', $response->status);
+            throw new BridgeException('Bridge returned HTTP ' . $response->status, 'http_error', $response->status, $response->status === 429 ? $response->retryAfterSeconds : null);
         }
         if ($response->contentType === null || strtolower(trim(explode(';', $response->contentType)[0])) !== 'application/json') {
             throw new BridgeException('Expected a JSON response', 'invalid_response');

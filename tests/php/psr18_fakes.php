@@ -328,11 +328,11 @@ final class FakeResponse implements ResponseInterface
 {
     use FakeMessage;
 
-    /** @param array<string, string> $headers */
+    /** @param array<string, string|list<string>> $headers a list is a header repeated on the wire */
     public function __construct(private int $status, array $headers = [], ?StreamInterface $body = null)
     {
         foreach ($headers as $name => $value) {
-            $this->headers[strtolower($name)] = [$value];
+            $this->headers[strtolower($name)] = is_array($value) ? $value : [$value];
         }
         $this->body = $body;
     }
