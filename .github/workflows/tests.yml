@@ -80,6 +80,8 @@ jobs:
         run: docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher
       - name: PHPStan at level max, offline
         run: docker compose -f docker/compose.yaml run --rm --no-deps php-analysis
+      - name: PSR-18 transport checks with the dev interfaces, offline
+        run: docker compose -f docker/compose.yaml run --rm --no-deps php-psr18-tests
       - name: Stop test containers
         if: always()
         run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev down

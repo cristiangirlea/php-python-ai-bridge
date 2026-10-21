@@ -13,12 +13,26 @@ set_error_handler(static function (int $severity, string $message, string $file,
 
 require dirname(__DIR__, 2) . '/examples/bootstrap.php';
 
+use BridgeTests\FakeClientException;
+use BridgeTests\FakeFactory;
+use BridgeTests\FakeHttpClient;
+use BridgeTests\FakeResponse;
+use BridgeTests\FakeStream;
 use PhpAiBridge\BridgeException;
 use PhpAiBridge\Client;
+use PhpAiBridge\CurlTransport;
 use PhpAiBridge\EmbedResult;
 use PhpAiBridge\Job;
+use PhpAiBridge\Psr18Transport;
 use PhpAiBridge\RedactResult;
 use PhpAiBridge\RerankResult;
+use PhpAiBridge\Transport;
+use PhpAiBridge\TransportResponse;
+use Psr\Http\Client\ClientExceptionInterface;
+use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestFactoryInterface;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\StreamFactoryInterface;
 
 $count = 0;
 function check(bool $value, string $message): void
@@ -39,6 +53,15 @@ function rejects(callable $action, string $class): void
         return;
     }
     throw new RuntimeException('Expected rejection');
+}
+function failure(callable $action): BridgeException
+{
+    try {
+        $action();
+    } catch (BridgeException $error) {
+        return $error;
+    }
+    throw new RuntimeException('Expected a BridgeException');
 }
 /** @return array<string, mixed> */
 function sample(): array
@@ -289,5 +312,100 @@ foreach ([fn () => $stubClient->submitEmbed(['x'], idempotencyKey: 'retry-key-1'
 fclose($pipes[1]);
 fclose($pipes[2]);
 proc_close($proc);
+
+// The client talks through cURL unless it is given a transport, and hands that transport the whole request.
+check((new ReflectionProperty(Client::class, 'transport'))->getValue($client) instanceof CurlTransport, 'CurlTransport is the default');
+$recording = new class () implements Transport {
+    /** @var list<array{string, string, array<string, string>, ?string, int}> */
+    public array $calls = [];
+
+    public function send(string $method, string $url, array $headers, ?string $body, int $timeoutMs): TransportResponse
+    {
+        $this->calls[] = [$method, $url, $headers, $body, $timeoutMs];
+        return new TransportResponse(200, 'application/json; charset=utf-8', json_encode(sample(), JSON_THROW_ON_ERROR));
+    }
+};
+$viaTransport = new Client('http://worker:8090/', $token, 1500, $recording);
+check($viaTransport->get(str_repeat('a', 32))->id === str_repeat('a', 32), 'a given transport carries the request');
+$headers = ['Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json', 'Accept' => 'application/json'];
+check($recording->calls === [['GET', 'http://worker:8090/v1/jobs/' . str_repeat('a', 32), $headers, null, 1500]], 'the transport gets method, URL, headers, no body and the request timeout');
+$viaTransport->submit('rerank', ['query' => 'q'], 30000);
+check($recording->calls[1][3] === '{"task":"rerank","input":{"query":"q"},"timeout_ms":30000}', 'the transport gets the JSON body');
+// A transport failure once the wait deadline has passed is the wait's timeout, whatever the transport.
+$slow = new class () implements Transport {
+    public function send(string $method, string $url, array $headers, ?string $body, int $timeoutMs): TransportResponse
+    {
+        usleep(($timeoutMs + 5) * 1000);
+        throw new BridgeException('Bridge transport failed; submission outcome may be unknown', 'transport_error');
+    }
+};
+check(failure(fn () => (new Client('http://worker:8090', $token, 2000, $slow))->wait(str_repeat('a', 32), 30, 1))->errorCode === 'wait_timeout', 'a transport failure at the wait deadline is wait_timeout');
+check(failure(fn () => (new Client('http://worker:8090', $token, 20, $slow))->wait(str_repeat('a', 32), 2000, 1))->errorCode === 'transport_error', 'a shorter request timeout stays transport_error');
+
+// The PSR-18 checks need the interfaces: the php-psr18-tests service puts the dev vendor directory on the include path.
+$devAutoload = stream_resolve_include_path('autoload.php');
+if ($devAutoload !== false) {
+    require $devAutoload;
+}
+if (!interface_exists(ClientInterface::class) || !interface_exists(RequestFactoryInterface::class) || !interface_exists(StreamFactoryInterface::class)) {
+    echo "SKIP: PSR-18 transport checks (psr/http-client, psr/http-factory and psr/http-message are not loadable)\n";
+} else {
+    require __DIR__ . '/psr18_fakes.php';
+    $factory = new FakeFactory();
+    $psr = static function (ResponseInterface|Throwable $answer) use ($factory, $token): array {
+        $http = new FakeHttpClient($answer);
+        return [new Client('http://worker:8090', $token, 2000, new Psr18Transport($http, $factory, $factory)), $http];
+    };
+    $json = ['Content-Type' => 'application/json'];
+
+    $body = new FakeStream(json_encode(sample(), JSON_THROW_ON_ERROR));
+    [$psrClient, $http] = $psr(new FakeResponse(200, $json, $body));
+    check($psrClient->submit('rerank', ['query' => 'q'])->id === str_repeat('a', 32), 'PSR-18 round trip');
+    $sent = $http->requests[0];
+    check($sent->getMethod() === 'POST' && (string) $sent->getUri() === 'http://worker:8090/v1/jobs', 'PSR-18 request method and URL');
+    check($sent->getHeaderLine('Authorization') === 'Bearer ' . $token && $sent->getHeaderLine('Accept') === 'application/json'
+        && $sent->getHeaderLine('Content-Type') === 'application/json', 'PSR-18 request headers');
+    check((string) $sent->getBody() === '{"task":"rerank","input":{"query":"q"},"timeout_ms":30000}', 'PSR-18 request body');
+    check($body->closed, 'PSR-18 response body is closed after reading');
+    [$psrClient, $http] = $psr(new FakeResponse(200, $json, new FakeStream(json_encode(sample(), JSON_THROW_ON_ERROR))));
+    $psrClient->get(str_repeat('a', 32));
+    check($http->requests[0]->getMethod() === 'GET' && (string) $http->requests[0]->getBody() === '', 'PSR-18 GET has no body');
+
+    $atCap = (new Psr18Transport(new FakeHttpClient(new FakeResponse(200, $json, new FakeStream(str_repeat('x', 262144)))), $factory, $factory))
+        ->send('GET', 'http://worker:8090/v1/jobs', [], null, 2000);
+    check(strlen($atCap->body) === 262144 && $atCap->status === 200 && $atCap->contentType === 'application/json', 'PSR-18 body at the cap is accepted');
+    $huge = new FakeStream(str_repeat('x', 1048576));
+    $error = failure(fn () => $psr(new FakeResponse(200, $json, $huge))[0]->get(str_repeat('a', 32)));
+    check($error->errorCode === 'invalid_response' && $error->getMessage() === 'Response exceeds 262144 bytes', 'PSR-18 body over the cap is refused');
+    check($huge->bytesRead === 262145 && $huge->closed && $huge->badReads === 0, 'PSR-18 reads one byte past the cap and no further');
+
+    foreach ([301, 302, 303, 307, 308] as $status) {
+        $redirect = new FakeStream('{"id": "secret"}');
+        [$psrClient, $http] = $psr(new FakeResponse($status, $json + ['Location' => 'http://elsewhere/'], $redirect));
+        $error = failure(fn () => $psrClient->get(str_repeat('a', 32)));
+        check($error->errorCode === 'invalid_response' && $redirect->bytesRead === 0, 'PSR-18 refuses a redirect unread: ' . $status);
+        check(count($http->requests) === 1 && (string) $http->requests[0]->getUri() === 'http://worker:8090/v1/jobs/' . str_repeat('a', 32), 'PSR-18 sends one request for a redirect: ' . $status);
+    }
+    check(failure(fn () => $psr(new FakeResponse(500, $json, new FakeStream('{}')))[0]->get(str_repeat('a', 32)))->httpStatus === 500, 'PSR-18 passes other statuses to the client');
+    $refusedWith = static fn (string ...$retryAfter): BridgeException => failure(fn () => $psr(new FakeResponse(429, $retryAfter === [] ? $json : [...$json, 'Retry-After' => array_values($retryAfter)], new FakeStream('{}')))[0]->get(str_repeat('a', 32)));
+    check($refusedWith('7')->retryAfterSeconds === 7, 'PSR-18 429 carries its Retry-After seconds');
+    check($refusedWith('7', '3')->retryAfterSeconds === null, 'PSR-18 repeated Retry-After is ignored');
+    check($refusedWith()->retryAfterSeconds === null, 'PSR-18 429 without Retry-After has none');
+    foreach ([['Content-Type' => 'text/html'], []] as $headers) {
+        $error = failure(fn () => $psr(new FakeResponse(200, $headers, new FakeStream(json_encode(sample(), JSON_THROW_ON_ERROR))))[0]->get(str_repeat('a', 32)));
+        check($error->errorCode === 'invalid_response', 'PSR-18 refuses a non-JSON content type');
+    }
+    check(failure(fn () => $psr(new FakeResponse(200, $json, new FakeStream('{"id":')))[0]->get(str_repeat('a', 32)))->errorCode === 'invalid_response', 'PSR-18 refuses malformed JSON');
+
+    $error = failure(fn () => $psr(new FakeClientException('could not reach secret-host'))[0]->get(str_repeat('a', 32)));
+    check($error->errorCode === 'transport_error' && !str_contains($error->getMessage(), 'secret'), 'PSR-18 client exception is transport_error');
+    $transportFailed = 'Bridge transport failed; submission outcome may be unknown';
+    $error = failure(fn () => $psr(new RuntimeException('client bug near secret-host'))[0]->get(str_repeat('a', 32)));
+    check($error->errorCode === 'transport_error' && $error->getMessage() === $transportFailed, 'PSR-18 client throwing a foreign exception is transport_error');
+    foreach ([new RuntimeException('connection reset while reading secret-body'), new Exception('stream broke on secret-body')] as $readFailure) {
+        $error = failure(fn () => $psr(new FakeResponse(200, $json, new FakeStream('{}', $readFailure)))[0]->get(str_repeat('a', 32)));
+        check($error->errorCode === 'transport_error' && $error->getMessage() === $transportFailed, 'PSR-18 body read failure is transport_error: ' . $readFailure::class);
+    }
+}
 
 echo "PASS: $count PHP contract checks\n";

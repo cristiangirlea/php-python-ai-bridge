@@ -14,11 +14,14 @@ final class Client
     private const REDACT_ENTITIES = ['PER', 'ORG', 'LOC'];
 
     private readonly string $baseUrl;
+    private readonly Transport $transport;
 
+    /** @param Transport|null $transport null sends through cURL; see Psr18Transport for a PSR-18 client */
     public function __construct(
         string $baseUrl,
         #[\SensitiveParameter] private readonly string $token,
         private readonly int $requestTimeoutMs = 2000,
+        ?Transport $transport = null,
     ) {
         $parts = parse_url($baseUrl);
         if ($parts === false || !in_array($parts['scheme'] ?? '', ['http', 'https'], true)
@@ -35,6 +38,7 @@ final class Client
             throw new \InvalidArgumentException('Invalid request timeout');
         }
         $this->baseUrl = rtrim($baseUrl, '/');
+        $this->transport = $transport ?? new CurlTransport();
     }
 
     /**
@@ -219,92 +223,31 @@ final class Client
         if ($json !== null && strlen($json) > 262144) {
             throw new \InvalidArgumentException('Request exceeds 262144 bytes');
         }
-        $handle = curl_init($this->baseUrl . $path);
-        $response = '';
-        $tooLarge = false;
-        $headerBytes = 0;
-        $headersTooLarge = false;
-        $retryAfter = null;
-        $retryAfterSeen = false;
-        $timeoutMs ??= $this->requestTimeoutMs;
-        curl_setopt_array($handle, [
-            CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . $this->token, 'Content-Type: application/json', 'Accept: application/json'],
-            CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
-            CURLOPT_CONNECTTIMEOUT_MS => min(1000, $timeoutMs),
-            CURLOPT_TIMEOUT_MS => $timeoutMs,
-            CURLOPT_NOSIGNAL => true,
-            CURLOPT_PROXY => '',
-            CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (&$response, &$tooLarge): int {
-                if (strlen($response) + strlen($chunk) > 262144) {
-                    $tooLarge = true;
-                    return 0;
-                }
-                $response .= $chunk;
-                return strlen($chunk);
-            },
-            CURLOPT_HEADERFUNCTION => static function ($curl, string $line) use (&$headerBytes, &$headersTooLarge, &$retryAfter, &$retryAfterSeen): int {
-                // An interim response such as 100 Continue starts a new block; only the final one counts.
-                if (str_starts_with($line, 'HTTP/')) {
-                    $headerBytes = 0;
-                    $retryAfter = null;
-                    $retryAfterSeen = false;
-                }
-                $headerBytes += strlen($line);
-                if ($headerBytes > 16384) {
-                    $headersTooLarge = true;
-                    return 0;
-                }
-                if (preg_match('/\Aretry-after:(.*)\z/is', $line, $match) === 1) {
-                    // Delay seconds only: an HTTP date would need this host's clock to agree with the worker's.
-                    // A repeated header is a conflict the caller cannot trust, so it counts as absent.
-                    $retryAfter = !$retryAfterSeen && preg_match('/\A[ \t]*([0-9]{1,6})[ \t]*\r?\n?\z/', $match[1], $digits) === 1 ? (int) $digits[1] : null;
-                    $retryAfterSeen = true;
-                }
-                return strlen($line);
-            },
-        ]);
-        if ($json !== null) {
-            curl_setopt($handle, CURLOPT_POSTFIELDS, $json);
+        $headers = ['Authorization' => 'Bearer ' . $this->token, 'Content-Type' => 'application/json', 'Accept' => 'application/json'];
+        try {
+            $response = $this->transport->send($method, $this->baseUrl . $path, $headers, $json, $timeoutMs ?? $this->requestTimeoutMs);
+        } catch (BridgeException $error) {
+            // A transport cut short by the wait's own budget is that wait timing out; cURL rounds to whole milliseconds.
+            if ($error->errorCode === 'transport_error' && $waitDeadline !== null && hrtime(true) >= $waitDeadline - 1_000_000) {
+                throw new BridgeException('Local wait deadline exceeded; remote job may still be running', 'wait_timeout');
+            }
+            throw $error;
+        }
+        if ($response->status < 200 || $response->status >= 300) {
+            // Do not reflect server-supplied text that may contain secrets or markup.
+            throw new BridgeException('Bridge returned HTTP ' . $response->status, 'http_error', $response->status, $response->status === 429 ? $response->retryAfterSeconds : null);
+        }
+        if ($response->contentType === null || strtolower(trim(explode(';', $response->contentType)[0])) !== 'application/json') {
+            throw new BridgeException('Expected a JSON response', 'invalid_response');
         }
         try {
-            $ok = curl_exec($handle);
-            $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-            $contentType = curl_getinfo($handle, CURLINFO_CONTENT_TYPE);
-            if ($headersTooLarge) {
-                throw new BridgeException('Response headers exceed 16384 bytes', 'invalid_response');
-            }
-            if ($tooLarge) {
-                throw new BridgeException('Response exceeds 262144 bytes', 'invalid_response');
-            }
-            if ($ok === false) {
-                // cURL accepts whole milliseconds; allow only that rounding margin.
-                if (curl_errno($handle) === CURLE_OPERATION_TIMEDOUT && $waitDeadline !== null
-                    && hrtime(true) >= $waitDeadline - 1_000_000) {
-                    throw new BridgeException('Local wait deadline exceeded; remote job may still be running', 'wait_timeout');
-                }
-                throw new BridgeException('Bridge transport failed; submission outcome may be unknown', 'transport_error');
-            }
-            if ($status < 200 || $status >= 300) {
-                // Do not reflect server-supplied text that may contain secrets or markup.
-                throw new BridgeException('Bridge returned HTTP ' . $status, 'http_error', $status, $status === 429 ? $retryAfter : null);
-            }
-            if (!is_string($contentType) || strtolower(trim(explode(';', $contentType)[0])) !== 'application/json') {
-                throw new BridgeException('Expected a JSON response', 'invalid_response');
-            }
-            try {
-                $decoded = json_decode($response, true, 32, JSON_THROW_ON_ERROR);
-            } catch (\JsonException) {
-                throw new BridgeException('Malformed JSON response', 'invalid_response');
-            }
-            if (!is_array($decoded) || array_is_list($decoded)) {
-                throw new BridgeException('Expected a JSON object', 'invalid_response');
-            }
-            return $decoded;
-        } finally {
-            // PHP 8 releases CurlHandle objects; curl_close() is deprecated in 8.5.
-            unset($handle);
+            $decoded = json_decode($response->body, true, 32, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            throw new BridgeException('Malformed JSON response', 'invalid_response');
         }
+        if (!is_array($decoded) || array_is_list($decoded)) {
+            throw new BridgeException('Expected a JSON object', 'invalid_response');
+        }
+        return $decoded;
     }
 }
