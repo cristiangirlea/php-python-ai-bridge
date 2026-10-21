@@ -1,0 +1,2 @@
+# Advisories accepted after review, read by the audit job in model-smoke.yml: one per line, the advisory id
+# (PYSEC-, GHSA-, PKSA-, CVE-) first, then why it does not apply here. An id without a reason fails the job.

@@ -42,6 +42,10 @@ on:
       - tests/model_cases.py
       - docker/compose.yaml
       - .github/workflows/model-smoke.yml
+      # Audited by the audit job below, with the two Python locks above.
+      - composer.lock
+      - .github/audit-ignore.txt
+      - .github/scripts/audit.sh
 
 permissions:
   contents: read
@@ -112,3 +116,15 @@ jobs:
       - name: Stop test containers
         if: always()
         run: docker compose -f docker/compose.yaml --profile model --profile mcp-model down
+
+  # A hash pin keeps a package from changing, not from turning out vulnerable; this asks the advisory databases.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The script reads .github/audit-ignore.txt and runs every scanner before it fails; its tests use stub scanners.
+      - name: Audit the Python and PHP locks
+        run: sh .github/scripts/audit.sh

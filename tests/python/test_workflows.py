@@ -20,8 +20,10 @@ USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 # Every spelling of the key YAML accepts (quoted, a space before the colon, a flow-style step), so that a line
 # USES cannot read is counted, not passed over.
 ANY_USES = re.compile(r"""^\s*(?:-\s+)?(?:\{.*)?['"]?uses['"]?\s*:""")
-# `owner/repo@<commit>`, and the version that commit is, as a comment, for the human reading the workflow.
-PINNED = re.compile(r"""^['"]?[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+@[0-9a-f]{40}['"]?(?: +# v\d+\.\d+\.\d+)?$""")
+# `owner/repo[/path]@<commit>`, and the version that commit is, as a comment, for the human reading the workflow.
+PINNED = re.compile(
+    r"""^['"]?[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}['"]?(?: +# v\d+\.\d+\.\d+)?$"""
+)
 
 
 def jobs(text: str, workflow: str = "<workflow>") -> dict:
@@ -100,7 +102,7 @@ def inputs(step: list) -> list:
 
 class WorkflowTests(unittest.TestCase):
     def test_the_workflows_are_found(self):
-        self.assertEqual([path.name for path in WORKFLOWS], ["model-smoke.yml", "tests.yml"])
+        self.assertEqual([path.name for path in WORKFLOWS], ["codeql.yml", "model-smoke.yml", "tests.yml"])
         for path in WORKFLOWS:
             self.assertTrue(jobs(path.read_text(encoding="utf-8"), path.name), path.name)
 
@@ -224,10 +226,11 @@ jobs:  # the jobs
     def test_the_pin_and_step_readers_on_the_shapes_they_must_tell_apart(self):
         sha = "3d3c42e5aac5ba805825da76410c181273ba90b1"
         for value in (f"actions/checkout@{sha}", f"'actions/checkout@{sha}' # v7.0.1",
-                      f"owner-1/re.po_1@{sha} # v10.2.33"):
+                      f"owner-1/re.po_1@{sha} # v10.2.33", f"github/codeql-action/init@{sha} # v4.39.1"):
             self.assertRegex(value, PINNED)
         for value in ("actions/checkout@v7.0.1", "actions/checkout@3d3c42e # v7", f"actions/checkout@{sha} # v7",
-                      f"actions/checkout@{sha} # v7.0.1 node24", f"./local@{sha}", f"docker://python@{sha}"):
+                      f"actions/checkout@{sha} # v7.0.1 node24", f"./local@{sha}", f"docker://python@{sha}",
+                      f"github/codeql-action/@{sha}", f"github/codeql-action//init@{sha}"):
             self.assertNotRegex(value, PINNED)
         text = f"""jobs:
   one:
@@ -287,12 +290,38 @@ jobs:  # the jobs
         self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 2)
         self.assertEqual(text.count("BENCH_RUNNER:"), 2)
 
-    def test_dependabot_updates_github_actions_weekly(self):
+    def test_dependabot_updates_actions_and_both_package_ecosystems_weekly(self):
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
-        self.assertIn("package-ecosystem: github-actions\n", text)
-        self.assertIn("directory: /\n", text)
-        self.assertIn("schedule:\n      interval: weekly\n", text)
-        self.assertIn("commit-message:\n      prefix: ci\n", text)
+        for ecosystem, prefix in (("github-actions", "ci"), ("pip", "deps"), ("composer", "deps")):
+            with self.subTest(ecosystem=ecosystem):
+                self.assertIn(
+                    f"  - package-ecosystem: {ecosystem}\n    directory: /\n    schedule:\n      interval: weekly\n"
+                    f"    commit-message:\n      prefix: {prefix}\n",
+                    text,
+                )
+        self.assertEqual(text.count("package-ecosystem:"), 3)
+
+    def test_the_audit_job_runs_the_audit_script(self):
+        text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
+        # What the script does is test_audit_script.py's; here, that the job runs it and nothing else audits.
+        audit = jobs(text, "model-smoke.yml")["audit"]
+        self.assertIn("run: sh .github/scripts/audit.sh", audit)
+        self.assertNotIn("pip-audit", "\n".join(audit))
+        # A pull request that changes any lock file runs the workflow, and with it the audit.
+        for lock in ("requirements-model.lock", "requirements-mcp.lock", "composer.lock", ".github/scripts/audit.sh"):
+            self.assertIn(f"      - {lock}\n", text)
+
+    def test_every_accepted_advisory_has_a_reason(self):
+        for line in (REPO / ".github" / "audit-ignore.txt").read_text(encoding="utf-8").splitlines():
+            if line.strip() and not line.lstrip().startswith("#"):
+                with self.subTest(line=line):
+                    self.assertRegex(line, r"^[A-Z]+-[A-Za-z0-9-]+\s+\S")
+
+    def test_codeql_runs_on_main_pull_requests_and_weekly_with_least_privilege(self):
+        text = (REPO / ".github" / "workflows" / "codeql.yml").read_text(encoding="utf-8")
+        self.assertIn("on:\n  push:\n    branches: [main]\n  pull_request:\n  schedule:\n", text)
+        self.assertIn("permissions:\n  contents: read\n  security-events: write\n", text)
+        self.assertIn("languages: python\n", text)
 
 
 if __name__ == "__main__":
