@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Changed
+
+- Locks moved past published advisories: `certifi` 2026.10.19 and `filelock` 4.2.1 in `requirements-model.lock`, `opentelemetry-api` 1.45.1 and `pyjwt` 2.15.0 in `requirements-mcp.lock`.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added
