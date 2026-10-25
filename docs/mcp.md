@@ -84,7 +84,7 @@ On Linux the fixture directory must be writable by container UID 65532 for the b
 
 | Variable | Meaning |
 | --- | --- |
-| `BRIDGE_TOKEN` | The worker's service token, required. Read from the environment only; never returned. |
+| `BRIDGE_TOKEN` | The worker's service token, required. Read from the environment only; never returned. On a worker shared with an application, this is the MCP server's own entry in the worker's token list (`BRIDGE_TOKENS` or `BRIDGE_TOKENS_FILE`), named for example `mcp`, so an injected agent sees only its own jobs; compose's `mcp-worker` is dedicated and keeps a single token. |
 | `BRIDGE_URL` | The worker origin, default `http://127.0.0.1:8090`. |
 | `BRIDGE_MCP_ROOT` | The one directory whose files `documents_path` may name. Unset means paths are refused. |
 | `BRIDGE_MCP_TIMEOUT_MS` | Per-call wait before cancelling, 100–300000, default 60000. |
@@ -127,10 +127,10 @@ docker compose -f docker/compose.yaml run --rm -i -T mcp-model
 
 ## Trust model
 
-Nothing about the worker's trust model changes: a private network, one bearer token, never internet-facing. Two things are new and must be understood:
+Nothing about the worker's trust model changes: a private network, a bearer token per client, never internet-facing. Two things are new and must be understood:
 
 - **Over stdio there is no authentication.** The host process launches the server and inherits its trust; the server holds `BRIDGE_TOKEN` from its environment. Running this server over HTTP or SSE would be a new, unsolved authorisation surface and is out of scope; the bearer token does not cover it.
-- **An agent can now submit jobs, and an agent can be prompt-injected.** It cannot read the token, but it can fill the worker's capacity or submit junk. Point the MCP server at a **dedicated worker**, never the one serving a production PHP application; the compose `mcp` service does this with `mcp-worker`. Capacity, concurrency and retention are per worker.
+- **An agent can now submit jobs, and an agent can be prompt-injected.** It cannot read the token, but it can fill the worker's capacity or submit junk. Point the MCP server at a **dedicated worker**, never the one serving a production PHP application; the compose `mcp` service does this with `mcp-worker`. Capacity, concurrency and retention are per worker. Where a worker must be shared, give the MCP server its own token (`mcp=...` in the worker's `BRIDGE_TOKENS`): the agent then cannot read or cancel the application's jobs, which answer it 404, though it can still fill the shared capacity.
 
 Paths are confined to `BRIDGE_MCP_ROOT`, including an index's vectors file after symlinks are resolved; the server never writes files, and only the operator-run `mcp-index` builder writes, into the directory it is told to. Results contain indexes, scores, snippets of the agent's own files, masked text and spans; the original documents are not echoed by the worker.
 

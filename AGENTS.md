@@ -33,7 +33,7 @@ docker compose -f docker/compose.yaml --profile test config
 docker compose -f docker/compose.yaml run --rm --no-deps python-tests
 docker compose -f docker/compose.yaml run --rm --no-deps php-tests
 docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec 'find src examples tests/php -name "*.php" -print0 | xargs -0 -n1 php -l'
-docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hostile
+docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hostile tokens-worker
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml --profile test down
