@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- A graceful drain: on SIGTERM or SIGINT the worker answers `POST /v1/jobs` with 503 `draining` and `Retry-After: 1`, fails queued jobs as `service_restarted` at once, keeps answering `GET`, and lets running jobs finish for up to `BRIDGE_DRAIN_SECONDS` (integer 0 to 300, default 30) before it stops; a second signal stops it at once.
+- `GET /readyz`, behind any configured token like `/healthz`: 200 when the worker is not draining and a child is idle with its backend's models loaded, otherwise 503 with a reason (`draining`, `no_idle_child`, `models_loading`). A child now loads its backend's models as it starts instead of on its first job. Compose's MCP workers report healthy only once ready.
+- A full connection budget (32) is answered 503 `service_busy` with `Retry-After: 1` and `Connection: close` instead of a closed socket, and a request line over 8 KiB or a header block over 16 KiB is refused with 431 `headers_too_large`.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added
