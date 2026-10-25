@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 BASE = os.environ.get("FRANKENPHP_URL", "http://frankenphp:8080")
 WORKER = os.environ.get("WORKER_URL", "http://worker:8090")
+TOKENS_WORKER = os.environ.get("TOKENS_WORKER_URL", "http://tokens-worker:8090")
 
 
 def request(path, body=None):
@@ -18,10 +19,10 @@ def request(path, body=None):
         return response.status, json.load(response), int(response.headers["X-Demo-Worker-Requests"])
 
 
-def metrics(token=None):
+def metrics(token=None, worker=WORKER):
     """The worker's counters as {(name, labels): value}; the format itself is checked by the unit tests."""
     headers = {"Authorization": "Bearer " + (token if token is not None else os.environ["BRIDGE_TOKEN"])}
-    with urlopen(Request(WORKER + "/metrics", headers=headers), timeout=5) as response:
+    with urlopen(Request(worker + "/metrics", headers=headers), timeout=5) as response:
         assert response.headers["Content-Type"] == "text/plain; version=0.0.4; charset=utf-8"
         text = response.read().decode("utf-8")
     samples = {}
@@ -30,6 +31,56 @@ def metrics(token=None):
             series, value = line.rsplit(" ", 1)
             samples[series] = float(value)
     return text, samples
+
+
+def call(token, method, path, body=None):
+    """Status and decoded body of one request to the two-token worker, an error status included."""
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    try:
+        with urlopen(Request(TOKENS_WORKER + path, data=data, headers=headers, method=method), timeout=5) as response:
+            return response.status, json.load(response)
+    except HTTPError as error:
+        return error.code, json.load(error)
+
+
+def owners():
+    """Two tokens on one worker: a job is the submitting token's, and another token reads it as unknown."""
+    app, other = os.environ["BRIDGE_APP_TOKEN"], os.environ["BRIDGE_OTHER_TOKEN"]
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            if call(app, "GET", "/healthz")[0] == 200:
+                break
+        except (URLError, OSError):
+            pass
+        assert time.monotonic() < deadline, "the two-token worker did not become ready"
+        time.sleep(0.1)
+    # The PHP integration ran on this worker first, so the counters are compared before and after.
+    _, counted = metrics(other, TOKENS_WORKER)
+    rerank = {"task": "rerank", "input": {"query": "needle token", "documents": ["other words", "needle token"]}}
+    status, job = call(app, "POST", "/v1/jobs", rerank)
+    assert status == 202, status
+    unknown = call(other, "GET", "/v1/jobs/" + "a" * 32)
+    assert unknown[0] == 404, unknown
+    assert call(other, "GET", "/v1/jobs/" + job["id"]) == unknown
+    assert call(other, "POST", "/v1/jobs/" + job["id"] + "/cancel", {}) == unknown
+    assert call(app, "GET", "/v1/jobs/" + job["id"])[1]["id"] == job["id"]
+    assert call(app, "POST", "/v1/jobs/" + job["id"] + "/cancel", {})[1]["id"] == job["id"]
+    keyed = dict(rerank, idempotency_key="python-owner-" + job["id"])
+    from_app, from_other = call(app, "POST", "/v1/jobs", keyed)[1], call(other, "POST", "/v1/jobs", keyed)[1]
+    assert from_app["id"] != from_other["id"]
+    assert call(app, "POST", "/v1/jobs", keyed)[1]["id"] == from_app["id"]
+    assert call(other, "POST", "/v1/jobs", keyed)[1]["id"] == from_other["id"]
+    status, body = call("x" * 32, "GET", "/v1/jobs/" + job["id"])
+    assert (status, body["error"]["code"]) == (401, "unauthorized"), status
+    assert call(other, "GET", "/healthz")[0] == 200
+    text, moved = metrics(app, TOKENS_WORKER)
+    for owner, submitted in (("app", 2), ("other", 1)):
+        name = f'bridge_jobs_submitted_total{{owner="{owner}",task="rerank"}}'
+        assert moved[name] - counted[name] == submitted, (name, counted[name], moved[name])
+    for token in (app, other):
+        assert token not in text
 
 
 def wait_ready():
@@ -157,12 +208,14 @@ def main():
         raise AssertionError("Metrics were served without the token")
     text, moved = metrics()
     for task, least in [("rerank", 13), ("embed", 1), ("redact", 1)]:
-        for name in [f'bridge_jobs_total{{task="{task}",status="succeeded"}}', f'bridge_jobs_submitted_total{{task="{task}"}}',
+        for name in [f'bridge_jobs_total{{owner="default",task="{task}",status="succeeded"}}',
+                     f'bridge_jobs_submitted_total{{owner="default",task="{task}"}}',
                      f'bridge_job_duration_seconds_count{{task="{task}"}}']:
             assert moved[name] - counted[name] >= least, (name, counted[name], moved[name])
     for document in ["unique0 token0", "needle token", "x@y.io", "4111 1111 1111 1111", "red apple", "café"]:
         assert document not in text, document
-    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; redaction; invalid and missing-job cases; worker metrics")
+    owners()
+    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; redaction; invalid and missing-job cases; worker metrics; jobs scoped to their token")
 
 
 if __name__ == "__main__":

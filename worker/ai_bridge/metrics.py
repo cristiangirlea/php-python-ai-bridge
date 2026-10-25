@@ -1,6 +1,6 @@
 """Aggregate counts and timings in the Prometheus text exposition format, version 0.0.4, with the standard library.
-Label values come only from fixed sets (the task allowlist, the terminal statuses, the backend name), never from a
-job, so nothing a client sent can reach the body and the number of series is bounded."""
+Label values come only from fixed sets (the configured token names, the task allowlist, the terminal statuses, the
+backend name), never from a job, so nothing a client sent can reach the body and the number of series is bounded."""
 
 import bisect
 import math
@@ -71,11 +71,12 @@ def render(snapshot):
     tasks = snapshot["tasks"]
     return "".join([
         counter("bridge_jobs_total", "Jobs that reached a terminal status since the process started.",
-                [({"task": task, "status": status}, count) for (task, status), count in snapshot["jobs"].items()]),
+                [({"owner": owner, "task": task, "status": status}, count)
+                 for (owner, task, status), count in snapshot["jobs"].items()]),
         counter("bridge_jobs_submitted_total", "Jobs accepted since the process started.",
-                [({"task": task}, snapshot["submitted"][task]) for task in tasks]),
+                [({"owner": owner, "task": task}, count) for (owner, task), count in snapshot["submitted"].items()]),
         counter("bridge_submissions_rejected_total", "Submissions refused with 429 since the process started.",
-                [({"reason": reason}, count) for reason, count in snapshot["rejected"].items()]),
+                [({"owner": owner, "reason": reason}, count) for (owner, reason), count in snapshot["rejected"].items()]),
         gauge("bridge_queue_depth", "Jobs waiting for a child process.", [({}, snapshot["queued"])]),
         gauge("bridge_jobs_running", "Jobs a child process has started.", [({}, snapshot["running"])]),
         gauge("bridge_pool_size", "Child processes in the pool.", [({}, snapshot["pool_size"])]),
