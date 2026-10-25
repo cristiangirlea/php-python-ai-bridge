@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import io
 import json
 import math
 import multiprocessing
@@ -16,11 +17,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ai_bridge import jobs, tasks
+from ai_bridge import jobs, log, tasks
 from ai_bridge import server as service
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
 from ai_bridge.server import BridgeServer
 from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, _entities, _merge, execute, validate
+from test_log import parse as parse_log
 
 
 class FailingDatabase:
@@ -2193,6 +2195,106 @@ class WarmUpTests(unittest.TestCase):
                     execute(task, payload, "onnx", "/m", lambda *_: None)
         self.assertEqual(sorted(looked_up), sorted((Path("/m") / name, length, stride)
                                                    for name, length, stride in jobs.WARM_UP["onnx"]))
+
+
+class JobLogTests(unittest.TestCase):
+    """A job line when a job reaches a terminal status: its task, owner and status, and where its time went."""
+
+    def setUp(self):
+        self.stream = io.StringIO()
+        log.configure("json", self.stream)
+        self.addCleanup(log.close)
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+        self.addCleanup(self.store.close)
+
+    def wait(self, job_id, states=TERMINAL, timeout=5):
+        deadline = time.monotonic() + timeout
+        while self.store.get(job_id)["status"] not in states:
+            self.assertLess(time.monotonic(), deadline, f"job did not reach {states}")
+            time.sleep(0.01)
+
+    def lines(self):
+        log.close()
+        self.text = self.stream.getvalue()
+        parsed = parse_log(self.text)
+        # Exactly one line per finished job: a second terminal line would vanish in the dict below.
+        ids = [line["job_id"] for line in parsed]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        return {line["job_id"]: line for line in parsed}
+
+    def test_the_timings_add_up_to_the_job_s_life(self):
+        started = time.monotonic()
+        job = self.store.submit("test.delay", {"seconds": 0.3, "value": "sentinel-input"})
+        self.wait(job["id"])
+        elapsed_ms = (time.monotonic() - started) * 1000
+        line = self.lines()[job["id"]]
+        self.assertEqual((line["task"], line["owner"], line["job_status"], line["level"]),
+                         ("test.delay", "default", "succeeded", "info"))
+        self.assertGreaterEqual(line["queue_ms"], 0)
+        # The parent sees the start and the result on its 10 ms poll of the child, so either may read a little late.
+        self.assertGreaterEqual(line["run_ms"], 270)
+        self.assertLessEqual(line["queue_ms"] + line["run_ms"], elapsed_ms)
+        self.assertNotIn("sentinel-input", self.text)
+
+    def test_a_job_that_never_started_has_no_queue_or_run_time(self):
+        running = self.store.submit("test.delay", {"seconds": 2})
+        self.wait(running["id"], {"running"})
+        queued = self.store.submit("test.delay", {"seconds": 0})
+        self.store.cancel(queued["id"])
+        self.store.cancel(running["id"])
+        lines = self.lines()
+        self.assertEqual((lines[queued["id"]]["job_status"], lines[queued["id"]]["queue_ms"],
+                          lines[queued["id"]]["run_ms"]), ("cancelled", None, None))
+        self.assertEqual(lines[running["id"]]["job_status"], "cancelled")
+        self.assertIsNotNone(lines[running["id"]]["run_ms"])
+
+    def test_failures_and_timeouts_are_warnings(self):
+        # A warm child first, so the 300 ms deadline is spent running rather than waiting for one to start.
+        deadline = time.monotonic() + 10
+        while self.store.readiness() is not None:
+            self.assertLess(time.monotonic(), deadline, "no child became ready")
+            time.sleep(0.01)
+        late = self.store.submit("test.delay", {"seconds": 5}, timeout_ms=300)
+        self.wait(late["id"])
+        failing = self.store.submit("test.error", {})
+        self.wait(failing["id"])
+        crashing = self.store.submit("test.crash", {})
+        self.wait(crashing["id"])
+        lines = self.lines()
+        self.assertEqual([(lines[job["id"]]["job_status"], lines[job["id"]]["level"]) for job in (failing, crashing, late)],
+                         [("failed", "warning")] * 2 + [("timed_out", "warning")])
+        # The deadline counts from submission, so the queue and the run share its 300 ms.
+        self.assertGreaterEqual(lines[late["id"]]["queue_ms"] + lines[late["id"]]["run_ms"], 290)
+        for value in ("internal exception", "task_failed", "worker_crashed", "deadline_exceeded"):
+            self.assertNotIn(value, self.text)
+
+    def test_a_drain_and_a_close_log_the_jobs_they_end_and_close_counts_them(self):
+        running = self.store.submit("test.delay", {"seconds": 5})
+        self.wait(running["id"], {"running"})
+        queued = self.store.submit("test.delay", {"seconds": 0})
+        self.store.drain()
+        self.assertEqual(self.store.close(), 1)
+        lines = self.lines()
+        self.assertEqual((lines[queued["id"]]["job_status"], lines[queued["id"]]["queue_ms"]), ("failed", None))
+        self.assertEqual(lines[running["id"]]["job_status"], "cancelled")
+        self.assertNotIn("service_restarted", self.text)
+
+    def test_a_job_read_back_from_the_table_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            first = JobStore(Settings(test_tasks=True, state_dir=state_dir))
+            try:
+                job = first.submit("test.delay", {"seconds": 0})
+                deadline = time.monotonic() + 5
+                while first.get(job["id"])["status"] not in TERMINAL:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+            finally:
+                first.close()
+            log.close()
+            self.stream = io.StringIO()
+            log.configure("json", self.stream)
+            JobStore(Settings(test_tasks=True, state_dir=state_dir)).close()
+        self.assertEqual(self.lines(), {})
 
 
 if __name__ == "__main__":

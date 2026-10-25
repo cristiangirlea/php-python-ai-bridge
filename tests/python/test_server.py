@@ -1,11 +1,13 @@
 import contextlib
 import http.client
+import io
 import json
 import os
 import re
 import signal
 import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -15,9 +17,10 @@ import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
-from ai_bridge import jobs, metrics, server, tasks
+from ai_bridge import jobs, log, metrics, server, tasks
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
+from test_log import BlockedStream, BrokenStream, parse as parse_log
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
 
@@ -1361,3 +1364,349 @@ class OwnerHttpTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/v1/jobs/" + job["id"], OTHER)[0], 404)
         self.assertEqual(self.call("GET", "/v1/jobs/" + job["id"], APP)[1]["status"], "succeeded")
         self.assertEqual(self.submit(APP, "table-key")[1]["id"], job["id"])
+
+
+SENTINEL = "sentinel-7f3a-must-never-be-logged"
+
+
+def settle(bridge, timeout=2):
+    """Until every connection slot is free again: a slot is released after its request line is queued."""
+    deadline = time.monotonic() + timeout
+    while bridge.slots._value != 32:
+        if time.monotonic() > deadline:
+            raise AssertionError("a connection was still being handled")
+        time.sleep(0.01)
+
+
+class LoggingHttpTests(unittest.TestCase):
+    """A real server on a loopback port with BRIDGE_LOG=json's writer capturing what it would put on stderr."""
+
+    def setUp(self):
+        self.stream = io.StringIO()
+        log.configure("json", self.stream)
+        self.addCleanup(log.close)
+        self.server = BridgeServer(("127.0.0.1", 0), {"app": APP, "other": OTHER},
+                                   Settings(concurrency=1, capacity=16, test_tasks=True), drain_seconds=0)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.thread.join)
+        self.addCleanup(self.server.shutdown)
+
+    def lines(self):
+        """Every line written so far, each checked against its event's schema; logging stops here."""
+        settle(self.server)
+        log.close()
+        self.text = self.stream.getvalue()
+        return parse_log(self.text)
+
+    def call(self, method, path, body=None, token=APP, headers=None):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        try:
+            sent = {"Content-Type": "application/json", **({"Authorization": "Bearer " + token} if token else {}),
+                    **(headers or {})}
+            connection.request(method, path, body, sent)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
+    def ended(self, job_id):
+        deadline = time.monotonic() + 5
+        while self.server.jobs.get(job_id, "app")["status"] not in jobs.TERMINAL:
+            self.assertLess(time.monotonic(), deadline, "the job never ended")
+            time.sleep(0.01)
+
+    def test_a_request_line_per_route_with_its_template_and_never_the_path(self):
+        job_id = "b" * 32
+        calls = [("GET", "/healthz", None, 200), ("GET", "/readyz", None, None), ("GET", "/metrics", None, 200),
+                 ("GET", "/v1/jobs/" + job_id, None, 404), ("POST", "/v1/jobs/" + job_id + "/cancel", "{}", 404),
+                 ("POST", "/v1/jobs", "{}", 400), ("GET", "/" + SENTINEL, None, 404),
+                 ("GET", "/healthz?" + SENTINEL, None, 404), ("GET", "/v1/jobs/" + SENTINEL, None, 404),
+                 ("DELETE", "/v1/jobs", None, 501)]
+        for method, path, body, status in calls:
+            connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+            try:
+                connection.request(method, path, body, {"Authorization": "Bearer " + APP,
+                                                        "Content-Type": "application/json"})
+                response = connection.getresponse()
+                response.read()
+                if status is not None:
+                    self.assertEqual(response.status, status)
+            finally:
+                connection.close()
+        requests = [line for line in self.lines() if line["event"] == "request"]
+        self.assertEqual([(line["method"], line["route"]) for line in requests],
+                         [("GET", "/healthz"), ("GET", "/readyz"), ("GET", "/metrics"), ("GET", "/v1/jobs/{id}"),
+                          ("POST", "/v1/jobs/{id}/cancel"), ("POST", "/v1/jobs"), ("GET", "other"), ("GET", "other"),
+                          ("GET", "other"), ("other", "/v1/jobs")])
+        self.assertEqual([line["status"] for line in requests][3:], [404, 404, 400, 404, 404, 404, 501])
+        # The unsupported method is refused before authentication, so it has no owner.
+        self.assertEqual([line["owner"] for line in requests], ["app"] * 9 + [None])
+        self.assertEqual([line["level"] == "warning" for line in requests], [line["status"] >= 500 for line in requests])
+        for line in requests:
+            self.assertGreaterEqual(line["duration_ms"], 0)
+        self.assertNotIn(SENTINEL, self.text)
+        self.assertNotIn(job_id, self.text)
+
+    def test_a_401_is_logged_with_no_owner(self):
+        self.assertEqual(self.call("GET", "/healthz", token=None)[0], 401)
+        self.assertEqual(self.call("GET", "/healthz", token=SENTINEL + "x" * 32)[0], 401)
+        lines = self.lines()
+        self.assertEqual([(line["status"], line["owner"], line["route"]) for line in lines],
+                         [(401, None, "/healthz")] * 2)
+        self.assertNotIn(SENTINEL, self.text)
+
+    def test_each_token_s_requests_carry_its_name(self):
+        self.call("GET", "/healthz", token=OTHER)
+        self.call("GET", "/healthz", token=APP)
+        self.assertEqual([line["owner"] for line in self.lines()], ["other", "app"])
+
+    def test_no_input_result_token_header_query_key_or_exception_text_is_written(self):
+        body = json.dumps({"task": "test.inspect", "input": {"value": [SENTINEL]}, "idempotency_key": SENTINEL + "-k"})
+        headers = {"X-Sentinel": SENTINEL, "Cookie": SENTINEL}
+        # A query string is not the route, so this is read as an unknown route's body, not a submission.
+        self.assertEqual(self.call("POST", "/v1/jobs?" + SENTINEL, body, headers=headers)[0], 400)
+        status, inspected = self.call("POST", "/v1/jobs", body, headers=headers)
+        self.assertEqual(status, 202)
+        status, failing = self.call("POST", "/v1/jobs", json.dumps({"task": "test.error", "input": {}}))
+        self.assertEqual(status, 202)
+        status, ranked = self.call("POST", "/v1/jobs", json.dumps(
+            {"task": "rerank", "input": {"query": SENTINEL, "documents": [SENTINEL, "other text"]}}))
+        self.assertEqual(status, 202)
+        for job in (inspected, failing, ranked):
+            self.ended(job["id"])
+        self.assertEqual(self.call("GET", "/v1/jobs/" + failing["id"])[1]["status"], "failed")
+        result = self.call("GET", "/v1/jobs/" + ranked["id"])[1]["result"]
+        self.assertEqual(self.call("POST", "/v1/jobs", "{" + SENTINEL)[0], 400)
+        lines = self.lines()
+        for value in (SENTINEL, APP, OTHER, "Bearer", "internal exception", "Traceback", "RuntimeError",
+                      "Task did not complete", "task_failed", result["model"], "test-only", "?"):
+            with self.subTest(value=value):
+                self.assertNotIn(value, self.text)
+        ended = {line["job_id"]: line for line in lines if line["event"] == "job"}
+        self.assertEqual({job_id: (line["task"], line["job_status"], line["owner"]) for job_id, line in ended.items()},
+                         {inspected["id"]: ("test.inspect", "succeeded", "app"),
+                          failing["id"]: ("test.error", "failed", "app"), ranked["id"]: ("rerank", "succeeded", "app")})
+        self.assertEqual(ended[failing["id"]]["level"], "warning")
+        self.assertEqual(ended[ranked["id"]]["level"], "info")
+
+    def test_refusals_before_and_around_the_handler_are_logged(self):
+        # 413 for a body over the limit, 431 for a header block or a request line over its own.
+        self.assertEqual(self.call("POST", "/v1/jobs", " " * 262145)[0], 413)
+        head = b"GET /healthz HTTP/1.1\r\nHost: x\r\nX-Pad: " + SENTINEL.encode() * 600 + b"\r\n\r\n"
+        self.assertEqual(exchange(self.server.server_address, head)[0], 431)
+        long_line = b"GET /" + SENTINEL.encode() * 300 + b" HTTP/1.1\r\n\r\n"
+        self.assertEqual(exchange(self.server.server_address, long_line)[0], 431)
+        # 408: a body announced and never sent, so the five-second read deadline passes.
+        self.assertEqual(exchange(self.server.server_address,
+                                  b"POST /v1/jobs HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + APP.encode()
+                                  + b"\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n", wait=8)[0], 408)
+        lines = self.lines()
+        self.assertEqual([(line["method"], line["route"], line["status"], line["owner"]) for line in lines],
+                         [("POST", "/v1/jobs", 413, "app"), ("GET", "/healthz", 431, None), (None, "other", 431, None),
+                          ("POST", "/v1/jobs", 408, "app")])
+        self.assertGreaterEqual(lines[3]["duration_ms"], 4000)
+        self.assertNotIn(SENTINEL, self.text)
+
+    def test_a_busy_503_is_logged_without_anything_read(self):
+        idle = [socket.create_connection(self.server.server_address, timeout=2) for _ in range(32)]
+        try:
+            deadline = time.monotonic() + 5
+            while self.server.slots._value:
+                self.assertLess(time.monotonic(), deadline, "the idle connections were not all taken")
+                time.sleep(0.01)
+            self.assertEqual(exchange(self.server.server_address, b"GET /" + SENTINEL.encode())[0], 503)
+        finally:
+            for connection in idle:
+                connection.close()
+        busy = [line for line in self.lines() if line["status"] == 503]
+        self.assertEqual([(line["method"], line["route"], line["owner"], line["level"]) for line in busy],
+                         [(None, "other", None, "warning")])
+        self.assertNotIn(SENTINEL, self.text)
+
+    def test_the_drain_says_how_many_jobs_the_deadline_cut_short(self):
+        job = self.call("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {"seconds": 5}}))[1]
+        deadline = time.monotonic() + 5
+        while self.server.jobs.get(job["id"], "app")["status"] != "running":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        self.server.stop()
+        self.thread.join(5)
+        drained = [line for line in self.lines() if line["event"] == "drain"]
+        self.assertEqual([(line["running"], line["interrupted"], line["level"]) for line in drained],
+                         [(1, False, "warning")])
+        self.assertLess(drained[0]["duration_ms"], 2000)
+
+    def test_a_drain_with_nothing_running_is_info(self):
+        self.server.stop()
+        self.thread.join(5)
+        drained = [line for line in self.lines() if line["event"] == "drain"]
+        self.assertEqual([(line["running"], line["interrupted"], line["level"]) for line in drained],
+                         [(0, False, "info")])
+
+    def test_a_connection_that_times_out_before_its_head_is_read_writes_no_line(self):
+        silent = socket.create_connection(self.server.server_address, timeout=10)
+        half = socket.create_connection(self.server.server_address, timeout=10)
+        try:
+            half.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n")
+            # The handler's five-second idle timeout ends both without a reply.
+            for connection in (silent, half):
+                self.assertEqual(connection.recv(1), b"")
+            settle(self.server, 8)
+        finally:
+            silent.close()
+            half.close()
+        self.assertEqual(self.lines(), [])
+
+
+class PeerResetTests(unittest.TestCase):
+    """A peer that resets mid-request puts nothing but JSON lines on stderr, and nothing at all with logging off."""
+
+    def reset_peer(self, mode):
+        stream = io.StringIO()
+        with patch.object(sys, "stderr", stream):
+            log.configure(mode, stream)
+            self.addCleanup(log.close)
+            bridge = BridgeServer(("127.0.0.1", 0), TOKEN, Settings())
+            thread = threading.Thread(target=bridge.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+            thread.start()
+            try:
+                for head in (b"GET /healthz HTTP/1.1\r\nHost: x\r\n",
+                             b"GET /healthz HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + TOKEN.encode() + b"\r\n\r\n"):
+                    connection = socket.create_connection(bridge.server_address, timeout=2)
+                    connection.sendall(head)
+                    time.sleep(0.1)  # lets the server read what was sent, so the reset lands mid-request
+                    # Linger 0: close() sends a reset instead of a FIN.
+                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    connection.close()
+                settle(bridge)
+            finally:
+                bridge.shutdown()
+                thread.join()
+                bridge.server_close()
+            log.close()
+        return stream.getvalue()
+
+    def test_json_writes_json_lines_only(self):
+        text = self.reset_peer("json")
+        parse_log(text)
+        self.assertNotIn("Traceback", text)
+        self.assertNotIn("127.0.0.1", text)
+
+    def test_off_writes_nothing(self):
+        self.assertEqual(self.reset_peer("off"), "")
+
+
+class BrokenLogStreamHttpTests(unittest.TestCase):
+    """A stderr that raises or never drains costs the requests nothing."""
+
+    def serve(self, stream):
+        log.configure("json", stream)
+        self.addCleanup(log.close)
+        bridge = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=64))
+        thread = threading.Thread(target=bridge.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        thread.start()
+        self.addCleanup(bridge.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(bridge.shutdown)
+        started = time.monotonic()
+        for _ in range(20):
+            connection = http.client.HTTPConnection(*bridge.server_address, timeout=2)
+            try:
+                connection.request("POST", "/v1/jobs", json.dumps({"task": "embed", "input": {"texts": ["x"]}}),
+                                   {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"})
+                self.assertEqual(connection.getresponse().status, 202)
+            finally:
+                connection.close()
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_a_stderr_that_raises(self):
+        self.serve(BrokenStream())
+
+    def test_a_stderr_that_blocks(self):
+        stream = BlockedStream()
+        self.addCleanup(stream.released.set)
+        self.serve(stream)
+
+
+class LoggingStartTests(unittest.TestCase):
+    """main() reads BRIDGE_LOG, writes start once the port is bound and stop once its children are gone."""
+
+    def main(self, environment, serve=None):
+        stream = io.StringIO()
+        self.addCleanup(log.close)
+        with patch.dict(os.environ, environment), patch.object(sys, "argv", ["ai_bridge.server", "--port", "0"]), \
+                patch.object(server.signal, "signal"), patch.object(sys, "stderr", stream), \
+                patch.object(server.BridgeServer, "serve_forever", serve or MagicMock()):
+            for name in [name for name in os.environ if name.startswith("BRIDGE_") and name not in environment]:
+                del os.environ[name]
+            server.main()
+        return stream.getvalue()
+
+    def test_json_writes_start_and_stop_with_safe_settings_only(self):
+        text = self.main({"BRIDGE_LOG": "json", "BRIDGE_TOKENS": f"app={APP},{SENTINEL}={OTHER}",
+                          "BRIDGE_CAPACITY": "9", "BRIDGE_DRAIN_SECONDS": "7"})
+        lines = parse_log(text)
+        self.assertEqual([line["event"] for line in lines], ["start", "stop"])
+        self.assertEqual({key: lines[0][key] for key in log.EVENTS["start"]},
+                         {"backend": "lexical", "concurrency": 2, "capacity": 9, "retention_seconds": 300.0,
+                          "max_jobs": 1000, "drain_seconds": 7, "tokens": 2})
+        self.assertEqual((lines[1]["cancelled"], lines[1]["level"]), (0, "info"))
+        for value in (APP, OTHER, SENTINEL, "app"):
+            self.assertNotIn(value, text)
+
+    def serve_with_a_running_job(self, signals):
+        """A serve_forever that first starts a long job, then signals the server and serves until it stops."""
+        serve_forever = server.BridgeServer.serve_forever
+
+        def serve(bridge, poll_interval=0.5):
+            job = bridge.jobs.submit("test.delay", {"seconds": 10})
+            deadline = time.monotonic() + 10
+            while bridge.jobs.get(job["id"])["status"] != "running":
+                self.assertLess(time.monotonic(), deadline, "the job never started")
+                time.sleep(0.01)
+            for _ in range(signals):
+                bridge.stop()
+            serve_forever(bridge, poll_interval)
+
+        return serve
+
+    def test_a_job_running_at_shutdown_makes_stop_a_warning(self):
+        text = self.main({"BRIDGE_LOG": "json", "BRIDGE_TOKEN": TOKEN, "BRIDGE_TEST_TASKS": "1",
+                          "BRIDGE_DRAIN_SECONDS": "0"}, self.serve_with_a_running_job(1))
+        lines = parse_log(text)
+        self.assertEqual([line["event"] for line in lines], ["start", "drain", "job", "stop"])
+        self.assertEqual((lines[1]["running"], lines[1]["interrupted"]), (1, False))
+        self.assertGreaterEqual(lines[3]["cancelled"], 1)
+        self.assertEqual(lines[3]["level"], "warning")
+
+    def test_a_second_signal_writes_one_interrupted_drain_line_before_stop(self):
+        snapshot = jobs.JobStore.snapshot
+
+        def slow_snapshot(store):
+            # Widens the moment between the interruption and the drain line, which the stop must wait out.
+            time.sleep(0.3)
+            return snapshot(store)
+
+        with patch.object(jobs.JobStore, "snapshot", slow_snapshot):
+            text = self.main({"BRIDGE_LOG": "json", "BRIDGE_TOKEN": TOKEN, "BRIDGE_TEST_TASKS": "1",
+                              "BRIDGE_DRAIN_SECONDS": "30"}, self.serve_with_a_running_job(2))
+        lines = parse_log(text)
+        self.assertEqual([line["event"] for line in lines], ["start", "drain", "job", "stop"])
+        self.assertEqual((lines[1]["interrupted"], lines[1]["running"]), (True, 1))
+        self.assertEqual((lines[3]["cancelled"], lines[3]["level"]), (1, "warning"))
+
+    def test_off_or_unset_writes_nothing(self):
+        for environment in ({}, {"BRIDGE_LOG": "off"}, {"BRIDGE_LOG": ""}):
+            with self.subTest(environment=environment):
+                self.assertEqual(self.main({"BRIDGE_TOKEN": TOKEN, **environment}), "")
+
+    def test_any_other_value_stops_the_start_naming_the_variable(self):
+        for value in ("JSON", "on", "text", SENTINEL):
+            with self.subTest(value=value), patch.object(server, "BridgeServer") as bridge:
+                with self.assertRaises(SystemExit) as raised:
+                    self.main({"BRIDGE_TOKEN": TOKEN, "BRIDGE_LOG": value})
+                self.assertIn("BRIDGE_LOG", str(raised.exception.code))
+                self.assertNotIn(SENTINEL, str(raised.exception.code))
+                bridge.assert_not_called()

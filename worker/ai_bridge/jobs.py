@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import metrics, tasks
+from . import log, metrics, tasks
 from .tasks import MODEL_NAMES, TEST_TASKS, execute, validate
 
 STATUSES = ("succeeded", "failed", "timed_out", "cancelled")
@@ -405,6 +405,11 @@ class JobStore:
         # A job read back from the table finished in an earlier process and never ends here.
         self._ended[job["_owner"], job["task"], status] += 1
         metrics.observe(self._durations[job["task"]], job["_finished"] - job["_submitted_at"])
+        started = job.get("_started_at")
+        log.event("job", warning=status in ("failed", "timed_out"), job_id=job["id"], task=job["task"],
+                  owner=job["_owner"], job_status=status,
+                  queue_ms=None if started is None else round((started - job["_submitted_at"]) * 1000, 3),
+                  run_ms=None if started is None else round((job["_finished"] - started) * 1000, 3))
 
     def _abort(self, job, status, code=None):
         """End a job before its child has: the child is retired, since it may be halfway through the input."""
@@ -621,7 +626,8 @@ class JobStore:
         if kind == "started":
             # Not written through: a restart fails a running job exactly as it fails a queued one.
             job["status"] = "running"
-            metrics.observe(self._waits[job["task"]], time.monotonic() - job["_submitted_at"])
+            job["_started_at"] = time.monotonic()
+            metrics.observe(self._waits[job["task"]], job["_started_at"] - job["_submitted_at"])
             return False
         if kind == "progress":
             job["progress"] = value
@@ -656,6 +662,7 @@ class JobStore:
                         self._retiring.remove(worker)
 
     def close(self):
+        """Stop every child; returns how many unfinished jobs this ended as cancelled."""
         self._stopping.set()
         self._thread.join(timeout=2)
         with self._lock:
@@ -664,9 +671,9 @@ class JobStore:
             if self._db is not None:
                 self._db.close()
                 self._db = None
-            for job in self._jobs.values():
-                if job["status"] not in TERMINAL:
-                    self._abort(job, "cancelled")
+            unfinished = [job for job in self._jobs.values() if job["status"] not in TERMINAL]
+            for job in unfinished:
+                self._abort(job, "cancelled")
             for worker in list(self._pool):
                 self._retire(worker, stop=True)
             retiring = list(self._retiring)
@@ -684,3 +691,4 @@ class JobStore:
         self._thread.join()
         with self._lock:
             self._retiring.clear()
+        return len(unfinished)
