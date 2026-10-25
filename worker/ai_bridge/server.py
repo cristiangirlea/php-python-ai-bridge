@@ -8,11 +8,13 @@ import re
 import signal
 import socket
 import sqlite3
+import stat
 import threading
 import time
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .jobs import CapacityError, DrainingError, JobStore, Settings
+from .jobs import DEFAULT_OWNER, CapacityError, DrainingError, JobStore, Settings
 from .metrics import CONTENT_TYPE, render
 from .tasks import missing_models
 
@@ -60,24 +62,110 @@ class _Head:
 
     def __getattr__(self, name):
         return getattr(self._rfile, name)
+MAX_TOKENS = 64
+MAX_TOKENS_FILE = 65536
+TOKEN_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+
+def check_tokens(tokens, source="the token list"):
+    """Refuse a token list the service must not start with; the message names the source, never a name or token."""
+    if not tokens:
+        raise ValueError(f"{source} holds no token")
+    if len(tokens) > MAX_TOKENS:
+        raise ValueError(f"{source} holds more than {MAX_TOKENS} tokens")
+    for name, token in tokens.items():
+        if type(name) is not str or not TOKEN_NAME.fullmatch(name):
+            raise ValueError(f"{source}: every name must be 1-64 characters of A-Z, a-z, 0-9, '_', '.' and '-'")
+        if type(token) is not str or len(token) < 32 or any(not 33 <= ord(char) <= 126 for char in token):
+            raise ValueError(f"{source}: every token must contain at least 32 non-whitespace ASCII characters")
+    if len(set(tokens.values())) != len(tokens):
+        raise ValueError(f"{source} gives two names the same token")
+    return tokens
+
+
+def _entries(lines, source):
+    """name=token entries as a mapping; the token is everything after the first "=", since a token may hold one."""
+    if len(lines) > MAX_TOKENS:
+        raise ValueError(f"{source} holds more than {MAX_TOKENS} tokens")
+    tokens = {}
+    for line in lines:
+        name, separator, token = line.partition("=")
+        if not separator or not TOKEN_NAME.fullmatch(name):
+            raise ValueError(f"{source}: every entry must be name=token, the name 1-64 characters of A-Z, a-z, 0-9, "
+                             "'_', '.' and '-'")
+        if name in tokens:
+            raise ValueError(f"{source} names a token twice")
+        tokens[name] = token
+    return check_tokens(tokens, source)
+
+
+def _read_tokens_file(path):
+    """The file's entries, read once; a file others could read or replace is refused, since it holds every token."""
+    try:
+        # Non-blocking, so a FIFO at the path cannot hold the start up; a regular file reads as usual.
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as file:
+            mode = os.fstat(file.fileno()).st_mode
+            if not stat.S_ISREG(mode):
+                raise ValueError("BRIDGE_TOKENS_FILE must be a regular file")
+            if mode & 0o077:
+                raise ValueError("BRIDGE_TOKENS_FILE must not be open to group or others: give it mode 0600 or stricter")
+            raw = file.read(MAX_TOKENS_FILE + 1)
+    except OSError:
+        raise ValueError("BRIDGE_TOKENS_FILE cannot be read by the service") from None
+    if len(raw) > MAX_TOKENS_FILE:
+        raise ValueError(f"BRIDGE_TOKENS_FILE is larger than {MAX_TOKENS_FILE} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("BRIDGE_TOKENS_FILE is not UTF-8 text") from None
+    lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    return _entries(lines, "BRIDGE_TOKENS_FILE")
+
+
+def resolve_tokens():
+    """The service's tokens by name from BRIDGE_TOKEN (named default), BRIDGE_TOKENS or BRIDGE_TOKENS_FILE, exactly one
+    of them. Both token variables leave the environment here, before any child exists: the store's children inherit
+    the environment block, and a variable removed later stays in /proc/<pid>/environ. The file's path may stay."""
+    single = os.environ.pop("BRIDGE_TOKEN", "")
+    listed = os.environ.pop("BRIDGE_TOKENS", "")
+    path = os.environ.get("BRIDGE_TOKENS_FILE", "")
+    try:
+        if single and (listed or path):
+            raise ValueError("BRIDGE_TOKEN cannot be set together with BRIDGE_TOKENS or BRIDGE_TOKENS_FILE")
+        if listed and path:
+            raise ValueError("BRIDGE_TOKENS and BRIDGE_TOKENS_FILE cannot both be set")
+        if path:
+            return _read_tokens_file(path)
+        if listed:
+            return _entries(listed.split(","), "BRIDGE_TOKENS")
+        if single:
+            return check_tokens({DEFAULT_OWNER: single}, "BRIDGE_TOKEN")
+        raise ValueError("Set BRIDGE_TOKEN, BRIDGE_TOKENS or BRIDGE_TOKENS_FILE to the service's tokens")
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
 
 
 class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, address, token, settings=None, drain_seconds=30):
-        if len(token) < 32 or any(not 33 <= ord(char) <= 126 for char in token):
-            raise ValueError("BRIDGE_TOKEN must contain at least 32 non-whitespace ASCII characters")
-        self.token = token
+    def __init__(self, address, tokens, settings=None, drain_seconds=30):
+        """tokens maps each name to its token; a single token is the name default."""
+        if isinstance(tokens, str):
+            tokens = {DEFAULT_OWNER: tokens}
+        check_tokens(tokens)
+        # The header each name is presented with; every request is compared with all of them.
+        self.credentials = tuple((name, ("Bearer " + token).encode("ascii")) for name, token in tokens.items())
         self.drain_seconds = drain_seconds
         self._signalled_at = None
         self._interrupted = threading.Event()
         self.slots = threading.BoundedSemaphore(32)
         # The children the store starts inherit this process's environment block as it is at that moment, and
-        # removing a variable later leaves it in /proc/<pid>/environ; so the token leaves before any child exists.
+        # removing a variable later leaves it in /proc/<pid>/environ; so the tokens leave before any child exists.
         os.environ.pop("BRIDGE_TOKEN", None)
-        self.jobs = JobStore(settings)
+        os.environ.pop("BRIDGE_TOKENS", None)
+        self.jobs = JobStore(replace(settings or Settings(), owners=tuple(tokens)))
         try:
             super().__init__(address, Handler)
         except Exception:
@@ -175,12 +263,17 @@ class Handler(BaseHTTPRequestHandler):
         self._reply(status, {"error": {"code": code, "message": message}}, headers)
 
     def _authorized(self):
+        """The name of the token presented, or None once a 401 is sent. Every token is compared, whichever matches."""
         values = self.headers.get_all("Authorization", [])
-        expected = ("Bearer " + self.server.token).encode("ascii")
-        if len(values) != 1 or not hmac.compare_digest(values[0].encode("utf-8"), expected):
+        presented = values[0].encode("utf-8") if len(values) == 1 else b""
+        owner = None
+        for name, expected in self.server.credentials:
+            if hmac.compare_digest(presented, expected) and owner is None:
+                owner = name
+        if len(values) != 1 or owner is None:
             self._error(401, "unauthorized", "Service authentication required")
-            return False
-        return True
+            return None
+        return owner
 
     def _body(self):
         lengths = self.headers.get_all("Content-Length", [])
@@ -212,7 +305,8 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_GET(self):
-        if not self._authorized():
+        owner = self._authorized()
+        if owner is None:
             return
         if self.path == "/healthz":
             self._reply(200, {"status": "ok", "protocol": 1, "backend": self.server.jobs.settings.backend})
@@ -229,14 +323,15 @@ class Handler(BaseHTTPRequestHandler):
             self._text(200, render(self.server.jobs.snapshot()))
             return
         match = re.fullmatch(r"/v1/jobs/([a-f0-9]{32})", self.path)
-        job = self.server.jobs.get(match[1]) if match else None
+        job = self.server.jobs.get(match[1], owner) if match else None
         if job is None:
             self._error(404, "not_found", "Job or route not found")
         else:
             self._reply(200, job)
 
     def do_POST(self):
-        if not self._authorized():
+        owner = self._authorized()
+        if owner is None:
             return
         try:
             body = self._body()
@@ -250,13 +345,13 @@ class Handler(BaseHTTPRequestHandler):
                 if "idempotency_key" in body and body["idempotency_key"] is None:
                     raise ValueError("idempotency_key must be a string")
                 job = self.server.jobs.submit(body["task"], body["input"], body.get("timeout_ms", 30000),
-                                              body.get("idempotency_key"))
+                                              body.get("idempotency_key"), owner)
                 self._reply(202, job)
                 return
             match = re.fullmatch(r"/v1/jobs/([a-f0-9]{32})/cancel", self.path)
             if body:
                 raise ValueError("Cancel body must be an empty object")
-            job = self.server.jobs.cancel(match[1]) if match else None
+            job = self.server.jobs.cancel(match[1], owner) if match else None
             if job is None:
                 self._error(404, "not_found", "Job or route not found")
             else:
@@ -287,6 +382,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
     args = parser.parse_args()
+    tokens = resolve_tokens()
     settings = Settings(
         concurrency=_number("BRIDGE_CONCURRENCY", "2", int),
         capacity=_number("BRIDGE_CAPACITY", "128", int),
@@ -307,8 +403,7 @@ def main():
         raise SystemExit(f"{settings.model_dir} lacks the model files for {', '.join(missing)}; acquire them with "
                          "the fetcher: docker compose -f docker/compose.yaml run --rm --no-deps fetcher")
     try:
-        bridge = BridgeServer((args.host, args.port), os.environ.pop("BRIDGE_TOKEN", ""), settings,
-                              drain_seconds=drain_seconds)
+        bridge = BridgeServer((args.host, args.port), tokens, settings, drain_seconds=drain_seconds)
     except sqlite3.Error:
         raise SystemExit(f"BRIDGE_STATE_DIR {settings.state_dir} must be a directory the service can write "
                          "jobs.sqlite in") from None

@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import signal
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from ai_bridge import jobs, tasks
+from ai_bridge import server as service
 from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
 from ai_bridge.server import BridgeServer
 from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, _entities, _merge, execute, validate
@@ -1380,7 +1382,7 @@ class WarmPoolTests(unittest.TestCase):
             server = BridgeServer(("127.0.0.1", 0), token, Settings(concurrency=1, test_tasks=True))
             try:
                 self.assertNotIn("BRIDGE_TOKEN", os.environ)
-                self.assertEqual(server.token, token)
+                self.assertEqual([name for name, _ in server.credentials], ["default"])
                 self.store = server.jobs
                 report = self.inspect()
             finally:
@@ -1394,6 +1396,47 @@ class WarmPoolTests(unittest.TestCase):
             report = self.inspect()
             self.assertIn("BRIDGE_TOKEN", os.environ)
         self.assertFalse(report["token_in_environment"])
+
+    def test_listed_tokens_are_absent_from_the_child_environment(self):
+        # main() takes BRIDGE_TOKENS out of the environment, and reads BRIDGE_TOKENS_FILE without putting what it
+        # holds there, before the store starts a child; only the file's path stays.
+        self.store.close()
+        listed = "test-only-listed-token-never-use-in-production"
+        in_file = "test-only-file-token-never-use-in-production"
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "tokens")
+            with open(path, "w", encoding="ascii") as file:
+                file.write(f"default={in_file}\n")
+            os.chmod(path, 0o600)
+            for environment, value in (({"BRIDGE_TOKENS": f"other=x{in_file},default={listed}"}, listed),
+                                       ({"BRIDGE_TOKENS_FILE": path}, in_file)):
+                with self.subTest(source=next(iter(environment))):
+                    reports = []
+
+                    def serve(bridge, **_):
+                        self.store = bridge.jobs
+                        reports.append(self.inspect(value))
+
+                    with patch.dict(os.environ, {"BRIDGE_TEST_TASKS": "1", "BRIDGE_CONCURRENCY": "1", **environment}), \
+                            patch.object(sys, "argv", ["ai_bridge.server", "--port", "0"]), \
+                            patch.object(service.signal, "signal"), \
+                            patch.object(service.BridgeServer, "serve_forever", autospec=True, side_effect=serve):
+                        os.environ.pop("BRIDGE_TOKEN", None)
+                        service.main()
+                    report, = reports
+                    self.assertFalse(report["token_in_environment"])
+                    self.assertFalse(report["needle_in_environment"])
+                    self.assertEqual(report["held"], 0)
+                    if os.path.exists("/proc/self/environ"):
+                        self.assertIs(report["token_in_environment_block"], False)
+                        self.assertIs(report["needle_in_environment_block"], False)
+        # The same checks see a value that is there.
+        with patch.dict(os.environ, {"BRIDGE_PROBE": listed}):
+            self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+            report = self.inspect(listed)
+        self.assertTrue(report["needle_in_environment"])
+        if os.path.exists("/proc/self/environ"):
+            self.assertIs(report["needle_in_environment_block"], True)
 
     @unittest.skipUnless(os.path.exists("/proc/self/environ"), "needs /proc to read a child's environment block")
     def test_a_child_inherits_one_thread_pins(self):
@@ -1616,8 +1659,141 @@ class WarmPoolTests(unittest.TestCase):
         self.assertEqual(self.wait(running["id"])["result"]["value"], "kept")
 
 
+class OwnerTests(unittest.TestCase):
+    """A job belongs to the token name that submitted it: another owner reads it as unknown, keys are per owner,
+    and the owner outlives a restart in the job table."""
+
+    OLD_SCHEMA = """CREATE TABLE jobs (
+        id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT, progress TEXT,
+        timeout_ms INTEGER NOT NULL, idempotency_key TEXT, submitted_at REAL NOT NULL, finished_at REAL);
+        CREATE UNIQUE INDEX jobs_idempotency_key ON jobs (idempotency_key);"""
+
+    def settings(self, **values):
+        return Settings(concurrency=1, test_tasks=True, owners=("app", "other"), **values)
+
+    def wait(self, store, job_id, owner, timeout=5):
+        deadline = time.monotonic() + timeout
+        while store.get(job_id, owner)["status"] not in TERMINAL:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        return store.get(job_id, owner)
+
+    def test_another_owner_reads_and_cancels_nothing(self):
+        store = JobStore(self.settings())
+        try:
+            job = store.submit("test.delay", {"seconds": 5}, owner="app")
+            self.assertIsNone(store.get(job["id"], "other"))
+            self.assertIsNone(store.cancel(job["id"], "other"))
+            self.assertIsNone(store.get(job["id"], "default"))
+            self.assertNotEqual(store.get(job["id"], "app")["status"], "cancelled")
+            self.assertEqual(store.cancel(job["id"], "app")["status"], "cancelled")
+            self.assertNotIn("owner", job)
+        finally:
+            store.close()
+
+    def test_keys_are_per_owner(self):
+        store = JobStore(self.settings())
+        try:
+            first = store.submit("test.delay", {"seconds": 0}, idempotency_key="k", owner="app")
+            other = store.submit("test.delay", {"seconds": 0}, idempotency_key="k", owner="other")
+            self.assertNotEqual(first["id"], other["id"])
+            self.assertEqual(store.submit("test.delay", {"seconds": 0}, idempotency_key="k", owner="app")["id"],
+                             first["id"])
+        finally:
+            store.close()
+
+    def test_an_unknown_owner_or_owner_list_is_refused(self):
+        store = JobStore(self.settings())
+        try:
+            with self.assertRaises(ValueError):
+                store.submit("test.delay", {"seconds": 0}, owner="default")
+        finally:
+            store.close()
+        for owners in ((), ["app"], ("app", "app"), ("app", 1)):
+            with self.subTest(owners=owners), self.assertRaises(ValueError):
+                JobStore(Settings(concurrency=1, owners=owners))
+
+    def test_a_reopened_store_keeps_each_owner(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            first = JobStore(self.settings(state_dir=state_dir))
+            try:
+                job = first.submit("test.delay", {"seconds": 0}, idempotency_key="kept", owner="app")
+                self.wait(first, job["id"], "app")
+            finally:
+                first.close()
+            reopened = JobStore(self.settings(state_dir=state_dir))
+            try:
+                self.assertIsNone(reopened.get(job["id"], "other"))
+                self.assertIsNone(reopened.cancel(job["id"], "other"))
+                self.assertEqual(reopened.get(job["id"], "app")["status"], "succeeded")
+                self.assertEqual(
+                    reopened.submit("test.delay", {"seconds": 0}, idempotency_key="kept", owner="app")["id"], job["id"])
+                fresh = reopened.submit("test.delay", {"seconds": 0}, idempotency_key="kept", owner="other")
+                self.assertNotEqual(fresh["id"], job["id"])
+            finally:
+                reopened.close()
+            with contextlib.closing(sqlite3.connect(os.path.join(state_dir, "jobs.sqlite"))) as db:
+                self.assertEqual(dict(db.execute("SELECT id, owner FROM jobs")), {job["id"]: "app", fresh["id"]: "other"})
+
+    def test_a_table_from_before_owners_gets_the_column_and_its_rows_belong_to_default(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            path = os.path.join(state_dir, "jobs.sqlite")
+            with contextlib.closing(sqlite3.connect(path)) as db:
+                db.executescript(self.OLD_SCHEMA)
+                with db:
+                    db.execute("INSERT INTO jobs VALUES ('" + "b" * 32 + "', 'test.delay', 'succeeded', "
+                               "'{\"value\": \"old\"}', 'null', 'null', 30000, 'old-key', ?, ?)",
+                               (time.time(), time.time()))
+            store = JobStore(Settings(concurrency=1, test_tasks=True, owners=("default", "app"), state_dir=state_dir))
+            try:
+                self.assertEqual(store.get("b" * 32)["result"], {"value": "old"})
+                self.assertIsNone(store.get("b" * 32, "app"))
+                self.assertEqual(store.submit("test.delay", {"seconds": 0}, idempotency_key="old-key")["id"], "b" * 32)
+                # The old index on the key alone is gone, so another owner's same key is a job of its own.
+                other = store.submit("test.delay", {"seconds": 0}, idempotency_key="old-key", owner="app")
+                self.assertNotEqual(other["id"], "b" * 32)
+            finally:
+                store.close()
+            with contextlib.closing(sqlite3.connect(path)) as db:
+                self.assertIn("owner", [row[1] for row in db.execute("PRAGMA table_info(jobs)")])
+                self.assertEqual(db.execute("SELECT owner FROM jobs WHERE id = ?", ("b" * 32,)).fetchone(), ("default",))
+                indexes = [row[1] for row in db.execute("PRAGMA index_list(jobs)") if not row[1].startswith("sqlite_")]
+                self.assertEqual(indexes, ["jobs_owner_idempotency_key"])
+            # Opening the migrated file again changes nothing.
+            store = JobStore(Settings(concurrency=1, test_tasks=True, owners=("default", "app"), state_dir=state_dir))
+            try:
+                self.assertEqual(store.get("b" * 32)["result"], {"value": "old"})
+                self.assertIsNone(store.get("b" * 32, "app"))
+            finally:
+                store.close()
+            with contextlib.closing(sqlite3.connect(path)) as db:
+                self.assertEqual(db.execute("SELECT owner FROM jobs WHERE id = ?", ("b" * 32,)).fetchone(), ("default",))
+                indexes = [row[1] for row in db.execute("PRAGMA index_list(jobs)") if not row[1].startswith("sqlite_")]
+                self.assertEqual(indexes, ["jobs_owner_idempotency_key"])
+
+    def test_every_owner_has_its_series_from_the_start(self):
+        store = JobStore(self.settings())
+        try:
+            snapshot = store.snapshot()
+            self.assertEqual(snapshot["owners"], ("app", "other"))
+            self.assertEqual(set(snapshot["rejected"]), {("app", "capacity"), ("other", "capacity")})
+            self.assertEqual(set(snapshot["submitted"]), {(owner, task) for owner in ("app", "other")
+                                                          for task in snapshot["tasks"]})
+            self.assertEqual(len(snapshot["jobs"]), 2 * len(snapshot["tasks"]) * 4)
+            self.assertEqual(sum(snapshot["jobs"].values()) + sum(snapshot["submitted"].values()), 0)
+            job = store.submit("test.delay", {"seconds": 0}, owner="other")
+            self.wait(store, job["id"], "other")
+            snapshot = store.snapshot()
+            self.assertEqual({key: count for key, count in snapshot["jobs"].items() if count},
+                             {("other", "test.delay", "succeeded"): 1})
+            self.assertEqual({key: count for key, count in snapshot["submitted"].items() if count},
+                             {("other", "test.delay"): 1})
+        finally:
+            store.close()
+
+
 class MetricsSnapshotTests(unittest.TestCase):
-    """What the store counts for GET /metrics: plain numbers keyed only by task, status and reason."""
+    """What the store counts for GET /metrics: plain numbers keyed only by owner, task, status and reason."""
 
     def setUp(self):
         self.store = JobStore(Settings(concurrency=1, test_tasks=True))
@@ -1647,10 +1823,10 @@ class MetricsSnapshotTests(unittest.TestCase):
         snapshot = self.wait_pool(1, 1)
         tasks = ("rerank", "embed", "redact", "test.delay", "test.crash", "test.error", "test.inspect")
         self.assertEqual(snapshot["tasks"], tasks)
-        self.assertEqual(snapshot["jobs"], {(task, status): 0 for task in tasks
+        self.assertEqual(snapshot["jobs"], {("default", task, status): 0 for task in tasks
                                             for status in ("succeeded", "failed", "timed_out", "cancelled")})
-        self.assertEqual(snapshot["submitted"], dict.fromkeys(tasks, 0))
-        self.assertEqual(snapshot["rejected"], {"capacity": 0})
+        self.assertEqual(snapshot["submitted"], {("default", task): 0 for task in tasks})
+        self.assertEqual(snapshot["rejected"], {("default", "capacity"): 0})
         self.assertEqual((snapshot["queued"], snapshot["running"]), (0, 0))
         self.assertEqual((snapshot["backend"], snapshot["concurrency"], snapshot["capacity"]), ("lexical", 1, 128))
         for histogram in list(snapshot["duration"].values()) + list(snapshot["queue"].values()):
@@ -1678,10 +1854,11 @@ class MetricsSnapshotTests(unittest.TestCase):
                          ["succeeded", "failed", "timed_out", "failed"])
         snapshot = self.store.snapshot()
         self.assertEqual({key: count for key, count in snapshot["jobs"].items() if count}, {
-            ("test.delay", "succeeded"): 1, ("test.error", "failed"): 1, ("test.delay", "cancelled"): 1,
-            ("test.delay", "timed_out"): 1, ("test.crash", "failed"): 1})
+            ("default", "test.delay", "succeeded"): 1, ("default", "test.error", "failed"): 1,
+            ("default", "test.delay", "cancelled"): 1, ("default", "test.delay", "timed_out"): 1,
+            ("default", "test.crash", "failed"): 1})
         self.assertEqual({task: count for task, count in snapshot["submitted"].items() if count},
-                         {"test.delay": 3, "test.error": 1, "test.crash": 1})
+                         {("default", "test.delay"): 3, ("default", "test.error"): 1, ("default", "test.crash"): 1})
 
     def test_histograms_agree_with_the_jobs_run(self):
         started = time.monotonic()
@@ -1742,26 +1919,26 @@ class MetricsSnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.submit("rerank", {"query": "", "documents": ["x"]})
         snapshot = self.store.snapshot()
-        self.assertEqual(snapshot["rejected"], {"capacity": 2})
-        self.assertEqual(snapshot["submitted"]["test.delay"], 1)
-        self.assertEqual(snapshot["submitted"]["rerank"], 0)
+        self.assertEqual(snapshot["rejected"], {("default", "capacity"): 2})
+        self.assertEqual(snapshot["submitted"]["default", "test.delay"], 1)
+        self.assertEqual(snapshot["submitted"]["default", "rerank"], 0)
 
     def test_a_submission_the_table_refuses_counts_as_a_refusal(self):
         FailingDatabase(self.store, "INSERT")
         with self.assertRaises(CapacityError):
             self.store.submit("test.delay", {"seconds": 0})
         snapshot = self.store.snapshot()
-        self.assertEqual(snapshot["rejected"], {"capacity": 1})
-        self.assertEqual(snapshot["submitted"]["test.delay"], 0)
+        self.assertEqual(snapshot["rejected"], {("default", "capacity"): 1})
+        self.assertEqual(snapshot["submitted"]["default", "test.delay"], 0)
 
     def test_the_snapshot_is_a_copy(self):
         self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
         snapshot = self.store.snapshot()
         snapshot["duration"]["test.delay"]["buckets"][0] = 99
-        snapshot["jobs"][("test.delay", "succeeded")] = 99
+        snapshot["jobs"][("default", "test.delay", "succeeded")] = 99
         again = self.store.snapshot()
         self.assertNotEqual(again["duration"]["test.delay"]["buckets"][0], 99)
-        self.assertEqual(again["jobs"][("test.delay", "succeeded")], 1)
+        self.assertEqual(again["jobs"][("default", "test.delay", "succeeded")], 1)
 
     def test_jobs_restored_from_the_table_count_nothing(self):
         with tempfile.TemporaryDirectory() as state_dir:
@@ -1851,7 +2028,9 @@ class DrainTests(unittest.TestCase):
             self.store.submit("test.delay", {"seconds": 0})
         with self.assertRaises(jobs.DrainingError):
             self.store.submit("test.delay", {"seconds": 0}, idempotency_key="drain-k1")
-        self.assertEqual(self.store.snapshot()["submitted"]["test.delay"], 0)
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["submitted"][jobs.DEFAULT_OWNER, "test.delay"], 0)
+        self.assertEqual(snapshot["rejected"][jobs.DEFAULT_OWNER, "capacity"], 0)
         self.assertFalse(self.store.busy())
 
     def test_no_child_is_started_while_draining(self):

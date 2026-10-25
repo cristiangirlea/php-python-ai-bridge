@@ -37,10 +37,13 @@ MAX_JOBS_PER_WORKER = 1000
 IDEMPOTENCY_KEY = re.compile(r"[\x21-\x7e]{1,128}")
 # Each backend's warm-up, as the (directory, max_length, stride) keys tasks._onnx caches by; a test keeps both in step.
 WARM_UP = {"onnx": (("rerank", 512, 0), ("embed", 256, 0), ("redact", 512, 64), ("redact-uncased", 512, 64))}
+# The owner is a token's name, never its value; _open_db gives a table from before owners the column, rows to "default".
 _SCHEMA = """CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT, progress TEXT,
-    timeout_ms INTEGER NOT NULL, idempotency_key TEXT, submitted_at REAL NOT NULL, finished_at REAL);
-CREATE UNIQUE INDEX IF NOT EXISTS jobs_idempotency_key ON jobs (idempotency_key);"""
+    timeout_ms INTEGER NOT NULL, idempotency_key TEXT, submitted_at REAL NOT NULL, finished_at REAL, owner TEXT);"""
+_INDEX = """DROP INDEX IF EXISTS jobs_idempotency_key;
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_owner_idempotency_key ON jobs (owner, idempotency_key);"""
+DEFAULT_OWNER = "default"
 
 
 class CapacityError(Exception):
@@ -65,15 +68,18 @@ class Settings:
     max_jobs: int = MAX_JOBS_PER_WORKER
     # Where jobs.sqlite lives; BRIDGE_STATE_DIR in the service. None keeps the table in memory only.
     state_dir: str | None = None
+    # The names of the service's tokens: a job belongs to one, and each has its own metrics series.
+    owners: tuple[str, ...] = (DEFAULT_OWNER,)
 
 
 def _serve(connection, backend, model_dir):
     """A child's whole life: run the jobs the parent sends until it hangs up."""
     # Ctrl+C in a terminal reaches the whole process group; stopping children is the parent's job.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    # The service removes the token from its environment before it starts any child (server.py), so it is not
+    # The service removes its tokens from its environment before it starts any child (server.py), so they are not
     # in the child's environment block; this second pop covers a store built by something that did not.
     os.environ.pop("BRIDGE_TOKEN", None)
+    os.environ.pop("BRIDGE_TOKENS", None)
     # Ready only after the warm-up, so no job waits in a pipe nobody reads; a failed load still reports ready.
     try:
         for name, max_length, stride in WARM_UP.get(backend, ()):
@@ -156,17 +162,21 @@ class JobStore:
                 or not math.isfinite(self.settings.retention_seconds)
                 or self.settings.retention_seconds <= 0):
             raise ValueError("invalid worker settings")
+        owners = self.settings.owners
+        if (type(owners) is not tuple or not owners or len(set(owners)) != len(owners)
+                or any(type(owner) is not str for owner in owners)):
+            raise ValueError("invalid worker owners")
         self._context = multiprocessing.get_context("spawn")
         # Aggregates for GET /metrics, since this process started; every series exists from the start, at zero.
         tasks = tuple(MODEL_NAMES[self.settings.backend]) + (TEST_TASKS if self.settings.test_tasks else ())
         self._tasks = tasks
-        self._ended = {(task, status): 0 for task in tasks for status in STATUSES}
-        self._submitted = dict.fromkeys(tasks, 0)
-        self._rejected = {"capacity": 0}
+        self._ended = {(owner, task, status): 0 for owner in owners for task in tasks for status in STATUSES}
+        self._submitted = {(owner, task): 0 for owner in owners for task in tasks}
+        self._rejected = {(owner, "capacity"): 0 for owner in owners}
         self._durations = {task: metrics.new_histogram() for task in tasks}
         self._waits = {task: metrics.new_histogram() for task in tasks}
         self._jobs = {}
-        self._keys = {}  # idempotency key -> job id, for retained jobs only
+        self._keys = {}  # (owner, idempotency key) -> job id, for retained jobs only
         self._active = {}  # job id -> the worker it was sent to
         self._pool = []  # children that may take a job, idle or running one
         self._retiring = []  # children that never serve again, until they are gone
@@ -197,6 +207,11 @@ class JobStore:
                 # An expired result is overwritten in the file, not left in a free page.
                 self._db.execute("PRAGMA secure_delete=ON")
                 self._db.executescript(_SCHEMA)
+                if "owner" not in [column[1] for column in self._db.execute("PRAGMA table_info(jobs)")]:
+                    self._db.execute("ALTER TABLE jobs ADD COLUMN owner TEXT")
+                with self._db:
+                    self._db.execute("UPDATE jobs SET owner = ? WHERE owner IS NULL", (DEFAULT_OWNER,))
+                self._db.executescript(_INDEX)
                 with self._db:
                     self._db.execute(
                         "UPDATE jobs SET status = 'failed', result = 'null', error = ?, finished_at = ? "
@@ -205,21 +220,21 @@ class JobStore:
                     self._db.execute("DELETE FROM jobs WHERE finished_at IS NULL OR finished_at <= ?",
                                      (time.time() - self.settings.retention_seconds,))
                 rows = self._db.execute("SELECT id, task, status, result, error, progress, timeout_ms, "
-                                        "idempotency_key, finished_at FROM jobs").fetchall()
+                                        "idempotency_key, finished_at, owner FROM jobs").fetchall()
         except Exception:
             self._db.close()
             raise
         wall, now = time.time(), time.monotonic()
-        for job_id, task, status, result, error, progress, timeout_ms, key, finished_at in rows:
+        for job_id, task, status, result, error, progress, timeout_ms, key, finished_at, owner in rows:
             self._jobs[job_id] = {
                 "id": job_id, "task": task, "status": status, "result": json.loads(result),
                 "error": json.loads(error), "progress": json.loads(progress), "timeout_ms": timeout_ms,
                 # Retention counts from the wall-clock finish, carried over to this process's monotonic clock.
                 "_input": None, "_deadline": now, "_finished": now - max(0.0, wall - finished_at),
-                "_retried": True, "_key": key,
+                "_retried": True, "_key": key, "_owner": owner,
             }
             if key is not None:
-                self._keys[key] = job_id
+                self._keys[owner, key] = job_id
 
     def _write(self, job, submitted=False):
         """Write a job's row through; a no-op once close() has let go of the connection. A submission that cannot
@@ -235,9 +250,9 @@ class JobStore:
                 if submitted:
                     # REPLACE drops a row an earlier failed delete left holding this key, which memory no longer has.
                     self._db.execute(
-                        "INSERT OR REPLACE INTO jobs (task, timeout_ms, idempotency_key, submitted_at, status, result, "
-                        "error, progress, finished_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (job["task"], job["timeout_ms"], job["_key"], time.time()) + values)
+                        "INSERT OR REPLACE INTO jobs (owner, task, timeout_ms, idempotency_key, submitted_at, status, "
+                        "result, error, progress, finished_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (job["_owner"], job["task"], job["timeout_ms"], job["_key"], time.time()) + values)
                 else:
                     self._db.execute("UPDATE jobs SET status = ?, result = ?, error = ?, progress = ?, "
                                      "finished_at = ? WHERE id = ?", values)
@@ -245,7 +260,9 @@ class JobStore:
             if submitted:
                 raise CapacityError("job table cannot be written") from None
 
-    def submit(self, task, payload, timeout_ms=30000, idempotency_key=None):
+    def submit(self, task, payload, timeout_ms=30000, idempotency_key=None, owner=DEFAULT_OWNER):
+        if owner not in self.settings.owners:
+            raise ValueError("owner is not one of the service's token names")
         if not isinstance(task, str):
             raise ValueError("task must be a string")
         if type(timeout_ms) is not int or not 100 <= timeout_ms <= 300000:
@@ -256,21 +273,21 @@ class JobStore:
         payload = validate(task, payload, self.settings.test_tasks)
         with self._lock:
             try:
-                return self._accept(task, payload, timeout_ms, idempotency_key)
+                return self._accept(task, payload, timeout_ms, idempotency_key, owner)
             except CapacityError:
                 # Every 429 the service sends comes from here, so each is counted exactly once.
-                self._rejected["capacity"] += 1
+                self._rejected[owner, "capacity"] += 1
                 raise
 
-    def _accept(self, task, payload, timeout_ms, idempotency_key):
+    def _accept(self, task, payload, timeout_ms, idempotency_key, owner):
         if self._draining:
             raise DrainingError("worker is draining")
         if self._stopping.is_set():
             raise CapacityError("worker is shutting down")
         self._expire()
         # A repeat adds no job, so it is answered even at capacity.
-        if idempotency_key in self._keys:
-            return self._public(self._jobs[self._keys[idempotency_key]])
+        if (owner, idempotency_key) in self._keys:
+            return self._public(self._jobs[self._keys[owner, idempotency_key]])
         if len(self._jobs) >= self.settings.capacity:
             raise CapacityError("job capacity reached; wait for retained jobs to expire", self._retry_after())
         now = time.monotonic()
@@ -279,24 +296,30 @@ class JobStore:
             "id": job_id, "task": task, "status": "queued", "result": None,
             "error": None, "progress": None, "timeout_ms": timeout_ms,
             "_input": copy.deepcopy(payload), "_deadline": now + timeout_ms / 1000,
-            "_finished": None, "_retried": False, "_key": idempotency_key, "_submitted_at": now,
+            "_finished": None, "_retried": False, "_key": idempotency_key, "_submitted_at": now, "_owner": owner,
         }
         self._write(job, submitted=True)
         self._jobs[job_id] = job
         if idempotency_key is not None:
-            self._keys[idempotency_key] = job_id
-        self._submitted[task] += 1
+            self._keys[owner, idempotency_key] = job_id
+        self._submitted[owner, task] += 1
         return self._public(job)
 
-    def get(self, job_id):
-        with self._lock:
-            self._expire()
-            return self._public(self._jobs[job_id]) if job_id in self._jobs else None
+    def _owned(self, job_id, owner):
+        """The job if this owner submitted it; another owner's job is as unknown to it as one that never was."""
+        job = self._jobs.get(job_id)
+        return job if job is not None and job["_owner"] == owner else None
 
-    def cancel(self, job_id):
+    def get(self, job_id, owner=DEFAULT_OWNER):
         with self._lock:
             self._expire()
-            job = self._jobs.get(job_id)
+            job = self._owned(job_id, owner)
+            return None if job is None else self._public(job)
+
+    def cancel(self, job_id, owner=DEFAULT_OWNER):
+        with self._lock:
+            self._expire()
+            job = self._owned(job_id, owner)
             if job is None:
                 return None
             if job["status"] not in TERMINAL:
@@ -340,8 +363,8 @@ class JobStore:
             statuses = [job["status"] for job in self._jobs.values()]
             return {
                 "backend": self.settings.backend, "concurrency": self.settings.concurrency,
-                "capacity": self.settings.capacity, "tasks": self._tasks, "jobs": dict(self._ended),
-                "submitted": dict(self._submitted), "rejected": dict(self._rejected),
+                "capacity": self.settings.capacity, "tasks": self._tasks, "owners": self.settings.owners,
+                "jobs": dict(self._ended), "submitted": dict(self._submitted), "rejected": dict(self._rejected),
                 "queued": statuses.count("queued"), "running": statuses.count("running"),
                 "pool_size": len(self._pool), "pool_ready": sum(worker.ready for worker in self._pool),
                 "duration": copy.deepcopy(self._durations), "queue": copy.deepcopy(self._waits),
@@ -364,7 +387,8 @@ class JobStore:
         for job_id in list(self._jobs):
             finished = self._jobs[job_id]["_finished"]
             if finished is not None and now - finished >= self.settings.retention_seconds:
-                self._keys.pop(self._jobs.pop(job_id)["_key"], None)
+                job = self._jobs.pop(job_id)
+                self._keys.pop((job["_owner"], job["_key"]), None)
                 expired.append((job_id,))
         if expired and self._db is not None:
             try:
@@ -379,7 +403,7 @@ class JobStore:
         job["_finished"] = time.monotonic()
         self._write(job)
         # A job read back from the table finished in an earlier process and never ends here.
-        self._ended[job["task"], status] += 1
+        self._ended[job["_owner"], job["task"], status] += 1
         metrics.observe(self._durations[job["task"]], job["_finished"] - job["_submitted_at"])
 
     def _abort(self, job, status, code=None):

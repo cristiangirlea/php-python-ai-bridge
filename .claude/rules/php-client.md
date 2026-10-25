@@ -15,7 +15,7 @@ paths:
   job's pinned image from `.github/workflows/tests.yml` and rerun the same compose commands.
 - Tests are `check()` and `rejects()` calls: `tests/php/run.php` runs offline (contract checks and one
   transport error), and `tests/php/integration.php` loads it and then drives the client against the real
-  `worker`, `fault-worker` and `hostile` peers over HTTP. The path through FrankenPHP is
+  `worker`, `fault-worker`, `tokens-worker` (two tokens) and `hostile` peers over HTTP. The path through FrankenPHP is
   `tests/integration.py`. A new behaviour gets a success case, invalid-input cases and, where the worker
   is involved, an integration case. Syntax is checked with `php -l` over `src`, `examples` and `tests/php`.
 - The client never retries a `POST` on its own (a transport failure leaves the submission uncertain), and

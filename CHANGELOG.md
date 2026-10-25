@@ -8,13 +8,21 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
+- A graceful drain: on SIGTERM or SIGINT the worker answers `POST /v1/jobs` with 503 `draining` and `Retry-After: 1`, fails queued jobs as `service_restarted` at once, keeps answering `GET`, and lets running jobs finish for up to `BRIDGE_DRAIN_SECONDS` (integer 0 to 300, default 30) before it stops; a second signal stops it at once.
+- `GET /readyz`, behind any configured token like `/healthz`: 200 when the worker is not draining and a child is idle with its backend's models loaded, otherwise 503 with a reason (`draining`, `no_idle_child`, `models_loading`). A child now loads its backend's models as it starts instead of on its first job. Compose's MCP workers report healthy only once ready.
+- A full connection budget (32) is answered 503 `service_busy` with `Retry-After: 1` and `Connection: close` instead of a closed socket, and a request line over 8 KiB or a header block over 16 KiB is refused with 431 `headers_too_large`.
+
+## [0.3.0] - 2026-10-25
+
+### Added
+
+- Per-client tokens on the worker: `BRIDGE_TOKENS=name=token,...` or `BRIDGE_TOKENS_FILE` (one `name=token` per line, mode 0600 or stricter), at most 64, as an alternative to `BRIDGE_TOKEN`, which is the single token named `default`. A bad token, name, file or combination of the three stops the worker at start with a message naming the variable and never a token.
+- A job belongs to the token that submitted it: another token's `GET` or `cancel` of it is 404, exactly as for an unknown job, and idempotency keys are per token. The owner's name is kept in `jobs.sqlite` (a file from an earlier version gains the column, its rows owned by `default`) and is not in the job's snapshot. A worker with only `BRIDGE_TOKEN` behaves as before.
+- An `owner` label, the token's name, on `bridge_jobs_total`, `bridge_jobs_submitted_total` and `bridge_submissions_rejected_total`, with every configured name's series present at zero.
 - `PhpAiBridge\Laravel\BridgeServiceProvider`, registered by Laravel's package discovery, binds one `Client` built from a publishable `config/ai_bridge.php` (`BRIDGE_URL`, `BRIDGE_TOKEN`, `BRIDGE_REQUEST_TIMEOUT_MS`; `vendor:publish --tag=ai-bridge-config`), so configuration caching works.
 - `PhpAiBridge\Symfony\PhpAiBridgeBundle` registers `Client` as an autowirable service from a `php_ai_bridge` configuration whose `url`, `token` and `request_timeout_ms` default to the same environment variables.
 - Both fail on a missing or invalid setting with a message that names it and never quotes the token. `laravel/framework` and `symfony/http-kernel` are suggested, not required: the library's requirements are unchanged.
 - A TLS example: compose's `tls` profile runs Caddy from the pinned FrankenPHP image in front of the worker (`examples/tls/Caddyfile`, `tls internal`, no plain-HTTP listener, no token held), and `tls-check` drives the unchanged client through it trusting only the example CA. The integration guide's new "Cross-host use behind TLS" section says what to change for production.
-- A graceful drain: on SIGTERM or SIGINT the worker answers `POST /v1/jobs` with 503 `draining` and `Retry-After: 1`, fails queued jobs as `service_restarted` at once, keeps answering `GET`, and lets running jobs finish for up to `BRIDGE_DRAIN_SECONDS` (integer 0 to 300, default 30) before it stops; a second signal stops it at once.
-- `GET /readyz`, behind the service token: 200 when the worker is not draining and a child is idle with its backend's models loaded, otherwise 503 with a reason (`draining`, `no_idle_child`, `models_loading`). A child now loads its backend's models as it starts instead of on its first job. Compose's MCP workers report healthy only once ready.
-- A full connection budget (32) is answered 503 `service_busy` with `Retry-After: 1` and `Connection: close` instead of a closed socket, and a request line over 8 KiB or a header block over 16 KiB is refused with 431 `headers_too_large`.
 - `GET /metrics` on the worker, in the Prometheus text format and behind the service token: jobs by task and terminal status, submissions, 429 refusals, queue depth, running jobs, pool size and readiness, the concurrency and capacity settings, and per-task histograms of job and queue durations. Aggregates only, with labels from fixed sets; they live in memory and reset when the worker restarts.
 
 ## [0.2.0] - 2026-10-21
@@ -50,6 +58,7 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 
-[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cristiangirlea/php-python-ai-bridge/releases/tag/v0.1.0

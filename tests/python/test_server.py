@@ -113,7 +113,7 @@ class HttpTests(unittest.TestCase):
             status, data = self.request("POST", "/v1/jobs", body, self.auth())
         self.assertEqual(status, 429)
         self.assertEqual(data["error"]["code"], "capacity_exceeded")
-        self.assertNotIn("http-k3", self.server.jobs._keys)
+        self.assertNotIn(("default", "http-k3"), self.server.jobs._keys)
 
     def test_body_limit(self):
         self.assertEqual(self.request("POST", "/v1/jobs", " " * 262145, self.auth())[0], 413)
@@ -181,7 +181,7 @@ class CapacityHttpTests(unittest.TestCase):
             try:
                 connection.request("GET", "/metrics", headers={"Authorization": "Bearer " + TOKEN})
                 return sample(parse_metrics(connection.getresponse().read().decode()),
-                              "bridge_submissions_rejected_total", reason="capacity")
+                              "bridge_submissions_rejected_total", owner="default", reason="capacity")
             finally:
                 connection.close()
 
@@ -976,7 +976,7 @@ class MetricsHttpTests(unittest.TestCase):
         self.assertEqual(sample(families, "bridge_info", protocol="1", backend="lexical"), 1)
         self.assertEqual(sample(families, "bridge_concurrency"), 1)
         self.assertEqual(sample(families, "bridge_capacity"), 16)
-        self.assertIn(sample(families, "bridge_submissions_rejected_total", reason="capacity"), (0, 1, 2))
+        self.assertIn(sample(families, "bridge_submissions_rejected_total", owner="default", reason="capacity"), (0, 1, 2))
         bounds = sorted({dict(labels)["le"] for name, labels in families["bridge_job_duration_seconds"][1]
                          if name.endswith("_bucket")}, key=float)
         self.assertEqual(bounds, ["0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30", "60", "300", "+Inf"])
@@ -1010,12 +1010,12 @@ class MetricsHttpTests(unittest.TestCase):
         def moved(name, **labels):
             return sample(after, name, **labels) - sample(before, name, **labels)
 
-        self.assertEqual(moved("bridge_jobs_total", task="test.delay", status="succeeded"), 1)
-        self.assertEqual(moved("bridge_jobs_total", task="test.error", status="failed"), 1)
-        self.assertEqual(moved("bridge_jobs_total", task="test.delay", status="cancelled"), 1)
-        self.assertEqual(moved("bridge_jobs_total", task="test.delay", status="timed_out"), 1)
-        self.assertEqual(moved("bridge_jobs_submitted_total", task="test.delay"), 3)
-        self.assertEqual(moved("bridge_jobs_submitted_total", task="test.error"), 1)
+        self.assertEqual(moved("bridge_jobs_total", owner="default", task="test.delay", status="succeeded"), 1)
+        self.assertEqual(moved("bridge_jobs_total", owner="default", task="test.error", status="failed"), 1)
+        self.assertEqual(moved("bridge_jobs_total", owner="default", task="test.delay", status="cancelled"), 1)
+        self.assertEqual(moved("bridge_jobs_total", owner="default", task="test.delay", status="timed_out"), 1)
+        self.assertEqual(moved("bridge_jobs_submitted_total", owner="default", task="test.delay"), 3)
+        self.assertEqual(moved("bridge_jobs_submitted_total", owner="default", task="test.error"), 1)
         self.assertEqual(moved("bridge_job_duration_seconds_count", task="test.delay"), 3)
         self.assertEqual(moved("bridge_job_duration_seconds_count", task="test.error"), 1)
         self.assertGreaterEqual(moved("bridge_job_duration_seconds_sum", task="test.delay"), 0.15)
@@ -1058,3 +1058,306 @@ class MetricsHttpTests(unittest.TestCase):
         with patch.object(server, "render", checking):
             self.scrape()
         self.assertEqual(held, [False])
+
+
+
+APP = "test-only-app-token-never-use-in-production-1"
+OTHER = "test-only-other-token-never-use-in-production-2"
+
+
+class TokenSourceTests(unittest.TestCase):
+    """main() resolves the tokens from BRIDGE_TOKEN, BRIDGE_TOKENS or BRIDGE_TOKENS_FILE, and refuses to start on a bad
+    one with a message naming the variable and never a token."""
+
+    def main(self, environment):
+        """Run main with exactly these BRIDGE_* variables; returns the tokens BridgeServer was given and the token
+        variables still in the environment when it was built."""
+        seen = {}
+
+        def built(address, tokens, settings, drain_seconds=30):
+            seen["tokens"] = tokens
+            seen["left"] = {name for name in ("BRIDGE_TOKEN", "BRIDGE_TOKENS") if name in os.environ}
+            return MagicMock()
+
+        with patch.dict(os.environ, environment), patch.object(sys, "argv", ["ai_bridge.server", "--port", "0"]), \
+                patch.object(server.signal, "signal"), patch.object(server, "BridgeServer", side_effect=built):
+            for name in [name for name in os.environ if name.startswith("BRIDGE_") and name not in environment]:
+                del os.environ[name]
+            server.main()
+        return seen
+
+    def refused(self, environment, variable):
+        with self.assertRaises(SystemExit) as raised:
+            self.main(environment)
+        message = str(raised.exception.code)
+        self.assertIn(variable, message)
+        for value in (APP, OTHER, TOKEN, APP[:20], "short-token"):
+            self.assertNotIn(value, message)
+        return message
+
+    def tokens_file(self, root, content, mode=0o600):
+        path = os.path.join(root, "tokens")
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(content)
+        os.chmod(path, mode)
+        return path
+
+    def test_the_single_token_is_named_default_and_leaves_the_environment(self):
+        seen = self.main({"BRIDGE_TOKEN": TOKEN})
+        self.assertEqual(seen, {"tokens": {"default": TOKEN}, "left": set()})
+
+    def test_the_listed_tokens_are_read_and_leave_the_environment(self):
+        seen = self.main({"BRIDGE_TOKENS": f"app={APP},other={OTHER}"})
+        self.assertEqual(seen, {"tokens": {"app": APP, "other": OTHER}, "left": set()})
+        # A token may hold "=": only the first one separates the name.
+        self.assertEqual(self.main({"BRIDGE_TOKENS": f"a.b-c_9={APP}=x"})["tokens"], {"a.b-c_9": APP + "=x"})
+
+    def test_sixty_four_tokens_are_accepted(self):
+        listed = ",".join(f"n{index}={APP}{index}" for index in range(64))
+        self.assertEqual(len(self.main({"BRIDGE_TOKENS": listed})["tokens"]), 64)
+
+    def test_the_token_file_is_read_with_comments_and_blank_lines(self):
+        with tempfile.TemporaryDirectory() as root:
+            for mode in (0o600, 0o400):
+                with self.subTest(mode=oct(mode)):
+                    path = self.tokens_file(root, f"# the applications\n\napp={APP}\n  # indented\nother={OTHER}\n", mode)
+                    seen = self.main({"BRIDGE_TOKENS_FILE": path})
+                    self.assertEqual(seen["tokens"], {"app": APP, "other": OTHER})
+                    os.remove(path)
+
+    def test_a_bad_token_is_refused_for_each_source(self):
+        spaced = APP[:20] + " " + APP[20:]
+        for value in ("short-token", spaced, APP + "\x7f", APP + "é", ""):
+            with self.subTest(value=repr(value)[:24]):
+                self.refused({"BRIDGE_TOKENS": f"app={value}"}, "BRIDGE_TOKENS")
+                self.refused({"BRIDGE_TOKEN": value or " "}, "BRIDGE_TOKEN")
+                with tempfile.TemporaryDirectory() as root:
+                    self.refused({"BRIDGE_TOKENS_FILE": self.tokens_file(root, f"app={value}\n")}, "BRIDGE_TOKENS_FILE")
+        with tempfile.TemporaryDirectory() as root:
+            # A trailing space in the file is part of the line, so the token is refused, not trimmed.
+            self.refused({"BRIDGE_TOKENS_FILE": self.tokens_file(root, f"app={APP} \n")}, "BRIDGE_TOKENS_FILE")
+
+    def test_a_bad_name_or_entry_is_refused(self):
+        for listed in (f"={APP}", f"a b={APP}", "x" * 65 + f"={APP}", APP, f"café={APP}", f"app={APP},",
+                       f"app/1={APP}", f",app={APP}"):
+            with self.subTest(listed=listed[:24]):
+                self.refused({"BRIDGE_TOKENS": listed}, "BRIDGE_TOKENS")
+        self.assertEqual(self.main({"BRIDGE_TOKENS": "x" * 64 + f"={APP}"})["tokens"], {"x" * 64: APP})
+
+    def test_a_duplicate_name_or_value_is_refused(self):
+        for listed in (f"app={APP},app={OTHER}", f"app={APP},other={APP}"):
+            with self.subTest(listed=listed[:12]):
+                self.refused({"BRIDGE_TOKENS": listed}, "BRIDGE_TOKENS")
+                with tempfile.TemporaryDirectory() as root:
+                    path = self.tokens_file(root, listed.replace(",", "\n"))
+                    self.refused({"BRIDGE_TOKENS_FILE": path}, "BRIDGE_TOKENS_FILE")
+
+    def test_more_than_sixty_four_tokens_are_refused(self):
+        listed = ",".join(f"n{index}={APP}{index}" for index in range(65))
+        self.assertIn("64", self.refused({"BRIDGE_TOKENS": listed}, "BRIDGE_TOKENS"))
+
+    def test_more_than_sixty_four_tokens_in_the_file_are_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.tokens_file(root, "".join(f"n{index}={APP}{index}\n" for index in range(65)))
+            self.assertIn("64", self.refused({"BRIDGE_TOKENS_FILE": path}, "BRIDGE_TOKENS_FILE"))
+
+    def test_a_token_file_over_the_size_limit_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            content = f"app={APP}\n#" + "x" * (server.MAX_TOKENS_FILE - len(APP) - 6) + "\n"
+            self.assertEqual(len(content.encode()), server.MAX_TOKENS_FILE + 1)
+            message = self.refused({"BRIDGE_TOKENS_FILE": self.tokens_file(root, content)}, "BRIDGE_TOKENS_FILE")
+            self.assertIn("65536", message)
+
+    def test_a_fifo_at_the_token_file_path_is_refused_at_once(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("this platform has no FIFOs")
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "tokens")
+            os.mkfifo(path, 0o600)
+            started = time.monotonic()
+            self.assertIn("regular file", self.refused({"BRIDGE_TOKENS_FILE": path}, "BRIDGE_TOKENS_FILE"))
+            self.assertLess(time.monotonic() - started, 5)
+
+    def test_an_empty_variable_counts_as_unset(self):
+        self.assertEqual(self.main({"BRIDGE_TOKEN": TOKEN, "BRIDGE_TOKENS": ""})["tokens"], {"default": TOKEN})
+        with tempfile.TemporaryDirectory() as root:
+            path = self.tokens_file(root, f"app={APP}\n")
+            seen = self.main({"BRIDGE_TOKENS": "", "BRIDGE_TOKENS_FILE": path})
+            self.assertEqual(seen["tokens"], {"app": APP})
+
+    def test_an_empty_list_or_file_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.refused({"BRIDGE_TOKENS_FILE": self.tokens_file(root, "# nothing\n\n")}, "BRIDGE_TOKENS_FILE")
+        self.refused({}, "BRIDGE_TOKEN")
+
+    def test_a_token_file_open_to_group_or_others_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            for mode in (0o640, 0o604, 0o660, 0o644, 0o602):
+                with self.subTest(mode=oct(mode)):
+                    path = self.tokens_file(root, f"app={APP}\n", mode)
+                    self.assertIn("0600", self.refused({"BRIDGE_TOKENS_FILE": path}, "BRIDGE_TOKENS_FILE"))
+                    os.remove(path)
+
+    def test_a_token_file_that_cannot_be_read_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = [os.path.join(root, "missing"), root]
+            # Root reads through the mode bits; compose runs these tests as uid 65532.
+            if os.geteuid() != 0:
+                paths.append(self.tokens_file(root, f"app={APP}\n", 0o000))
+            for path in paths:
+                with self.subTest(path=path):
+                    self.refused({"BRIDGE_TOKENS_FILE": path}, "BRIDGE_TOKENS_FILE")
+            binary = os.path.join(root, "binary")
+            with open(binary, "wb") as file:
+                file.write(b"app=\xff" + APP.encode())
+            os.chmod(binary, 0o600)
+            self.refused({"BRIDGE_TOKENS_FILE": binary}, "BRIDGE_TOKENS_FILE")
+
+    def test_the_sources_are_exclusive(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = self.tokens_file(root, f"app={APP}\n")
+            for environment, names in (
+                    ({"BRIDGE_TOKENS": f"app={APP}", "BRIDGE_TOKENS_FILE": path}, ("BRIDGE_TOKENS", "BRIDGE_TOKENS_FILE")),
+                    ({"BRIDGE_TOKEN": TOKEN, "BRIDGE_TOKENS": f"app={APP}"}, ("BRIDGE_TOKEN", "BRIDGE_TOKENS")),
+                    ({"BRIDGE_TOKEN": TOKEN, "BRIDGE_TOKENS_FILE": path}, ("BRIDGE_TOKEN", "BRIDGE_TOKENS_FILE"))):
+                with self.subTest(names=names):
+                    message = self.refused(environment, names[0])
+                    self.assertIn(names[1], message)
+
+    def test_the_server_validates_the_tokens_it_is_given(self):
+        for tokens in ({}, {"app": "short"}, {"a b": APP}, {"app": APP, "other": APP},
+                       {f"n{index}": APP + str(index) for index in range(65)}):
+            with self.subTest(tokens=list(tokens)[:2]), self.assertRaises(ValueError) as raised:
+                BridgeServer(("127.0.0.1", 0), tokens)
+            self.assertNotIn(APP, str(raised.exception))
+
+
+class OwnerHttpTests(unittest.TestCase):
+    """Two tokens on one worker: a job belongs to the token that submitted it."""
+
+    def setUp(self):
+        self.state = tempfile.TemporaryDirectory()
+        self.start(Settings(concurrency=1, capacity=8, test_tasks=True, state_dir=self.state.name))
+
+    def start(self, settings):
+        self.server = BridgeServer(("127.0.0.1", 0), {"app": APP, "other": OTHER}, settings)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.server.shutdown()
+        self.thread.join()
+        self.server.server_close()
+
+    def tearDown(self):
+        self.stop()
+        self.state.cleanup()
+
+    def call(self, method, path, token, body=None):
+        """Status and the decoded body; no answer to any token may hold a token."""
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        try:
+            connection.request(method, path, None if body is None else json.dumps(body),
+                               {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+            response = connection.getresponse()
+            status, data = response.status, response.read()
+        finally:
+            connection.close()
+        for value in (APP, OTHER):
+            self.assertNotIn(value.encode(), data)
+        return status, json.loads(data) if data.startswith(b"{") else data.decode()
+
+    def submit(self, token, key=None, seconds=0):
+        body = {"task": "test.delay", "input": {"seconds": seconds}}
+        if key is not None:
+            body["idempotency_key"] = key
+        return self.call("POST", "/v1/jobs", token, body)
+
+    def finished(self, job_id, owner):
+        deadline = time.monotonic() + 5
+        while self.server.jobs.get(job_id, owner)["status"] != "succeeded":
+            self.assertLess(time.monotonic(), deadline, "the job never finished")
+            time.sleep(0.01)
+
+    def test_another_token_cannot_read_or_cancel_a_job(self):
+        status, job = self.submit(APP, seconds=5)
+        self.assertEqual(status, 202)
+        unknown = self.call("GET", "/v1/jobs/" + "a" * 32, OTHER)
+        self.assertEqual(unknown[0], 404)
+        # Exactly the answer for an unknown job, so the other token learns nothing of it.
+        self.assertEqual(self.call("GET", "/v1/jobs/" + job["id"], OTHER), unknown)
+        self.assertEqual(self.call("POST", "/v1/jobs/" + job["id"] + "/cancel", OTHER, {}), unknown)
+        status, seen = self.call("GET", "/v1/jobs/" + job["id"], APP)
+        self.assertEqual(status, 200)
+        self.assertNotEqual(seen["status"], "cancelled")
+        self.assertEqual(set(seen), {"id", "task", "status", "result", "error", "progress", "timeout_ms"})
+        status, cancelled = self.call("POST", "/v1/jobs/" + job["id"] + "/cancel", APP, {})
+        self.assertEqual((status, cancelled["status"]), (200, "cancelled"))
+
+    def test_an_idempotency_key_belongs_to_its_token(self):
+        first_app = self.submit(APP, "shared-key")[1]
+        first_other = self.submit(OTHER, "shared-key")[1]
+        self.assertNotEqual(first_app["id"], first_other["id"])
+        self.assertEqual(self.submit(APP, "shared-key")[1]["id"], first_app["id"])
+        self.assertEqual(self.submit(OTHER, "shared-key")[1]["id"], first_other["id"])
+
+    def test_health_readiness_and_metrics_answer_every_token(self):
+        deadline = time.monotonic() + 5
+        while self.call("GET", "/readyz", APP)[0] != 200:
+            self.assertLess(time.monotonic(), deadline, "the worker never became ready")
+            time.sleep(0.02)
+        for token in (APP, OTHER):
+            with self.subTest(token=token[:14]):
+                self.assertEqual(self.call("GET", "/healthz", token)[0], 200)
+                self.assertEqual(self.call("GET", "/readyz", token), (200, {"status": "ready"}))
+                self.assertEqual(self.call("GET", "/metrics", token)[0], 200)
+        for token in ("wrong", APP + "x", APP[:-1], APP + "," + OTHER):
+            for path in ("/healthz", "/readyz", "/metrics"):
+                with self.subTest(token=token[:14], path=path):
+                    status, body = self.call("GET", path, token)
+                    self.assertEqual((status, body["error"]["code"]), (401, "unauthorized"))
+
+    def test_the_owner_series_exist_at_zero_and_move_for_the_right_owner(self):
+        self.stop()
+        self.start(Settings(concurrency=1, capacity=1, test_tasks=True))
+        families = parse_metrics(self.call("GET", "/metrics", APP)[1])
+        for owner in ("app", "other"):
+            self.assertEqual(sample(families, "bridge_jobs_total", owner=owner, task="test.delay", status="succeeded"), 0)
+            self.assertEqual(sample(families, "bridge_jobs_submitted_total", owner=owner, task="test.delay"), 0)
+            self.assertEqual(sample(families, "bridge_submissions_rejected_total", owner=owner, reason="capacity"), 0)
+        owners = {dict(labels)["owner"] for family in ("bridge_jobs_total", "bridge_jobs_submitted_total",
+                                                       "bridge_submissions_rejected_total")
+                  for _, labels in families[family][1]}
+        self.assertEqual(owners, {"app", "other"})
+        status, job = self.submit(APP)
+        self.assertEqual(status, 202)
+        self.finished(job["id"], "app")
+        self.assertEqual(self.submit(OTHER)[0], 429)
+        families = parse_metrics(self.call("GET", "/metrics", OTHER)[1])
+        self.assertEqual(sample(families, "bridge_jobs_total", owner="app", task="test.delay", status="succeeded"), 1)
+        self.assertEqual(sample(families, "bridge_jobs_total", owner="other", task="test.delay", status="succeeded"), 0)
+        self.assertEqual(sample(families, "bridge_jobs_submitted_total", owner="app", task="test.delay"), 1)
+        self.assertEqual(sample(families, "bridge_jobs_submitted_total", owner="other", task="test.delay"), 0)
+        self.assertEqual(sample(families, "bridge_submissions_rejected_total", owner="other", reason="capacity"), 1)
+        self.assertEqual(sample(families, "bridge_submissions_rejected_total", owner="app", reason="capacity"), 0)
+        # The families without an owner label are unchanged.
+        self.assertEqual(sample(families, "bridge_job_duration_seconds_count", task="test.delay"), 1)
+
+    def test_no_token_value_reaches_the_job_table_and_a_restored_job_keeps_its_owner(self):
+        status, job = self.submit(APP, "table-key")
+        self.assertEqual(status, 202)
+        self.submit(OTHER, "table-key")
+        self.finished(job["id"], "app")
+        self.stop()
+        self.start(Settings(concurrency=1, capacity=8, test_tasks=True, state_dir=self.state.name))
+        written = b""
+        for name in os.listdir(self.state.name):
+            if name.startswith("jobs.sqlite"):
+                with open(os.path.join(self.state.name, name), "rb") as file:
+                    written += file.read()
+        self.assertIn(b"app", written)
+        for value in (APP, OTHER):
+            self.assertNotIn(value.encode(), written)
+        self.assertEqual(self.call("GET", "/v1/jobs/" + job["id"], OTHER)[0], 404)
+        self.assertEqual(self.call("GET", "/v1/jobs/" + job["id"], APP)[1]["status"], "succeeded")
+        self.assertEqual(self.submit(APP, "table-key")[1]["id"], job["id"])

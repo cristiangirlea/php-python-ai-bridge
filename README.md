@@ -83,7 +83,7 @@ The downloaded cache remains for reuse; it is not included in Git.
 See the [integration guide](docs/integration.md) for Composer setup, the Laravel service provider and the Symfony bundle that configure the client from `BRIDGE_URL` and `BRIDGE_TOKEN`, application job ownership and failure handling.
 The client sends through `ext-curl` by default; an application with a PSR-18 client such as Symfony HttpClient or Guzzle can pass `PhpAiBridge\Psr18Transport` instead, configured as the [integration guide](docs/integration.md#through-a-psr-18-http-client) shows.
 
-This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. The latest tagged release is `v0.2.0` ([changelog](CHANGELOG.md)): install it with `composer require cristiangirlea/php-python-ai-bridge:^0.2` once the package is on Packagist, or from a VCS repository pinned to the tag until then, as the integration guide shows. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
+This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. The latest tagged release is `v0.3.0` ([changelog](CHANGELOG.md)): install it with `composer require cristiangirlea/php-python-ai-bridge:^0.3` once the package is on Packagist, or from a VCS repository pinned to the tag until then, as the integration guide shows. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
 
 ```php
 use PhpAiBridge\Client;
@@ -112,7 +112,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps python-tests
 docker compose -f docker/compose.yaml run --rm --no-deps php-tests
 
 # Internal-only HTTP peers, including intentionally broken peers:
-docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hostile
+docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hostile tokens-worker
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 
@@ -141,10 +141,10 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 ## Important limits
 
 - **Durable job table only when `BRIDGE_STATE_DIR` is set:** the worker then keeps its job table (never inputs) in SQLite, so finished results and idempotency keys survive a restart until retention ends and unfinished jobs become `failed` with `service_restarted`; unset, a restart loses everything. Completed results expire after 300 seconds by default; 404 can mean expired, lost or unknown. An optional `idempotency_key` makes resubmitting after an uncertain POST safe while the job is retained. There is still no replay of unfinished jobs, durable delivery or automatic retry.
-- **Trusted services only:** one bearer token authorizes all jobs. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
+- **Trusted services only:** a bearer token reaches only the jobs it submitted; give each application its own (`BRIDGE_TOKENS`, [the protocol](docs/protocol.md#tokens)), since they still share one worker's capacity. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
 - **Private HTTP transport:** deploy behind an authenticated TLS boundary for cross-host use; the [integration guide](docs/integration.md#cross-host-use-behind-tls) has a tested example with Caddy in front of the worker. The sample Python HTTP server is not an internet-facing production server.
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
-- **One job per warm child, no sharing across jobs:** the worker keeps `BRIDGE_CONCURRENCY` child processes alive and each loads its backend's models as it starts and keeps them, so a job pays for loading only when it reaches a child that is still loading; a child is replaced after a cancellation, a deadline or a crash, and after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no sharing of a loaded model between children, and no claim of GPU support, multi-host scaling or stateful agents.
+- **One job per warm child, no sharing across jobs:** the worker keeps `BRIDGE_CONCURRENCY` child processes alive and each loads its backend's models as it starts and keeps them, so a job waits for loading only while no child has finished starting; a child is replaced after a cancellation, a deadline or a crash, and after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no sharing of a loaded model between children, and no claim of GPU support, multi-host scaling or stateful agents.
 - **Bounded connections and a short drain:** the worker serves at most 32 connections at once and answers one more with 503 `service_busy` and `Retry-After: 1`; a request line over 8 KiB or a header block over 16 KiB gets 431. On SIGTERM it refuses new jobs with 503 `draining`, fails queued ones as `service_restarted` and lets running ones finish for up to `BRIDGE_DRAIN_SECONDS` (default 30) before it stops; a second signal stops it at once. `GET /readyz` says whether a child is idle with its models loaded, which `/healthz` does not. See [the protocol](docs/protocol.md#drain-and-readiness).
 - **Cancellation cannot undo effects:** registered future tasks must manage their own external side effects. A transport failure during POST has an uncertain submission outcome; the client never retries POST automatically.
 - **No token streaming:** progress is polled by job ID. The MCP server forwards that progress to a host that asks for it; there is no SSE, framework plugin or chat SDK.

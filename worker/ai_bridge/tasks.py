@@ -184,10 +184,10 @@ def _reachable_holding(needle: str, roots: list) -> int:
 
 
 def _inspect(parts: list) -> dict:
-    """What a test may ask a worker child about itself: its process id, whether the service token reached its
-    environment or its initial environment block (which unsetenv leaves in place), and how many strings reachable
-    from any live object or any frame's locals still hold the text joined from parts, which no earlier job of the
-    child may have left behind. The parts are joined here so that the question itself does not hold the answer;
+    """What a test may ask a worker child about itself: its process id, whether a service token variable or the text
+    joined from parts reached its environment or its initial environment block (which unsetenv leaves in place), and
+    how many strings reachable from any live object or any frame's locals still hold that text, which no earlier job
+    of the child may have left behind. The parts are joined here so that the question itself does not hold the answer;
     the joined copy is always a new object, so it is left out of the count by identity."""
     import gc
     import sys
@@ -210,11 +210,15 @@ def _inspect(parts: list) -> dict:
         held = _reachable_holding(needle, roots)
     try:
         with open("/proc/self/environ", "rb") as environ:
-            in_block = b"BRIDGE_TOKEN=" in environ.read()
+            block = environ.read().split(b"\0")
+        in_block = any(entry.startswith((b"BRIDGE_TOKEN=", b"BRIDGE_TOKENS=")) for entry in block)
+        needle_in_block = bool(needle) and any(needle.encode() in entry for entry in block)
     except OSError:
-        in_block = None  # no procfs here
-    return {"pid": os.getpid(), "token_in_environment": "BRIDGE_TOKEN" in os.environ,
-            "token_in_environment_block": in_block, "held": held}
+        in_block = needle_in_block = None  # no procfs here
+    return {"pid": os.getpid(), "token_in_environment": "BRIDGE_TOKEN" in os.environ or "BRIDGE_TOKENS" in os.environ,
+            "token_in_environment_block": in_block, "held": held,
+            "needle_in_environment": bool(needle) and any(needle in value for value in os.environ.values()),
+            "needle_in_environment_block": needle_in_block}
 
 
 def _tensors(encodings: list) -> dict:
