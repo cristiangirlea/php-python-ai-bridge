@@ -24,10 +24,9 @@ x-python: &python
     PYTHONPATH: /work/worker
     BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN to a random service token of at least 32 characters}
 
-# Compose holds a service that depends on a worker until the worker answers. The token comes from the container's
-# environment when the check runs; it is not in this file.
+# Dependants wait for /readyz (a child idle with its models loaded); the token comes from the container's environment.
 x-worker-health: &worker-health
-  test: [CMD, python, -c, "import os, urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8090/healthz', headers={'Authorization': 'Bearer ' + os.environ['BRIDGE_TOKEN']}), timeout=2)"]
+  test: [CMD, python, -c, "import os, urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8090/readyz', headers={'Authorization': 'Bearer ' + os.environ['BRIDGE_TOKEN']}), timeout=2)"]
   interval: 5s
   timeout: 3s
   retries: 60
@@ -431,6 +430,22 @@ services:
       BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
       BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
     command: [python, scripts/ner_measure.py]
+
+  # Informational throughput and latency under concurrent load, against model-worker or, with LOAD_TARGET=lexical, worker.
+  model-load:
+    <<: *python
+    profiles: [model]
+    networks: [isolated]
+    environment:
+      <<: *python-env
+      LOAD_TARGET: ${LOAD_TARGET:-onnx}
+      LOAD_CONCURRENCY: ${LOAD_CONCURRENCY:-1,4}
+      LOAD_SECONDS: ${LOAD_SECONDS:-120}
+      LOAD_CASE: ${LOAD_CASE:-mix}
+      LOAD_SETTLE_SECONDS: ${LOAD_SETTLE_SECONDS:-300}
+      BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
+      BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
+    command: [python, scripts/load_measure.py]
 
   mcp-fetcher:
     <<: *python

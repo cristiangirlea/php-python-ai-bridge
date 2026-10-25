@@ -46,9 +46,9 @@ on:
 permissions:
   contents: read
 
-# A new push to the same branch makes an in-flight run obsolete; do not download the models twice.
+# One run per event and branch: a new push cancels the old, and a scheduled run never cancels a hand-started one.
 concurrency:
-  group: model-smoke-${{ github.ref }}
+  group: model-smoke-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 # GitHub's hosted runners, as in tests.yml: the repository is public.
@@ -112,3 +112,53 @@ jobs:
       - name: Stop test containers
         if: always()
         run: docker compose -f docker/compose.yaml --profile model --profile mcp-model down
+
+  # On demand only, about 45 minutes: throughput and latency under load. Informational; no figure gates anything.
+  load:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+      BENCH_COMMIT: ${{ github.sha }}
+      BENCH_RUNNER: GitHub-hosted ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare disposable cache
+        run: mkdir -p .cache && chmod 777 .cache
+      - name: Acquire hash-pinned wheels and model files
+        run: docker compose -f docker/compose.yaml run --rm --no-deps fetcher
+      - name: Lexical worker under load (informational)
+        shell: bash
+        env:
+          LOAD_TARGET: lexical
+          LOAD_CONCURRENCY: "1,4,16"
+          LOAD_SECONDS: "120"
+        run: |
+          docker compose -f docker/compose.yaml up -d worker
+          docker compose -f docker/compose.yaml run --rm --no-deps -T model-load | tee load-lexical.md
+          { echo "## Lexical worker under load (informational)"; echo; cat load-lexical.md; echo; } >> "$GITHUB_STEP_SUMMARY"
+      # The memory figures are read after the soak: docker stats at that moment, and the cgroup's peak over the run.
+      - name: ONNX worker soak (informational)
+        shell: bash
+        env:
+          LOAD_TARGET: onnx
+          LOAD_CONCURRENCY: "1,4"
+          LOAD_SECONDS: "600"
+        run: |
+          docker compose -f docker/compose.yaml up -d model-worker
+          docker compose -f docker/compose.yaml run --rm --no-deps -T model-load | tee load-onnx.md
+          worker="$(docker compose -f docker/compose.yaml ps -q model-worker)"
+          {
+            echo "## ONNX worker soak (informational)"; echo; cat load-onnx.md; echo
+            echo "docker stats after the soak: $(docker stats --no-stream --format '{{.MemUsage}}' "$worker")"
+            echo "cgroup memory.peak: $(docker exec "$worker" cat /sys/fs/cgroup/memory.peak) bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose -f docker/compose.yaml --profile model logs --tail 100
+      - name: Stop test containers
+        if: always()
+        run: docker compose -f docker/compose.yaml --profile model down

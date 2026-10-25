@@ -310,8 +310,15 @@ jobs:  # the jobs
 
     def test_measurements_name_the_runner_they_ran_on(self):
         text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
-        self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 2)
-        self.assertEqual(text.count("BENCH_RUNNER:"), 2)
+        self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 3)
+        self.assertEqual(text.count("BENCH_RUNNER:"), 3)
+
+    def test_the_load_measurement_runs_on_demand_only(self):
+        # It takes about 45 minutes and measures, never gates: no pull request, push or schedule may start it.
+        text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
+        self.assertEqual(jobs(text)["load"][0], "if: github.event_name == 'workflow_dispatch'")
+        # The weekly schedule runs on main too: a group without the event would cancel a dispatched run there.
+        self.assertIn("  group: model-smoke-${{ github.event_name }}-${{ github.ref }}\n", text)
 
     def test_dependabot_updates_github_actions_weekly(self):
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
