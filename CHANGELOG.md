@@ -6,12 +6,13 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
 ### Added
 
 - Per-client tokens on the worker: `BRIDGE_TOKENS=name=token,...` or `BRIDGE_TOKENS_FILE` (one `name=token` per line, mode 0600 or stricter), at most 64, as an alternative to `BRIDGE_TOKEN`, which is the single token named `default`. A bad token, name, file or combination of the three stops the worker at start with a message naming the variable and never a token.
 - A job belongs to the token that submitted it: another token's `GET` or `cancel` of it is 404, exactly as for an unknown job, and idempotency keys are per token. The owner's name is kept in `jobs.sqlite` (a file from an earlier version gains the column, its rows owned by `default`) and is not in the job's snapshot. A worker with only `BRIDGE_TOKEN` behaves as before.
 - An `owner` label, the token's name, on `bridge_jobs_total`, `bridge_jobs_submitted_total` and `bridge_submissions_rejected_total`, with every configured name's series present at zero.
-
 - `PhpAiBridge\Laravel\BridgeServiceProvider`, registered by Laravel's package discovery, binds one `Client` built from a publishable `config/ai_bridge.php` (`BRIDGE_URL`, `BRIDGE_TOKEN`, `BRIDGE_REQUEST_TIMEOUT_MS`; `vendor:publish --tag=ai-bridge-config`), so configuration caching works.
 - `PhpAiBridge\Symfony\PhpAiBridgeBundle` registers `Client` as an autowirable service from a `php_ai_bridge` configuration whose `url`, `token` and `request_timeout_ms` default to the same environment variables.
 - Both fail on a missing or invalid setting with a message that names it and never quotes the token. `laravel/framework` and `symfony/http-kernel` are suggested, not required: the library's requirements are unchanged.
@@ -51,6 +52,7 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 
-[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cristiangirlea/php-python-ai-bridge/releases/tag/v0.1.0

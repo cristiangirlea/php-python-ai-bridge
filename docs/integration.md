@@ -18,10 +18,10 @@ Three normal tasks are implemented. Reranking: given a query and up to 512 candi
 
 ## Install through Composer
 
-The latest tagged release is `v0.2.0`; see [the changelog](../CHANGELOG.md). Once the package is on Packagist, this is the normal path, run inside your application's dependency-acquisition container:
+The latest tagged release is `v0.3.0`; see [the changelog](../CHANGELOG.md). Once the package is on Packagist, this is the normal path, run inside your application's dependency-acquisition container:
 
 ```sh
-composer require cristiangirlea/php-python-ai-bridge:^0.2 --no-scripts --no-plugins
+composer require cristiangirlea/php-python-ai-bridge:^0.3 --no-scripts --no-plugins
 ```
 
 Until the Packagist listing exists, install the same tag from the repository instead. In your application's root `composer.json`, add this repository and requirement, preserving existing entries:
@@ -35,7 +35,7 @@ Until the Packagist listing exists, install the same tag from the repository ins
     }
   ],
   "require": {
-    "cristiangirlea/php-python-ai-bridge": "0.2.0"
+    "cristiangirlea/php-python-ai-bridge": "0.3.0"
   }
 }
 ```
