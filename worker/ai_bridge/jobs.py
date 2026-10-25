@@ -70,6 +70,8 @@ class Settings:
     state_dir: str | None = None
     # The names of the service's tokens: a job belongs to one, and each has its own metrics series.
     owners: tuple[str, ...] = (DEFAULT_OWNER,)
+    # The most queued, running and retained jobs one owner may hold; BRIDGE_OWNER_CAPACITY. None is the capacity.
+    owner_capacity: int | None = None
 
 
 def _serve(connection, backend, model_dir):
@@ -157,6 +159,9 @@ class JobStore:
                 or type(self.settings.max_jobs) is not int
                 or not 1 <= self.settings.concurrency <= 8 or not 1 <= self.settings.capacity <= 1024
                 or not 1 <= self.settings.max_jobs <= 1000000):
+            raise ValueError("invalid worker limits")
+        cap = self.settings.owner_capacity
+        if cap is not None and (type(cap) is not int or not 1 <= cap <= self.settings.capacity):
             raise ValueError("invalid worker limits")
         if (self.settings.backend not in MODEL_NAMES
                 or not math.isfinite(self.settings.retention_seconds)
@@ -288,6 +293,11 @@ class JobStore:
         # A repeat adds no job, so it is answered even at capacity.
         if (owner, idempotency_key) in self._keys:
             return self._public(self._jobs[self._keys[owner, idempotency_key]])
+        # Checked before the total: one of this owner's jobs expiring frees a slot under both limits.
+        cap = self.settings.owner_capacity
+        if cap is not None and sum(job["_owner"] == owner for job in self._jobs.values()) >= cap:
+            raise CapacityError("owner job capacity reached; wait for its retained jobs to expire",
+                                self._retry_after(owner))
         if len(self._jobs) >= self.settings.capacity:
             raise CapacityError("job capacity reached; wait for retained jobs to expire", self._retry_after())
         now = time.monotonic()
@@ -370,10 +380,11 @@ class JobStore:
                 "duration": copy.deepcopy(self._durations), "queue": copy.deepcopy(self._waits),
             }
 
-    def _retry_after(self):
-        """Seconds until the first retained job expires; a store holding only unfinished jobs gives a short default,
-        since none of them has a known end."""
-        finished = [job["_finished"] for job in self._jobs.values() if job["_finished"] is not None]
+    def _retry_after(self, owner=None):
+        """Seconds until the first retained job (of this owner, when given) expires; holding only unfinished jobs gives
+        a short default, since none of them has a known end."""
+        finished = [job["_finished"] for job in self._jobs.values()
+                    if job["_finished"] is not None and owner in (None, job["_owner"])]
         if not finished:
             return 1
         return max(1, math.ceil(min(finished) + self.settings.retention_seconds - time.monotonic()))

@@ -280,6 +280,9 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: /work/worker
       BRIDGE_TOKENS: app=test-only-app-client-token-never-use-in-production,other=test-only-other-client-token-never-use-in-production
+      # Small enough for tests/integration.py, which repeats both numbers, to fill one token's cap and then the worker.
+      BRIDGE_CAPACITY: "12"
+      BRIDGE_OWNER_CAPACITY: "8"
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
 
   hostile:

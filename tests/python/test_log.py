@@ -72,22 +72,23 @@ class FormatterTests(unittest.TestCase):
         with capture() as lines:
             log.event("request", method="GET", route="/healthz", status=200, duration_ms=1.5, owner="default")
             log.event("job", job_id="a" * 32, task="rerank", owner="default", job_status="succeeded")
-            log.event("start", backend="lexical", concurrency=2, capacity=128, retention_seconds=300.0,
-                      max_jobs=1000, drain_seconds=30, tokens=1)
+            log.event("start", backend="lexical", concurrency=2, capacity=128, owner_capacity=64,
+                      retention_seconds=300.0, max_jobs=1000, drain_seconds=30, tokens=1)
             log.event("drain", duration_ms=0.0, running=0, interrupted=False)
             log.event("stop", cancelled=0)
         self.assertEqual([line["event"] for line in lines], ["request", "job", "start", "drain", "stop"])
         self.assertEqual(lines[0], {**lines[0], "method": "GET", "route": "/healthz", "status": 200,
                                     "duration_ms": 1.5, "owner": "default", "level": "info"})
         self.assertEqual((lines[1]["queue_ms"], lines[1]["run_ms"]), (None, None))
-        self.assertEqual(lines[2]["tokens"], 1)
+        self.assertEqual((lines[2]["owner_capacity"], lines[2]["tokens"]), (64, 1))
 
     def test_the_schema_is_the_documented_one(self):
         # Written out here, not read from log.EVENTS, so a change to the schema has to change this test too.
         expected = {
             "request": ["method", "route", "status", "duration_ms", "owner"],
             "job": ["job_id", "task", "owner", "job_status", "queue_ms", "run_ms"],
-            "start": ["backend", "concurrency", "capacity", "retention_seconds", "max_jobs", "drain_seconds", "tokens"],
+            "start": ["backend", "concurrency", "capacity", "owner_capacity", "retention_seconds", "max_jobs",
+                      "drain_seconds", "tokens"],
             "stop": ["cancelled"],
             "drain": ["duration_ms", "running", "interrupted"],
         }
@@ -112,8 +113,8 @@ class FormatterTests(unittest.TestCase):
             log.event("request", method="GET", route="/v1/jobs", status=True, duration_ms=-1, owner="x" * 65)
             log.event("job", job_id="sentinel" * 4, task="sentinel", owner=["default"], job_status="sentinel",
                       queue_ms="1", run_ms=float("inf"))
-            log.event("start", backend="sentinel", concurrency=1.5, capacity=-1, retention_seconds="300",
-                      max_jobs=True, drain_seconds=None, tokens="2")
+            log.event("start", backend="sentinel", concurrency=1.5, capacity=-1, owner_capacity="1",
+                      retention_seconds="300", max_jobs=True, drain_seconds=None, tokens="2")
             log.event("drain", duration_ms="1", running=-1, interrupted=1)
         self.assertNotIn("sentinel", capture.text)
         # A route that is not a template and a method outside the fixed set are null rather than echoed.
