@@ -131,6 +131,40 @@ echo $documents[$result->rankings[0]['index']];
 
 `submitEmbed($texts)` works the same way and `EmbedResult::fromJob($job, count($texts))` yields one unit-length vector per text; the service stores nothing, so persist vectors in an index your application owns. `submitRedact($text)` returns a job whose `RedactResult::fromJob($job, $text)` holds the masked text and the spans found, each tagged with the rule or model that found it. `wait()` returns terminal jobs, including failures; `RerankResult::fromJob()` refuses anything except a successful rerank result. Use `cancel($id)` explicitly to stop remote work. A local wait timeout does **not** cancel the job.
 
+## Two things people use it for
+
+**Scrub text before it leaves your systems.** A support ticket or a document is redacted locally,
+then the masked text goes to a hosted model. Nothing personal leaves the network, and the spans
+tell you what was hidden and by which rule or model.
+
+```php
+$job = $client->submitRedact($ticket, ['PER', 'ORG', 'LOC']);
+$result = RedactResult::fromJob($client->wait($job->id), $ticket);
+$answer = $yourLlmClient->ask($result->text);   // the masked text, never the original
+```
+
+Redaction is a pre-filter, not a compliance control: on public social-media text it hides about
+half of the named entities at the default threshold, and nearly all card numbers, IBANs, emails and
+IP addresses ([measured](docs/testing.md#measured-ner-quality-on-wnut-17-informational)).
+
+**Reorder search results by meaning.** Keep the search you have (a database, Meilisearch, Elastic),
+take its top results, and let the cross-encoder order them for the query. It is the cheapest visible
+quality change a search box can get; measure on your own data first, since on some corpora BM25 alone
+is better ([measured](docs/testing.md#measured-reranking-quality-on-arguana-informational)).
+
+```php
+$hits = $search->query($q, limit: 100);            // your existing search
+$job = $client->submitRerank($q, array_column($hits, 'text'), topK: 10);
+$top = RerankResult::fromJob($client->wait($job->id), count($hits), topK: 10);
+```
+
+## Support
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md). If you want help putting the bridge into your application, sizing it or
+reviewing a redaction setup, open an issue describing the context, or sponsor the project through the
+Sponsor button.
+
 ## Test layers
 
 ```sh
