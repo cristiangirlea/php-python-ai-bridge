@@ -1964,5 +1964,236 @@ class MetricsSnapshotTests(unittest.TestCase):
             time.sleep(0.01)
 
 
+class DrainTests(unittest.TestCase):
+    """A draining store refuses submissions, fails what no child has started and lets running jobs finish."""
+
+    def setUp(self):
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+
+    def tearDown(self):
+        self.store.close()
+
+    def wait(self, job_id, states=TERMINAL, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = self.store.get(job_id)
+            if job["status"] in states:
+                return job
+            time.sleep(0.01)
+        self.fail(f"job did not reach {states}")
+
+    def test_a_running_job_finishes_during_the_drain(self):
+        job = self.store.submit("test.delay", {"seconds": 0.5, "value": "kept"})
+        self.wait(job["id"], {"running"})
+        self.store.drain()
+        self.assertTrue(self.store.draining)
+        self.assertTrue(self.store.busy())
+        done = self.wait(job["id"])
+        self.assertEqual((done["status"], done["result"]), ("succeeded", {"value": "kept"}))
+        self.assertFalse(self.store.busy())
+
+    def test_a_queued_job_is_failed_as_service_restarted_and_its_input_dropped(self):
+        running = self.store.submit("test.delay", {"seconds": 1})
+        self.wait(running["id"], {"running"})
+        queued = self.store.submit("test.delay", {"seconds": 0, "value": "dropped"})
+        self.store.drain()
+        failed = self.store.get(queued["id"])
+        self.assertEqual((failed["status"], failed["error"]["code"]), ("failed", "service_restarted"))
+        self.assertIsNone(self.store._jobs[queued["id"]]["_input"])
+        self.assertEqual(self.store.get(running["id"])["status"], "running")
+        self.assertEqual(self.wait(running["id"])["status"], "succeeded")
+
+    def test_a_job_sent_to_a_child_that_has_not_started_it_is_failed_too(self):
+        replenish = patch.object(JobStore, "_replenish")
+        replenish.start()
+        self.addCleanup(replenish.stop)
+        store = JobStore(Settings(concurrency=1, test_tasks=True))
+        try:
+            worker = jobs._Worker(Mock(), Mock())
+            worker.connection.poll.return_value = False
+            worker.ready = True
+            with store._lock:
+                store._pool.append(worker)
+                job = store.submit("test.delay", {"seconds": 0})
+                store._assign(store._jobs[job["id"]])
+            store.drain()
+            self.assertEqual(store.get(job["id"])["error"]["code"], "service_restarted")
+            self.assertIsNotNone(worker.retired_at)
+        finally:
+            store.close()
+
+    def test_a_submission_during_the_drain_is_refused_and_counts_nothing(self):
+        self.store.drain()
+        with self.assertRaises(jobs.DrainingError):
+            self.store.submit("test.delay", {"seconds": 0})
+        with self.assertRaises(jobs.DrainingError):
+            self.store.submit("test.delay", {"seconds": 0}, idempotency_key="drain-k1")
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["submitted"][jobs.DEFAULT_OWNER, "test.delay"], 0)
+        self.assertEqual(snapshot["rejected"][jobs.DEFAULT_OWNER, "capacity"], 0)
+        self.assertFalse(self.store.busy())
+
+    def test_no_child_is_started_while_draining(self):
+        job = self.store.submit("test.delay", {"seconds": 5})
+        self.wait(job["id"], {"running"})
+        self.store.drain()
+        self.store.cancel(job["id"])
+        time.sleep(0.3)
+        self.assertEqual(self.store.snapshot()["pool_size"], 0)
+
+    def test_a_child_that_dies_before_ready_during_the_drain_leaves_queued_jobs_service_restarted(self):
+        with patch.object(JobStore, "_replenish"):
+            store = JobStore(Settings(concurrency=1, test_tasks=True))
+        self.addCleanup(store.close)
+        worker = jobs._Worker(Mock(), Mock())
+        worker.connection.poll.return_value = True
+        worker.connection.recv.side_effect = EOFError
+        with store._lock:
+            store._pool.append(worker)
+            job = store.submit("test.delay", {"seconds": 0})
+            store.drain()
+        self.assertEqual(store.get(job["id"])["error"]["code"], "service_restarted")
+
+
+class SendTests(unittest.TestCase):
+    def test_a_send_that_blocks_holds_no_lock(self):
+        with patch.object(JobStore, "_replenish"):
+            store = JobStore(Settings(concurrency=1, test_tasks=True))
+        self.addCleanup(store.close)
+        release, sending = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        worker = jobs._Worker(Mock(), Mock())
+        worker.connection.poll.return_value = False
+        worker.connection.send.side_effect = lambda _: (sending.set(), release.wait(5))
+        worker.ready = True
+        with store._lock:
+            store._pool.append(worker)
+        job = store.submit("test.delay", {"seconds": 0})
+        self.assertTrue(sending.wait(5), "the job was never sent")
+        started = time.monotonic()
+        self.assertEqual(store.get(job["id"])["status"], "queued")
+        self.assertLess(time.monotonic() - started, 0.5)
+
+
+class ReadinessTests(unittest.TestCase):
+    """readiness() is None when a child is idle with its models loaded, otherwise the reason it is not."""
+
+    def bare_store(self, backend="lexical"):
+        """A store that never starts a child, so the test plays the child's part."""
+        replenish = patch.object(JobStore, "_replenish")
+        replenish.start()
+        self.addCleanup(replenish.stop)
+        store = JobStore(Settings(concurrency=1, backend=backend))
+        self.addCleanup(store.close)
+        return store
+
+    def test_the_reason_follows_the_child_messages(self):
+        store = self.bare_store("onnx")
+        self.assertEqual(store.readiness(), "no_idle_child")
+        worker = jobs._Worker(Mock(), Mock())
+        with store._lock:
+            store._pool.append(worker)
+            self.assertEqual(store.readiness(), "no_idle_child")
+            store._drain_message(worker, (None, "ready", None))
+            self.assertEqual(store.readiness(), "models_loading")
+            store._drain_message(worker, (None, "loaded", None))
+            self.assertIsNone(store.readiness())
+            worker.job_id = "a" * 32
+            self.assertEqual(store.readiness(), "no_idle_child")
+            worker.job_id = None
+        store.drain()
+        self.assertEqual(store.readiness(), "draining")
+
+    def test_a_lexical_store_is_ready_once_its_child_has_warmed_up(self):
+        with patch.object(JobStore, "_replenish"):
+            store = JobStore(Settings(concurrency=1))
+            self.addCleanup(store.close)
+            self.assertEqual(store.readiness(), "no_idle_child")
+        # The coordinator now starts the child, which reports itself ready and then loaded.
+        deadline = time.monotonic() + 10
+        while store.readiness() is not None:
+            self.assertLess(time.monotonic(), deadline, store.readiness())
+            time.sleep(0.01)
+        self.assertTrue(store._pool[0].loaded)
+
+
+class WarmUpTests(unittest.TestCase):
+    """A child loads its backend's models before it reports ready and says so; _serve runs here in a thread."""
+
+    def serve(self, backend, model_dir="/models"):
+        # signal.signal works only on the main thread, and the child's pop of the token must not reach this process.
+        for patcher in (patch.object(jobs.signal, "signal"), patch.dict(os.environ)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        parent, child = multiprocessing.Pipe()
+        thread = threading.Thread(target=jobs._serve, args=(child, backend, model_dir))
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(parent.send, None)
+        return parent
+
+    def recv(self, parent):
+        self.assertTrue(parent.poll(5), "the child sent nothing")
+        return parent.recv()
+
+    def test_an_onnx_child_loads_every_model_of_its_backend_then_reports_loaded(self):
+        with patch.object(tasks, "_onnx") as load:
+            parent = self.serve("onnx", "/m")
+            self.assertEqual(self.recv(parent), (None, "ready", None))
+            self.assertEqual(self.recv(parent), (None, "loaded", None))
+        self.assertEqual([call.args for call in load.call_args_list],
+                         [(Path("/m") / name, length, stride) for name, length, stride in jobs.WARM_UP["onnx"]])
+
+    def test_ready_is_sent_only_once_the_load_has_finished(self):
+        release = threading.Event()
+        with patch.object(tasks, "_onnx", side_effect=lambda *_: release.wait(5)):
+            parent = self.serve("onnx", "/m")
+            self.addCleanup(release.set)
+            self.assertFalse(parent.poll(0.3), "ready was sent before the load finished")
+            release.set()
+            self.assertEqual(self.recv(parent), (None, "ready", None))
+            self.assertEqual(self.recv(parent), (None, "loaded", None))
+
+    def test_a_lexical_child_loads_nothing_and_reports_loaded(self):
+        with patch.object(tasks, "_onnx") as load:
+            parent = self.serve("lexical")
+            self.assertEqual(self.recv(parent), (None, "ready", None))
+            self.assertEqual(self.recv(parent), (None, "loaded", None))
+        load.assert_not_called()
+
+    def test_a_failed_load_never_reports_loaded_and_the_child_still_serves(self):
+        with patch.object(tasks, "_onnx", side_effect=RuntimeError("bad model at /m/rerank")):
+            parent = self.serve("onnx", "/m")
+            self.assertEqual(self.recv(parent), (None, "ready", None))
+            parent.send(("j", "embed", {"texts": ["x"]}))
+            self.assertEqual(self.recv(parent), ("j", "started", None))
+            replies = [self.recv(parent)]
+            while replies[-1][1] == "progress":
+                replies.append(self.recv(parent))
+        self.assertEqual(replies[-1], ("j", "error", "task_failed"))
+
+    def test_the_warm_up_loads_exactly_what_the_onnx_tasks_look_up(self):
+        looked_up = []
+
+        class Found(Exception):
+            pass
+
+        def record(directory, max_length, stride=0):
+            looked_up.append((directory, max_length, stride))
+            # The cased NER model is followed at once by the uncased one; anything else ends the task here.
+            if Path(directory).name == "redact":
+                return Mock(), Mock(), set()
+            raise Found
+
+        payloads = {"rerank": {"query": "q", "documents": ["d"]}, "embed": {"texts": ["t"]},
+                    "redact": {"text": "Ann went home", "entities": ["PER"]}}
+        with patch.object(tasks, "_onnx", side_effect=record), patch.dict("sys.modules", {"numpy": Mock()}):
+            for task, payload in payloads.items():
+                with self.subTest(task=task), self.assertRaises(Found):
+                    execute(task, payload, "onnx", "/m", lambda *_: None)
+        self.assertEqual(sorted(looked_up), sorted((Path("/m") / name, length, stride)
+                                                   for name, length, stride in jobs.WARM_UP["onnx"]))
+
+
 if __name__ == "__main__":
     unittest.main()
