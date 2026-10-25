@@ -100,7 +100,7 @@ def inputs(step: list) -> list:
 
 class WorkflowTests(unittest.TestCase):
     def test_the_workflows_are_found(self):
-        self.assertEqual([path.name for path in WORKFLOWS], ["model-smoke.yml", "tests.yml"])
+        self.assertEqual([path.name for path in WORKFLOWS], ["model-smoke.yml", "publish.yml", "tests.yml"])
         for path in WORKFLOWS:
             self.assertTrue(jobs(path.read_text(encoding="utf-8"), path.name), path.name)
 
@@ -281,6 +281,32 @@ jobs:  # the jobs
         # A push to a pull request's branch would otherwise run every job twice.
         text = (REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         self.assertIn("on:\n  push:\n    branches: [main]\n  pull_request:\n", text)
+
+    def test_the_gate_requires_the_image_builds(self):
+        found = jobs((REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"), "tests.yml")
+        self.assertIn("needs: [php, mcp, images]", found["deterministic"])
+        self.assertTrue(any('"$IMAGES_RESULT" = success' in line for line in found["deterministic"]))
+
+    def test_images_are_published_from_tags_with_the_job_token_only(self):
+        # A pull request or a branch push must never reach a step that can write packages or releases.
+        text = (REPO / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+        self.assertIn("on:\n  push:\n    tags: ['v*']\n  workflow_dispatch:\n", text)
+        self.assertNotIn("pull_request", text)
+        self.assertEqual(set(re.findall(r"secrets\.(\w+)", text)), {"GITHUB_TOKEN"})
+        for platforms in re.findall(r"platforms:\s*(.*)", text):
+            self.assertEqual(platforms, "linux/amd64,linux/arm64")
+
+    def test_publishing_starts_only_from_a_version_tag(self):
+        # The whole `on:` block, so no other trigger can be added below the two; a manual run on a branch is
+        # refused by the first step, before anything is built or the registry is logged in to.
+        text = (REPO / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+        triggers = re.search(r"^on:\n(.*?)^\S", text, re.MULTILINE | re.DOTALL)
+        self.assertEqual(triggers.group(1), "  push:\n    tags: ['v*']\n  workflow_dispatch:\n\n")
+        first = steps(text)[0]
+        self.assertEqual(first[0].strip(), "- name: Require a version tag")
+        guard = "\n".join(first)
+        self.assertIn('case "$GITHUB_REF" in refs/tags/v*) ;; *)', guard)
+        self.assertRegex(guard, r"\*\) echo .*>&2; exit 1 ;; esac")
 
     def test_measurements_name_the_runner_they_ran_on(self):
         text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")

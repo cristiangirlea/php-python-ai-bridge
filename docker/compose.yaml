@@ -342,6 +342,38 @@ services:
       - -ec
       - 'python -m pip install --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-model.lock && exec python -m ai_bridge.server --host 0.0.0.0'
 
+  # The published images in place of the checkout, under the same limits. To run a local build instead, tag it as
+  # the image (`docker build -t ghcr.io/cristiangirlea/php-python-ai-bridge-worker:local -f docker/Dockerfile.worker .`)
+  # and set BRIDGE_IMAGE_TAG=local and BRIDGE_IMAGE_PULL_POLICY=never.
+  worker-image: &worker-image
+    profiles: [release]
+    image: ghcr.io/cristiangirlea/php-python-ai-bridge-worker:${BRIDGE_IMAGE_TAG:-latest}
+    pull_policy: ${BRIDGE_IMAGE_PULL_POLICY:-missing}
+    user: "65532:65532"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /state:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700
+    networks: [isolated]
+    healthcheck: *worker-health
+    environment:
+      BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN}
+      BRIDGE_STATE_DIR: /state
+
+  # Reads the models the `fetcher` put in .cache, or `docker run -v <volume>:/cache <image> fetch` with a volume.
+  model-worker-image:
+    <<: *worker-image
+    image: ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:${BRIDGE_IMAGE_TAG:-latest}
+    mem_limit: 1536m
+    volumes:
+      - ../.cache:/cache:ro
+
   model-test:
     <<: *php
     profiles: [model]
