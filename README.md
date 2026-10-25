@@ -21,7 +21,7 @@ The default backends are **`lexical-demo-not-a-model`** for reranking and **`has
 
 ## Try it with Docker
 
-Requirements: Docker Engine/Desktop with Linux containers and Docker Compose. The provided images and model wheel lock target **Linux x86_64 / Python 3.12**; other architectures are not verified. No local PHP or Python installation is needed.
+Requirements: Docker Engine/Desktop with Linux containers and Docker Compose. The provided images and model wheel lock target **Linux x86_64 / Python 3.12**; the [published worker images](#run-the-published-image) and the lock also cover arm64, which the tests do not run. No local PHP or Python installation is needed.
 
 One Composer package supports PHP 8.2, 8.3, 8.4 and 8.5: the upstream-supported PHP branches as of September 2026. The default demo uses PHP 8.5; CI exercises all four branches. See [support policy and verification limits](docs/testing.md).
 
@@ -49,6 +49,33 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-example
 The CLI example prints sorted document indexes and scores. The integration test sends concurrent HTTP requests through the **actual long-lived FrankenPHP worker**, checks distinct results, and verifies that later malformed requests cannot reuse earlier input.
 
 No host ports are published. Example/test clients connect over a Docker-internal network. The example HTTP routes have **no end-user authentication** and must not be exposed publicly.
+
+### Run the published image
+
+Every release tag publishes the worker as an image, so a deployment needs no checkout: `ghcr.io/cristiangirlea/php-python-ai-bridge-worker` (the demo backends, standard library only) and `ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx` (the hash-locked model wheels, no models), each tagged with the version, for linux/amd64 and linux/arm64. A stable release (`v1.2.0`) also moves `latest`; a prerelease (`v1.2.0-rc.1`) gets its version tag only. Both run as UID 65532 and listen on port 8090. Pin the version, not `latest`, and attach your application to the same private network:
+
+```sh
+docker pull ghcr.io/cristiangirlea/php-python-ai-bridge-worker:latest
+docker network create --internal bridge-private
+docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -e BRIDGE_STATE_DIR=/state \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 512m \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532 \
+  --tmpfs /state:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700 \
+  ghcr.io/cristiangirlea/php-python-ai-bridge-worker:latest
+```
+
+`-e BRIDGE_TOKEN` passes the token from your shell without writing it on the command line. The ONNX image never holds models: `fetch` downloads the pinned, hash-checked files into a volume once, and the worker reads them from there without network:
+
+```sh
+docker volume create bridge-models
+docker run --rm -v bridge-models:/cache ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:latest fetch
+docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -v bridge-models:/cache:ro \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 1536m \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532 \
+  ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:latest
+```
+
+Compose's `release` profile runs the same images under the limits above: `BRIDGE_IMAGE_TAG=<version> docker compose -f docker/compose.yaml --profile release up -d worker-image` (or `model-worker-image`, which reads `.cache/models` from the `fetcher`). Each image carries build provenance and an SBOM; `gh attestation verify oci://ghcr.io/cristiangirlea/php-python-ai-bridge-worker:<version> --owner cristiangirlea` checks it. The arm64 images are built under emulation and not run by the tests.
 
 ### Run the real model
 
