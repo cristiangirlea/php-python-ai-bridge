@@ -4,7 +4,9 @@ These check its settings, percentiles, summaries and table offline; the measurem
 and is informational, run on demand in the model workflow and never a gate.
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import threading
 import time
@@ -130,6 +132,36 @@ class JobTests(unittest.TestCase):
                 self.assertTrue(errors[0].startswith(message), errors[0])
                 self.assertAlmostEqual(sleep.call_args[0][0], 1.0)
 
+    def test_a_retry_after_shorter_than_the_run_is_waited_in_full(self):
+        refused = HTTPError("http://worker/v1/jobs", 429, "Too Many Requests", {"Retry-After": "1"}, None)
+        records, errors, _, sleep = self.run_job(refused, deadline=110.0)
+        self.assertEqual((records, errors), ([("embed", "429", None)], []))
+        sleep.assert_called_once_with(1)
+
+    def test_a_failed_get_after_a_submit_is_one_error(self):
+        records, errors, call, _ = self.run_job([{"id": "a" * 32, "status": "queued"}, URLError("reset")])
+        self.assertEqual(records, [("embed", "error", None)])
+        self.assertEqual(errors, ["embed: URLError: <urlopen error reset>"])
+        self.assertEqual(call.call_count, 2)
+
+    def test_an_unknown_status_is_one_error(self):
+        records, errors, call, _ = self.run_job([{"id": "a" * 32, "status": "paused"}])
+        self.assertEqual(records, [("embed", "error", None)])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unknown status 'paused'", errors[0])
+        self.assertEqual(call.call_count, 1)
+
+    def test_a_job_that_never_ends_expires_once_after_its_timeout(self):
+        records, errors, ticks = [], [], iter(range(10000))
+        queued = {"id": "a" * 32, "status": "running"}
+        # Each clock reading is 10 s later: the job is given up after the submitted 120 s plus 5.
+        with mock.patch.object(load, "call", return_value=queued) as call,                 mock.patch.object(load.time, "monotonic", side_effect=lambda: 100.0 + 10 * next(ticks)),                 mock.patch.object(load.time, "sleep"):
+            load.one_job("http://worker", "embed", 101.0, records, errors)
+        self.assertEqual(records, [("embed", "error", None)])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("TimeoutError", errors[0])
+        self.assertLess(call.call_count, 20)
+
     def test_no_pause_runs_past_the_deadline(self):
         refused = HTTPError("http://worker/v1/jobs", 429, "Too Many Requests", {"Retry-After": "7"}, None)
         _, _, _, sleep = self.run_job(refused, now=100.0, deadline=100.1)
@@ -159,6 +191,22 @@ class DriveTests(unittest.TestCase):
                 mock.patch.object(load, "wait_ready", return_value={"backend": "lexical"}), \
                 self.assertRaisesRegex(SystemExit, "reports backend 'lexical'"):
             load.main()
+
+
+class MainTests(unittest.TestCase):
+    def run_main(self, settle):
+        order = mock.Mock()
+        order.drive.return_value = (1.0, [], [])
+        environ = {"LOAD_TARGET": "lexical", "LOAD_CONCURRENCY": "1,4,16", "LOAD_SETTLE_SECONDS": settle}
+        with mock.patch.dict(os.environ, environ),                 mock.patch.object(load, "wait_ready", return_value={"backend": "lexical"}),                 mock.patch.object(load, "cpu_model", return_value="cpu"),                 mock.patch.object(load, "drive", order.drive), mock.patch.object(load.time, "sleep", order.sleep),                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            load.main()
+        return [(name, args[0] if name == "sleep" else args[2]) for name, args, _ in order.mock_calls]
+
+    def test_the_settle_wait_comes_between_levels_never_before_the_first(self):
+        self.assertEqual(self.run_main("7"), [("drive", 1), ("sleep", 7.0), ("drive", 4), ("sleep", 7.0), ("drive", 16)])
+
+    def test_a_zero_settle_never_waits(self):
+        self.assertEqual(self.run_main("0"), [("drive", 1), ("drive", 4), ("drive", 16)])
 
 
 class TableTests(unittest.TestCase):

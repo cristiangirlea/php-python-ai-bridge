@@ -46,8 +46,7 @@ on:
 permissions:
   contents: read
 
-# A new push to the same branch makes an in-flight run obsolete; do not download the models twice. The event is in
-# the group so that the weekly schedule on main does not cancel a run started by hand there, or the reverse.
+# One run per event and branch: a new push cancels the old, and a scheduled run never cancels a hand-started one.
 concurrency:
   group: model-smoke-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true

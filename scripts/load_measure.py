@@ -1,11 +1,11 @@
 """Informational throughput and latency of a running worker under concurrent load. Never a gate.
 
 N threads each submit a job, poll it every 0.05 s until it is terminal, and submit the next, until the stated duration
-has passed; a thread then finishes the job in hand. A 429 is answered by waiting its Retry-After, within the run. The
-inputs are scripts/benchmark.py's: rerank 32 documents of ~40 words, embed 32 texts, redact 2000 characters, or a mix
-that cycles the three. Each concurrency level after the first waits LOAD_SETTLE_SECONDS first, so that the jobs the
-level before it left in retention have expired and every level starts from an empty job table. The output is a
-Markdown block for docs/testing.md; progress goes to stderr.
+has passed; a thread then finishes the job in hand, given up 5 s after its 120 s timeout. A 429 is answered by waiting
+its Retry-After, within the run. The inputs are scripts/benchmark.py's: rerank 32 documents of ~40 words, embed 32
+texts, redact 2000 characters, or a mix that cycles the three. Each concurrency level after the first waits
+LOAD_SETTLE_SECONDS first, so that the jobs the level before it left in retention have expired and every level starts
+from an empty job table. The output is a Markdown block for docs/testing.md; progress goes to stderr.
 
     LOAD_TARGET=lexical LOAD_CONCURRENCY=1,4,16 LOAD_SECONDS=120 LOAD_CASE=mix BRIDGE_TOKEN=... python scripts/load_measure.py
 """
@@ -30,6 +30,8 @@ ORDER = ("rerank", "embed", "redact")
 LIMITS = {"onnx": "model-worker cpus=1, mem_limit=1536m, BRIDGE_CONCURRENCY=1",
           "lexical": "worker cpus=1, mem_limit=512m, BRIDGE_CONCURRENCY=2"}
 MAX_CONCURRENCY = 64
+TIMEOUT_MS = 120000
+ACTIVE = {"queued", "running"}
 
 
 def _seconds(environ, name: str, default: str, positive: bool) -> float:
@@ -86,8 +88,14 @@ def one_job(base: str, task: str, deadline: float, records: list, errors: list) 
     """Submits one job and follows it to its end, appending (task, outcome, latency) to records."""
     started = time.monotonic()
     try:
-        job = call(base, "POST", "/v1/jobs", {"task": task, "input": TASKS[task], "timeout_ms": 120000})
+        job = call(base, "POST", "/v1/jobs", {"task": task, "input": TASKS[task], "timeout_ms": TIMEOUT_MS})
+        # The job's own bound, not the level's: a job in hand may finish after submissions stop, but never hangs.
+        expires = started + TIMEOUT_MS / 1000 + 5
         while job["status"] not in TERMINAL:
+            if job["status"] not in ACTIVE:
+                raise ValueError(f"unknown status {job['status']!r}")
+            if time.monotonic() > expires:
+                raise TimeoutError(f"still {job['status']} {TIMEOUT_MS / 1000 + 5:g} s after its submission")
             time.sleep(POLL_S)
             job = call(base, "GET", "/v1/jobs/" + job["id"])
         if job["status"] == "succeeded":
