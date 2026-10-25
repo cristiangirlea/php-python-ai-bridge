@@ -14,7 +14,7 @@ and `docs/testing.md` are the guides. Everything builds, tests and downloads ins
 | `worker/ai_bridge/` | The Python 3.12 service: `server.py` (HTTP), `jobs.py` (store, worker pool, limits, retention), `tasks.py` (allowlist, validation, backends, `MODEL_NAMES`). |
 | `mcp_server/bridge_mcp/` | The stdio MCP server: `tools.py` (the tool list and `BACKENDS`), `protocol.py` (its client of the worker), `index.py` (the builder behind `bridge_search`). |
 | `examples/` | Local autoloader, the CLI example, the FrankenPHP route and Caddyfile, the TLS proxy's Caddyfile in `tls/`. |
-| `scripts/` | Model fetcher, benchmark, NER measurement, MCP stdio launchers, the LLM evaluation runner. |
+| `scripts/` | Model fetcher, benchmark, NER and ranking measurements with the public datasets' pins (`public_data.py`), MCP stdio launchers, the LLM evaluation runner. |
 | `tests/php/` | `run.php` (offline contract checks), `integration.php` (the client against the real worker and broken peers over HTTP), `tls.php` (the client through the TLS proxy), `model.php` (ONNX smoke), `consumer/` (the consumer project and check behind compose's `composer-install`), `frameworks/` (the Laravel and Symfony project, its lock, and the boot tests). |
 | `tests/python/` | The worker's unittest suite, including the workflows' runners and both hooks (the pre-call push guard's own cases are in `.claude/hooks/push-guard.test.sh`). |
 | `tests/mcp/` | The MCP server's suite, offline against hash-pinned wheels; its fixtures and LLM evaluations. |
