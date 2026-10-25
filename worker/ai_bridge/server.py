@@ -10,14 +10,58 @@ import socket
 import sqlite3
 import stat
 import threading
+import time
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .jobs import DEFAULT_OWNER, CapacityError, JobStore, Settings
+from .jobs import DEFAULT_OWNER, CapacityError, DrainingError, JobStore, Settings
 from .metrics import CONTENT_TYPE, render
 from .tasks import missing_models
 
 MAX_BODY = 262144
+MAX_REQUEST_LINE = 8192
+MAX_HEADER_BLOCK = 16384
+_BUSY_BODY = b'{"error":{"code":"service_busy","message":"Every connection slot is taken"}}'
+BUSY = (b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
+        b"Cache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\n\r\n%s" % (len(_BUSY_BODY), _BUSY_BODY))
+
+
+class HeadTooLarge(Exception):
+    pass
+
+
+class _Head:
+    """The connection's reader, which refuses a request line or header block over its limit before reading it all;
+    the body is read through it unchanged."""
+
+    def __init__(self, rfile):
+        self._rfile = rfile
+        self._left = None  # bytes the header block may still take; None until the request line is read
+        self._done = False
+
+    def readline(self, limit=-1):
+        if self._done:
+            return self._rfile.readline(limit)
+        if self._left is None:
+            line = self._rfile.readline(MAX_REQUEST_LINE + 3)
+            # One line end is not counted, so a run of carriage returns or a truncated read is over the limit.
+            content = line[:-2] if line.endswith(b"\r\n") else line[:-1] if line.endswith(b"\n") else line
+            if len(content) > MAX_REQUEST_LINE:
+                raise HeadTooLarge
+            self._left = MAX_HEADER_BLOCK
+            return line
+        # Read past the budget by a little, so a line that ends exactly on it can be told from a longer one.
+        line = self._rfile.readline(self._left + 3)
+        if line in (b"\r\n", b"\n", b""):
+            self._done = True
+            return line
+        self._left -= len(line)
+        if self._left < 0:
+            raise HeadTooLarge
+        return line
+
+    def __getattr__(self, name):
+        return getattr(self._rfile, name)
 MAX_TOKENS = 64
 MAX_TOKENS_FILE = 65536
 TOKEN_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
@@ -106,13 +150,16 @@ class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, address, tokens, settings=None):
+    def __init__(self, address, tokens, settings=None, drain_seconds=30):
         """tokens maps each name to its token; a single token is the name default."""
         if isinstance(tokens, str):
             tokens = {DEFAULT_OWNER: tokens}
         check_tokens(tokens)
         # The header each name is presented with; every request is compared with all of them.
         self.credentials = tuple((name, ("Bearer " + token).encode("ascii")) for name, token in tokens.items())
+        self.drain_seconds = drain_seconds
+        self._signalled_at = None
+        self._interrupted = threading.Event()
         self.slots = threading.BoundedSemaphore(32)
         # The children the store starts inherit this process's environment block as it is at that moment, and
         # removing a variable later leaves it in /proc/<pid>/environ; so the tokens leave before any child exists.
@@ -127,7 +174,13 @@ class BridgeServer(ThreadingHTTPServer):
 
     def process_request(self, request, address):
         if not self.slots.acquire(blocking=False):
-            request.close()
+            # One non-blocking send that fits any socket buffer, nothing read: a client cannot hold the accept loop.
+            try:
+                request.setblocking(False)
+                request.send(BUSY)
+            except OSError:
+                pass
+            self.shutdown_request(request)
             return
         try:
             super().process_request(request, address)
@@ -145,6 +198,26 @@ class BridgeServer(ThreadingHTTPServer):
         super().server_close()
         self.jobs.close()
 
+    def stop(self):
+        """A signal's handler: the first starts the drain, a second ends it at once."""
+        if self._signalled_at is not None:
+            self._interrupted.set()
+            # Stopped from here, not by the drain thread, which may still be inside drain().
+            threading.Thread(target=self.shutdown, daemon=True).start()
+            return
+        self._signalled_at = time.monotonic()
+        threading.Thread(target=self._drain_then_stop, daemon=True).start()
+
+    def _drain_then_stop(self):
+        """Until running jobs end or the deadline passes, then stop serving; server_close ends what still runs."""
+        self.jobs.drain()
+        deadline = self._signalled_at + self.drain_seconds
+        while not self._interrupted.is_set() and self.jobs.busy():
+            left = deadline - time.monotonic()
+            if left <= 0 or self._interrupted.wait(min(left, 0.05)):
+                break
+        self.shutdown()
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "PhpPythonBridge/0.1"
@@ -153,6 +226,15 @@ class Handler(BaseHTTPRequestHandler):
     def setup(self):
         super().setup()
         self.connection.settimeout(5)
+        self.rfile = _Head(self.rfile)
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except HeadTooLarge:
+            # A long request line is refused before the request is parsed, so these may not be set yet.
+            self.requestline, self.request_version = "", "HTTP/1.0"
+            self._error(431, "headers_too_large", "Request line or header block exceeds its limit")
 
     def log_message(self, *_):
         # Do not log URLs, credentials, inputs or model results.
@@ -229,6 +311,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/healthz":
             self._reply(200, {"status": "ok", "protocol": 1, "backend": self.server.jobs.settings.backend})
             return
+        if self.path == "/readyz":
+            reason = self.server.jobs.readiness()
+            if reason is None:
+                self._reply(200, {"status": "ready"})
+            else:
+                self._reply(503, {"status": "not_ready", "reason": reason})
+            return
         if self.path == "/metrics":
             # The snapshot is taken under the store's lock; the formatting is not.
             self._text(200, render(self.server.jobs.snapshot()))
@@ -247,6 +336,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self._body()
             if self.path == "/v1/jobs":
+                if self.server.jobs.draining:
+                    raise DrainingError
                 if (not {"task", "input"} <= body.keys()
                         or body.keys() - {"task", "input", "timeout_ms", "idempotency_key"}):
                     raise ValueError("Expected task, input, optional timeout_ms and optional idempotency_key")
@@ -265,6 +356,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(404, "not_found", "Job or route not found")
             else:
                 self._reply(200, job)
+        except DrainingError:
+            self._error(503, "draining", "Worker is draining before it stops", [("Retry-After", "1")])
         except CapacityError as error:
             # Delay seconds, never an HTTP date: a client's clock need not agree with this one.
             self._error(429, "capacity_exceeded", "Worker capacity reached", [("Retry-After", str(int(error.retry_after)))])
@@ -300,6 +393,9 @@ def main():
         max_jobs=_number("BRIDGE_WORKER_MAX_JOBS", "1000", int),
         state_dir=os.environ.get("BRIDGE_STATE_DIR") or None,
     )
+    drain_seconds = _number("BRIDGE_DRAIN_SECONDS", "30", int)
+    if not 0 <= drain_seconds <= 300:
+        raise SystemExit("BRIDGE_DRAIN_SECONDS must be an integer from 0 to 300")
     # Without its files every job needing a model would fail as task_failed, which cannot say why: a cache fetched
     # before a model was added has no directory for it.
     missing = missing_models(settings.model_dir) if settings.backend == "onnx" else []
@@ -307,13 +403,13 @@ def main():
         raise SystemExit(f"{settings.model_dir} lacks the model files for {', '.join(missing)}; acquire them with "
                          "the fetcher: docker compose -f docker/compose.yaml run --rm --no-deps fetcher")
     try:
-        bridge = BridgeServer((args.host, args.port), tokens, settings)
+        bridge = BridgeServer((args.host, args.port), tokens, settings, drain_seconds=drain_seconds)
     except sqlite3.Error:
         raise SystemExit(f"BRIDGE_STATE_DIR {settings.state_dir} must be a directory the service can write "
                          "jobs.sqlite in") from None
     with bridge as server:
         def stop(*_):
-            threading.Thread(target=server.shutdown, daemon=True).start()
+            server.stop()
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
