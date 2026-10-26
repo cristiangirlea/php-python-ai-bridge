@@ -106,12 +106,13 @@ def matched(gold: list, predicted: list, same_label: bool) -> int:
     return count
 
 
-def score(gold: list, predicted: list) -> dict:
+def score(gold: list, predicted: list, masking: list | None = None) -> dict:
     """Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted
-    span, so one span over two names finds one of them. Masked: a shared character under any label, which is what a
-    redaction hides."""
+    span, so one span over two names finds one of them. Masked: a shared character with a span of masking (by default
+    the predicted spans) under any label, which is what a redaction hides."""
     return {"gold": len(gold), "predicted": len(predicted), "exact": len(set(gold) & set(predicted)),
-            "overlapping": matched(gold, predicted, True), "masked": matched(gold, predicted, False)}
+            "overlapping": matched(gold, predicted, True),
+            "masked": matched(gold, predicted if masking is None else masking, False)}
 
 
 def rate(part: int, whole: int) -> str:
@@ -171,7 +172,8 @@ def add(total: dict, counts: dict) -> None:
 
 def tally(items: list, spans: dict) -> list:
     """Rows of (threshold, register or label, counts) from each threshold's spans per item: each register in the
-    sample's order, then each label, whose rows count only that label's gold and predicted spans."""
+    sample's order, then each label, whose rows count only that label's gold and predicted spans, except that any
+    predicted span masks."""
     registers = list(dict.fromkeys(item["register"] for item in items))
     rows = []
     for threshold, found_per_item in spans.items():
@@ -180,7 +182,8 @@ def tally(items: list, spans: dict) -> list:
             gold, predicted = gold_spans(item), predictions(found)
             add(totals[item["register"]], score(gold, predicted))
             for label in LABELS:
-                add(totals[label], score([g for g in gold if g[2] == label], [p for p in predicted if p[2] == label]))
+                add(totals[label], score([g for g in gold if g[2] == label], [p for p in predicted if p[2] == label],
+                                         predicted))
         rows += [(threshold, name, counts) for name, counts in totals.items()]
     return rows
 
@@ -207,13 +210,13 @@ def main() -> None:
     if wnut:
         pinned = public_data.DATASETS["wnut17"]
         print(f"""Measured {now} UTC, commit `{os.environ.get("BENCH_COMMIT", "unknown")}`, runner: {os.environ.get("BENCH_RUNNER", "unspecified")}, CPU: {cpu_model()}.
-Model {", ".join(f"`{model}`" for model in sorted(models))}; WNUT-17 test split, `{pinned["url"].rsplit("/", 1)[1]}` at SHA-256 `{pinned["sha256"][:12]}`, {pinned["licence"]}: {len(items)} sentences with {sum(len(item["gold"]) for item in items)} entities mapped to labels, person to PER, corporation and group to ORG, location to LOC; product and creative-work have no label here, so a span over one counts against precision. Each sentence is its tokens joined by single spaces; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: gold spans that share a character with a predicted span of any label, one gold span per predicted span; a label's row counts only that label's predictions, so there it equals overlapping recall.
+Model {", ".join(f"`{model}`" for model in sorted(models))}; WNUT-17 test split, `{pinned["url"].rsplit("/", 1)[1]}` at SHA-256 `{pinned["sha256"][:12]}`, {pinned["licence"]}: {len(items)} sentences with {sum(len(item["gold"]) for item in items)} entities mapped to labels, person to PER, corporation and group to ORG, location to LOC; product and creative-work have no label here, so a span over one counts against precision. Each sentence is its tokens joined by single spaces; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: gold spans that share a character with a predicted span of any label, one gold span per predicted span, in a label's row too.
 """)
         print(f1_table(tally(items, spans)))
         return
     entities = sum(len(item["entities"]) for item in items)
     print(f"""Measured {now} UTC, commit `{os.environ.get("BENCH_COMMIT", "unknown")}`, runner: {os.environ.get("BENCH_RUNNER", "unspecified")}, CPU: {cpu_model()}.
-Model {", ".join(f"`{model}`" for model in sorted(models))}; `{sample.relative_to(REPO).as_posix()}`, {len(items)} invented sentences with {entities} labelled entities; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: a shared character under any label, the share of entities a redaction hides.
+Model {", ".join(f"`{model}`" for model in sorted(models))}; `{sample.relative_to(REPO).as_posix()}`, {len(items)} invented sentences with {entities} labelled entities; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: a shared character with a predicted span of any label, in a label's row too, one gold span per predicted span: the share of entities a redaction hides.
 
 | Threshold | Register or label | Gold | Predicted | Precision, exact | Recall, exact | Precision, overlapping | Recall, overlapping | Masked |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |""")

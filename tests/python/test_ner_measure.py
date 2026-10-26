@@ -101,6 +101,22 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(measure.score([(0, 5, "PER")], [(0, 5, "ORG")]),
                          {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 1})
 
+    def test_a_label_s_row_counts_an_entity_masked_under_another_label(self):
+        items = [{"register": "informal", "text": "ada in rome", "entities": [["PER", "ada"], ["LOC", "rome"]]}]
+        found = [{"start": 0, "end": 3, "label": "ORG", "source": "model:ORG", "score": 0.9}]
+        counts = {name: value for _, name, value in measure.tally(items, {0.85: [found]})}
+        self.assertEqual(counts["PER"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
+        self.assertEqual(counts["ORG"], {"gold": 0, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts["LOC"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+
+    def test_a_label_s_row_still_matches_one_gold_span_per_predicted_span(self):
+        # One ORG span over "ines and pedro" hides both, but is counted for one name, as in the register's row.
+        items = [{"register": "informal", "text": "ines and pedro", "entities": [["PER", "ines"], ["PER", "pedro"]]}]
+        found = [{"start": 0, "end": 14, "label": "ORG", "source": "model:ORG", "score": 0.9}]
+        counts = {name: value for _, name, value in measure.tally(items, {0.85: [found]})}
+        self.assertEqual(counts["PER"], {"gold": 2, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
+        self.assertEqual(counts["informal"]["masked"], 1)
+
     def test_only_the_model_s_spans_are_predictions(self):
         spans = [{"start": 0, "end": 3, "label": "PER", "source": "model:PER", "score": 0.9},
                  {"start": 4, "end": 7, "label": "LOC", "source": "model:LOC", "score": 0.6},
@@ -123,10 +139,10 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(counts[(0.85, "informal")],
                          {"gold": 2, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts[(0.5, "informal")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
-        # Acme predicted as a place is an ORG missed and a LOC that is wrong, in each label's own row; in the
-        # register's row it is still a name masked.
+        # Acme predicted as a place is an ORG missed and a LOC that is wrong, in each label's own row; it is still a
+        # name masked, in the register's row and in ORG's.
         self.assertEqual(counts[(0.85, "news")], {"gold": 2, "predicted": 2, "exact": 1, "overlapping": 1, "masked": 2})
-        self.assertEqual(counts[(0.85, "ORG")], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts[(0.85, "ORG")], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
         self.assertEqual(counts[(0.85, "LOC")], {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts[(0.85, "PER")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
 
@@ -196,8 +212,8 @@ class Wnut17Tests(unittest.TestCase):
                  {"start": 12, "end": 16, "label": "ORG", "source": "model:ORG", "score": 0.9}]
         counts = {name: value for _, name, value in measure.tally(items, {0.85: [found]})}
         self.assertEqual(counts["all labels"], {"gold": 2, "predicted": 2, "exact": 1, "overlapping": 1, "masked": 2})
-        # A label's row sees only that label's predictions, so the ORG span over Oslo masks nothing in LOC's row.
-        self.assertEqual(counts["LOC"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+        # The ORG span over Oslo is no LOC prediction, but it hides Oslo, so LOC's row counts it as masked.
+        self.assertEqual(counts["LOC"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
         self.assertEqual(counts["ORG"], {"gold": 0, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts["PER"], {"gold": 1, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
 
