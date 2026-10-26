@@ -3,8 +3,8 @@
 ## Supported versions
 
 Only the latest minor release receives security fixes. Older releases are not patched; upgrade to the latest
-one first. This project is experimental: see [the security boundaries](docs/security.md) for what it does and
-does not protect.
+one first. See [the security boundaries](docs/security.md) for what the service does and
+does not protect, and [the operations guide](docs/operations.md) for the supported deployment tier.
 
 ## Reporting a vulnerability
 

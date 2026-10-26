@@ -2,6 +2,7 @@
 
 import argparse
 import hmac
+import io
 import json
 import os
 import re
@@ -11,9 +12,12 @@ import sqlite3
 import stat
 import threading
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
+from . import log
 from .jobs import DEFAULT_OWNER, CapacityError, DrainingError, JobStore, Settings
 from .metrics import CONTENT_TYPE, render
 from .tasks import missing_models
@@ -21,6 +25,12 @@ from .tasks import missing_models
 MAX_BODY = 262144
 MAX_REQUEST_LINE = 8192
 MAX_HEADER_BLOCK = 16384
+# How long a stop waits for a held drain thread's line: past it, the stop goes ahead without one.
+DRAIN_LINE_WAIT = 5
+# What a request line names as the route: the template a path matches, never the path itself.
+_ROUTES = {"/healthz": "/healthz", "/readyz": "/readyz", "/metrics": "/metrics", "/v1/jobs": "/v1/jobs"}
+_JOB_ROUTES = ((re.compile(r"/v1/jobs/[a-f0-9]{32}"), "/v1/jobs/{id}"),
+               (re.compile(r"/v1/jobs/[a-f0-9]{32}/cancel"), "/v1/jobs/{id}/cancel"))
 _BUSY_BODY = b'{"error":{"code":"service_busy","message":"Every connection slot is taken"}}'
 BUSY = (b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
         b"Cache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\n\r\n%s" % (len(_BUSY_BODY), _BUSY_BODY))
@@ -34,12 +44,12 @@ class _Head:
     """The connection's reader, which refuses a request line or header block over its limit before reading it all;
     the body is read through it unchanged."""
 
-    def __init__(self, rfile):
+    def __init__(self, rfile: io.BufferedIOBase) -> None:
         self._rfile = rfile
-        self._left = None  # bytes the header block may still take; None until the request line is read
+        self._left: int | None = None  # bytes the header block may still take; None until the request line is read
         self._done = False
 
-    def readline(self, limit=-1):
+    def readline(self, limit: int = -1) -> bytes:
         if self._done:
             return self._rfile.readline(limit)
         if self._left is None:
@@ -60,14 +70,14 @@ class _Head:
             raise HeadTooLarge
         return line
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._rfile, name)
 MAX_TOKENS = 64
 MAX_TOKENS_FILE = 65536
 TOKEN_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
 
-def check_tokens(tokens, source="the token list"):
+def check_tokens(tokens: dict[str, str], source: str = "the token list") -> dict[str, str]:
     """Refuse a token list the service must not start with; the message names the source, never a name or token."""
     if not tokens:
         raise ValueError(f"{source} holds no token")
@@ -83,11 +93,11 @@ def check_tokens(tokens, source="the token list"):
     return tokens
 
 
-def _entries(lines, source):
+def _entries(lines: list[str], source: str) -> dict[str, str]:
     """name=token entries as a mapping; the token is everything after the first "=", since a token may hold one."""
     if len(lines) > MAX_TOKENS:
         raise ValueError(f"{source} holds more than {MAX_TOKENS} tokens")
-    tokens = {}
+    tokens: dict[str, str] = {}
     for line in lines:
         name, separator, token = line.partition("=")
         if not separator or not TOKEN_NAME.fullmatch(name):
@@ -99,7 +109,7 @@ def _entries(lines, source):
     return check_tokens(tokens, source)
 
 
-def _read_tokens_file(path):
+def _read_tokens_file(path: str) -> dict[str, str]:
     """The file's entries, read once; a file others could read or replace is refused, since it holds every token."""
     try:
         # Non-blocking, so a FIFO at the path cannot hold the start up; a regular file reads as usual.
@@ -123,7 +133,7 @@ def _read_tokens_file(path):
     return _entries(lines, "BRIDGE_TOKENS_FILE")
 
 
-def resolve_tokens():
+def resolve_tokens() -> dict[str, str]:
     """The service's tokens by name from BRIDGE_TOKEN (named default), BRIDGE_TOKENS or BRIDGE_TOKENS_FILE, exactly one
     of them. Both token variables leave the environment here, before any child exists: the store's children inherit
     the environment block, and a variable removed later stays in /proc/<pid>/environ. The file's path may stay."""
@@ -150,7 +160,8 @@ class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, address, tokens, settings=None, drain_seconds=30):
+    def __init__(self, address: tuple[str, int], tokens: str | dict[str, str], settings: Settings | None = None,
+                 drain_seconds: int = 30) -> None:
         """tokens maps each name to its token; a single token is the name default."""
         if isinstance(tokens, str):
             tokens = {DEFAULT_OWNER: tokens}
@@ -158,8 +169,14 @@ class BridgeServer(ThreadingHTTPServer):
         # The header each name is presented with; every request is compared with all of them.
         self.credentials = tuple((name, ("Bearer " + token).encode("ascii")) for name, token in tokens.items())
         self.drain_seconds = drain_seconds
-        self._signalled_at = None
+        self.cancelled = 0  # unfinished jobs the stop ended, for the stop line
+        self._signalled_at: float | None = None
         self._interrupted = threading.Event()
+        self._drainer: threading.Thread | None = None
+        self._drained = threading.Event()  # the drain thread is done with its line: fields published, or none to write
+        self._drain_lock = threading.Lock()
+        self._drain_line: dict[str, Any] | None = None  # those fields until the line is written
+        self._drain_closed = False  # set by server_close: no drain line after it, since stop's follows
         self.slots = threading.BoundedSemaphore(32)
         # The children the store starts inherit this process's environment block as it is at that moment, and
         # removing a variable later leaves it in /proc/<pid>/environ; so the tokens leave before any child exists.
@@ -172,15 +189,18 @@ class BridgeServer(ThreadingHTTPServer):
             self.jobs.close()
             raise
 
-    def process_request(self, request, address):
+    def process_request(self, request: Any, address: Any) -> None:
         if not self.slots.acquire(blocking=False):
             # One non-blocking send that fits any socket buffer, nothing read: a client cannot hold the accept loop.
             try:
                 request.setblocking(False)
-                request.send(BUSY)
+                sent = request.send(BUSY) == len(BUSY)
             except OSError:
-                pass
+                sent = False
             self.shutdown_request(request)
+            # A reply that did not go out is no reply, as for a connection that ends before one.
+            if sent:
+                log.event("request", warning=True, method=None, route="other", status=503, duration_ms=0, owner=None)
             return
         try:
             super().process_request(request, address)
@@ -188,17 +208,25 @@ class BridgeServer(ThreadingHTTPServer):
             self.slots.release()
             raise
 
-    def process_request_thread(self, request, address):
+    def process_request_thread(self, request: Any, address: Any) -> None:
         try:
             super().process_request_thread(request, address)
         finally:
             self.slots.release()
 
-    def server_close(self):
-        super().server_close()
-        self.jobs.close()
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # The default prints the peer's address and a traceback to stderr, which takes only JSON lines or nothing.
+        pass
 
-    def stop(self):
+    def server_close(self) -> None:
+        super().server_close()
+        if self._drainer is not None:
+            # A second signal can stop serving while the drain thread is still held; its line still goes before stop's.
+            self._drained.wait(DRAIN_LINE_WAIT)
+            self._write_drain(last=True)
+        self.cancelled = self.jobs.close()
+
+    def stop(self) -> None:
         """A signal's handler: the first starts the drain, a second ends it at once."""
         if self._signalled_at is not None:
             self._interrupted.set()
@@ -206,48 +234,100 @@ class BridgeServer(ThreadingHTTPServer):
             threading.Thread(target=self.shutdown, daemon=True).start()
             return
         self._signalled_at = time.monotonic()
-        threading.Thread(target=self._drain_then_stop, daemon=True).start()
+        self._drainer = threading.Thread(target=self._drain_then_stop, daemon=True)
+        self._drainer.start()
 
-    def _drain_then_stop(self):
+    def _drain_then_stop(self) -> None:
         """Until running jobs end or the deadline passes, then stop serving; server_close ends what still runs."""
+        assert self._signalled_at is not None  # stop() sets it before it starts this thread
         self.jobs.drain()
         deadline = self._signalled_at + self.drain_seconds
         while not self._interrupted.is_set() and self.jobs.busy():
             left = deadline - time.monotonic()
             if left <= 0 or self._interrupted.wait(min(left, 0.05)):
                 break
+        if log.enabled():
+            running = self.jobs.snapshot()["running"]
+            with self._drain_lock:
+                self._drain_line = {"duration_ms": round((time.monotonic() - self._signalled_at) * 1000, 3),
+                                    "running": running, "interrupted": self._interrupted.is_set()}
+        self._drained.set()
+        self._write_drain()
         self.shutdown()
+
+    def _write_drain(self, last: bool = False) -> None:
+        """The drain line from the published fields, once, by the drain thread or server_close, whichever is first;
+        last is server_close's call, after which a drain thread published too late writes nothing."""
+        with self._drain_lock:
+            fields, self._drain_line = self._drain_line, None
+            # Queued under the lock, so server_close cannot pass this and write stop's line first.
+            if fields is not None and not self._drain_closed:
+                log.event("drain", warning=fields["running"] > 0, **fields)
+            self._drain_closed = self._drain_closed or last
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "PhpPythonBridge/0.1"
     sys_version = ""
+    server: BridgeServer
+    _owner: str | None
+    _status: int | None
 
-    def setup(self):
+    def setup(self) -> None:
         super().setup()
         self.connection.settimeout(5)
-        self.rfile = _Head(self.rfile)
+        # _Head is not a BufferedIOBase: it forwards every other attribute to the stream it wraps.
+        self.rfile = _Head(self.rfile)  # type: ignore[assignment]
 
-    def handle_one_request(self):
+    def handle_one_request(self) -> None:
+        logged = log.enabled()
+        started = time.monotonic() if logged else 0.0
+        # The standard library types command and path as str; they are None until a request line parses.
+        self.command = self.path = self._owner = self._status = None  # type: ignore[assignment]
         try:
             super().handle_one_request()
         except HeadTooLarge:
             # A long request line is refused before the request is parsed, so these may not be set yet.
             self.requestline, self.request_version = "", "HTTP/1.0"
             self._error(431, "headers_too_large", "Request line or header block exceeds its limit")
+        finally:
+            # After the reply is written; a connection that ended before any reply was written has no line.
+            if logged and self._status is not None:
+                log.event("request", warning=self._status >= 500, method=self._method(), route=self._route(),
+                          status=self._status, duration_ms=round((time.monotonic() - started) * 1000, 3),
+                          owner=self._owner)
 
-    def log_message(self, *_):
+    def _method(self) -> str | None:
+        if self.command is None:
+            return None
+        return self.command if self.command in ("GET", "POST") else "other"
+
+    def _route(self) -> str:
+        if self.path in _ROUTES:
+            return _ROUTES[self.path]
+        if self.path is not None:
+            for pattern, route in _JOB_ROUTES:
+                if pattern.fullmatch(self.path):
+                    return route
+        return "other"
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        super().send_error(code, message, explain)
+        # The standard library's own refusals write their whole reply here, and pass an HTTPStatus.
+        self._status = int(code)
+
+    def log_message(self, *_: Any) -> None:
         # Do not log URLs, credentials, inputs or model results.
         pass
 
-    def _reply(self, status, value, headers=()):
+    def _reply(self, status: int, value: object, headers: Iterable[tuple[str, str]] = ()) -> None:
         self._send(status, json.dumps(value, allow_nan=False, separators=(",", ":")).encode(), "application/json",
                    headers)
 
-    def _text(self, status, text):
+    def _text(self, status: int, text: str) -> None:
         self._send(status, text.encode("utf-8"), CONTENT_TYPE)
 
-    def _send(self, status, body, content_type, headers=()):
+    def _send(self, status: int, body: bytes, content_type: str, headers: Iterable[tuple[str, str]] = ()) -> None:
         self.send_response(status)
         for name, header in headers:
             self.send_header(name, header)
@@ -258,11 +338,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         self.wfile.write(body)
+        # Only now sent: a peer gone mid-reply raises above and gets no request line.
+        self._status = status
 
-    def _error(self, status, code, message, headers=()):
+    def _error(self, status: int, code: str, message: str, headers: Iterable[tuple[str, str]] = ()) -> None:
         self._reply(status, {"error": {"code": code, "message": message}}, headers)
 
-    def _authorized(self):
+    def _authorized(self) -> str | None:
         """The name of the token presented, or None once a 401 is sent. Every token is compared, whichever matches."""
         values = self.headers.get_all("Authorization", [])
         presented = values[0].encode("utf-8") if len(values) == 1 else b""
@@ -273,9 +355,10 @@ class Handler(BaseHTTPRequestHandler):
         if len(values) != 1 or owner is None:
             self._error(401, "unauthorized", "Service authentication required")
             return None
+        self._owner = owner
         return owner
 
-    def _body(self):
+    def _body(self) -> dict[str, Any]:
         lengths = self.headers.get_all("Content-Length", [])
         if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,7}", lengths[0]):
             raise ValueError("A single Content-Length is required; chunked bodies are unsupported")
@@ -288,11 +371,11 @@ class Handler(BaseHTTPRequestHandler):
         if len(raw) != size:
             raise ValueError("Incomplete request body")
 
-        def reject_constant(_):
+        def reject_constant(_: str) -> None:
             raise ValueError("Non-finite JSON numbers are unsupported")
 
-        def unique_keys(pairs):
-            result = {}
+        def unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
             for key, value in pairs:
                 if key in result:
                     raise ValueError("Duplicate JSON keys are unsupported")
@@ -304,7 +387,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return body
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         owner = self._authorized()
         if owner is None:
             return
@@ -329,7 +412,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._reply(200, job)
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         owner = self._authorized()
         if owner is None:
             return
@@ -344,7 +427,7 @@ class Handler(BaseHTTPRequestHandler):
                 # The store reads None as no key, so an explicit null is refused here rather than ignored.
                 if "idempotency_key" in body and body["idempotency_key"] is None:
                     raise ValueError("idempotency_key must be a string")
-                job = self.server.jobs.submit(body["task"], body["input"], body.get("timeout_ms", 30000),
+                job: dict[str, Any] | None = self.server.jobs.submit(body["task"], body["input"], body.get("timeout_ms", 30000),
                                               body.get("idempotency_key"), owner)
                 self._reply(202, job)
                 return
@@ -369,7 +452,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(408, "request_timeout", "Request body was not received in time")
 
 
-def _number(name, default, kind):
+def _number[T](name: str, default: str, kind: Callable[[str], T]) -> T:
     """A numeric setting from the environment; a malformed one stops the service with the variable's name."""
     try:
         return kind(os.environ.get(name, default))
@@ -377,7 +460,7 @@ def _number(name, default, kind):
         raise SystemExit(f"{name} must be {'an integer' if kind is int else 'a number'}") from None
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
@@ -392,10 +475,16 @@ def main():
         test_tasks=os.environ.get("BRIDGE_TEST_TASKS") == "1",
         max_jobs=_number("BRIDGE_WORKER_MAX_JOBS", "1000", int),
         state_dir=os.environ.get("BRIDGE_STATE_DIR") or None,
+        owner_capacity=_number("BRIDGE_OWNER_CAPACITY", "", int) if "BRIDGE_OWNER_CAPACITY" in os.environ else None,
     )
+    if settings.owner_capacity is not None and not 1 <= settings.owner_capacity <= settings.capacity:
+        raise SystemExit(f"BRIDGE_OWNER_CAPACITY must be an integer from 1 to BRIDGE_CAPACITY ({settings.capacity})")
     drain_seconds = _number("BRIDGE_DRAIN_SECONDS", "30", int)
     if not 0 <= drain_seconds <= 300:
         raise SystemExit("BRIDGE_DRAIN_SECONDS must be an integer from 0 to 300")
+    log_mode = os.environ.get("BRIDGE_LOG") or "off"
+    if log_mode not in log.MODES:
+        raise SystemExit("BRIDGE_LOG must be off or json")
     # Without its files every job needing a model would fail as task_failed, which cannot say why: a cache fetched
     # before a model was added has no directory for it.
     missing = missing_models(settings.model_dir) if settings.backend == "onnx" else []
@@ -407,13 +496,22 @@ def main():
     except sqlite3.Error:
         raise SystemExit(f"BRIDGE_STATE_DIR {settings.state_dir} must be a directory the service can write "
                          "jobs.sqlite in") from None
-    with bridge as server:
-        def stop(*_):
-            server.stop()
+    log.configure(log_mode)
+    try:
+        log.event("start", backend=settings.backend, concurrency=settings.concurrency, capacity=settings.capacity,
+                  owner_capacity=settings.capacity if settings.owner_capacity is None else settings.owner_capacity,
+                  retention_seconds=settings.retention_seconds, max_jobs=settings.max_jobs,
+                  drain_seconds=drain_seconds, tokens=len(tokens))
+        with bridge as server:
+            def stop(*_: Any) -> None:
+                server.stop()
 
-        signal.signal(signal.SIGTERM, stop)
-        signal.signal(signal.SIGINT, stop)
-        server.serve_forever(poll_interval=0.1)
+            signal.signal(signal.SIGTERM, stop)
+            signal.signal(signal.SIGINT, stop)
+            server.serve_forever(poll_interval=0.1)
+        log.event("stop", warning=bool(bridge.cancelled), cancelled=bridge.cancelled)
+    finally:
+        log.close()
 
 
 if __name__ == "__main__":

@@ -2,7 +2,9 @@
 
 A framework-independent PHP client and a small Python task service. Submit document reranking from PHP, poll progress, receive typed results, and cancel work without keeping the original HTTP request open.
 
-Includes a FrankenPHP worker-mode example, deterministic fault tests, and an optional real ONNX reranker. No hosted AI account is required. This is an **experimental prototype**, not a production job queue.
+Includes a FrankenPHP worker-mode example, deterministic fault tests, and an optional real ONNX reranker. No hosted AI account is required.
+
+Since 0.4.0 it is supported as an internal service for applications that own their host and network: one or more worker instances, each answering only the jobs it took, on a private network behind the operator's TLS and the application's own authentication, with the job table kept across a restart by `BRIDGE_STATE_DIR`. It is not for exposing the worker publicly, nor for throughput beyond the measured figures (one ONNX child on one CPU served about 3.5 jobs/s of the rerank, embed and redact mix, and an instance admits at most `BRIDGE_CAPACITY` jobs per `BRIDGE_RETENTION_SECONDS`) without more instances; [the operations guide](docs/operations.md) has the topologies and the sizing.
 
 ## What is implemented
 
@@ -13,6 +15,7 @@ Includes a FrankenPHP worker-mode example, deterministic fault tests, and an opt
 - Bounded concurrency, queue/result capacity, retention, request sizes and execution deadlines.
 - Cancellation, progress polling, crash detection and generic errors that omit internal exception text.
 - `GET /metrics` on the worker: aggregate job counts, queue depth, pool readiness and duration histograms in the Prometheus text format, behind the service token and carrying no job content; counters reset on restart ([the protocol](docs/protocol.md#metrics)).
+- Optional structured logging with `BRIDGE_LOG=json`: best effort, one JSON line on stderr per request and per finished job, plus start, drain and stop, with a fixed schema that never holds inputs, results, headers, query strings, tokens or exception text; off by default ([the protocol](docs/protocol.md#logging)).
 - A FrankenPHP example that submits work and returns a job ID immediately.
 - A stdio MCP server with one tool per task, a second client of the same protocol beside the PHP client, plus an index builder over the protocol and a `bridge_search` tool that searches what it built, returning offsets and snippets rather than vectors, a compose service that puts the pinned ONNX models behind it, and a ten-question evaluation for LLM hosts with a runner for the Claude Code CLI; see [the MCP guide](docs/mcp.md).
 - CPU inference with `cross-encoder/ms-marco-TinyBERT-L2-v2`, `sentence-transformers/all-MiniLM-L6-v2` and int8 `dslim/bert-base-NER` and `dslim/bert-base-NER-uncased` through ONNX Runtime, using pinned model files and wheel hashes.
@@ -110,7 +113,7 @@ The downloaded cache remains for reuse; it is not included in Git.
 See the [integration guide](docs/integration.md) for Composer setup, the Laravel service provider and the Symfony bundle that configure the client from `BRIDGE_URL` and `BRIDGE_TOKEN`, application job ownership and failure handling.
 The client sends through `ext-curl` by default; an application with a PSR-18 client such as Symfony HttpClient or Guzzle can pass `PhpAiBridge\Psr18Transport` instead, configured as the [integration guide](docs/integration.md#through-a-psr-18-http-client) shows.
 
-This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. The latest tagged release is `v0.3.0` ([changelog](CHANGELOG.md)): install it with `composer require cristiangirlea/php-python-ai-bridge:^0.3` once the package is on Packagist, or from a VCS repository pinned to the tag until then, as the integration guide shows. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
+This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. The latest tagged release is `v0.4.0` ([changelog](CHANGELOG.md)): install it with `composer require cristiangirlea/php-python-ai-bridge:^0.4` once the package is on Packagist, or from a VCS repository pinned to the tag until then, as the integration guide shows. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
 
 ```php
 use PhpAiBridge\Client;
@@ -131,6 +134,40 @@ echo $documents[$result->rankings[0]['index']];
 
 `submitEmbed($texts)` works the same way and `EmbedResult::fromJob($job, count($texts))` yields one unit-length vector per text; the service stores nothing, so persist vectors in an index your application owns. `submitRedact($text)` returns a job whose `RedactResult::fromJob($job, $text)` holds the masked text and the spans found, each tagged with the rule or model that found it. `wait()` returns terminal jobs, including failures; `RerankResult::fromJob()` refuses anything except a successful rerank result. Use `cancel($id)` explicitly to stop remote work. A local wait timeout does **not** cancel the job.
 
+## Two things people use it for
+
+**Scrub text before it leaves your systems.** A support ticket or a document is redacted locally,
+then the masked text goes to a hosted model. Nothing personal leaves the network, and the spans
+tell you what was hidden and by which rule or model.
+
+```php
+$job = $client->submitRedact($ticket, ['PER', 'ORG', 'LOC']);
+$result = RedactResult::fromJob($client->wait($job->id), $ticket);
+$answer = $yourLlmClient->ask($result->text);   // the masked text, never the original
+```
+
+Redaction is a pre-filter, not a compliance control: on public social-media text it hides about
+half of the named entities at the default threshold, and nearly all card numbers, IBANs, emails and
+IP addresses ([measured](docs/testing.md#measured-ner-quality-on-wnut-17-informational)).
+
+**Reorder search results by meaning.** Keep the search you have (a database, Meilisearch, Elastic),
+take its top results, and let the cross-encoder order them for the query. It is the cheapest visible
+quality change a search box can get; measure on your own data first, since on some corpora BM25 alone
+is better ([measured](docs/testing.md#measured-reranking-quality-on-arguana-informational)).
+
+```php
+$hits = $search->query($q, limit: 100);            // your existing search
+$job = $client->submitRerank($q, array_column($hits, 'text'), topK: 10);
+$top = RerankResult::fromJob($client->wait($job->id), count($hits), topK: 10);
+```
+
+## Support
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md). If you want help putting the bridge into your application, sizing it or
+reviewing a redaction setup, open an issue describing the context, or sponsor the project through the
+Sponsor button.
+
 ## Test layers
 
 ```sh
@@ -146,6 +183,11 @@ docker compose -f docker/compose.yaml run --rm --no-deps integration
 # MCP server, after acquiring its hash-pinned wheels once (network):
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
+
+# mypy --strict and ruff over the Python code, after acquiring the pinned wheels once (network);
+# py-analysis also installs the MCP server's wheels from mcp-fetcher, so it runs after that:
+docker compose -f docker/compose.yaml run --rm --no-deps py-dev-fetcher
+docker compose -f docker/compose.yaml run --rm --no-deps py-analysis
 
 # PHP syntax validation inside the container:
 docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
@@ -163,7 +205,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-analysis
 
 Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only in the test service with `BRIDGE_TEST_TASKS=1`.
 
-CI runs deterministic tests for pushes to main and for pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. Every job runs on GitHub's hosted runners (`ubuntu-latest`), because the repository is public: GitHub does not meter Actions minutes for public repositories, and a fork's pull request runs its own code on a disposable runner of GitHub's, not on a machine of the maintainer's; see [the runner notes](docs/testing.md#ci-runners) and [security](docs/security.md). The stable `deterministic` check succeeds only if every PHP matrix job and the MCP server job, which runs the offline MCP suite, the consumer install and PHPStan, succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
+CI runs deterministic tests for pushes to main and for pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. Every job runs on GitHub's hosted runners (`ubuntu-latest`), because the repository is public: GitHub does not meter Actions minutes for public repositories, and a fork's pull request runs its own code on a disposable runner of GitHub's, not on a machine of the maintainer's; see [the runner notes](docs/testing.md#ci-runners) and [security](docs/security.md). The stable `deterministic` check succeeds only if every PHP matrix job and the MCP server job, which runs the offline MCP suite, mypy and ruff, the consumer install and PHPStan, succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
 
 ## Important limits
 
@@ -176,7 +218,7 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 - **Cancellation cannot undo effects:** registered future tasks must manage their own external side effects. A transport failure during POST has an uncertain submission outcome; the client never retries POST automatically.
 - **No token streaming:** progress is polled by job ID. The MCP server forwards that progress to a host that asks for it; there is no SSE, framework plugin or chat SDK.
 
-See [the integration guide](docs/integration.md), [test evidence and limits](docs/testing.md), [the protocol](docs/protocol.md), [security boundaries](docs/security.md), and [contributing](CONTRIBUTING.md).
+See [the integration guide](docs/integration.md), [test evidence and limits](docs/testing.md), [the protocol](docs/protocol.md), [security boundaries](docs/security.md), [operations](docs/operations.md), and [contributing](CONTRIBUTING.md).
 
 ## License
 

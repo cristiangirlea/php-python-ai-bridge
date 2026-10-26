@@ -60,7 +60,7 @@ class ChunkTests(unittest.TestCase):
         text = "\u3000".join(f"word{i}" for i in range(400))
         spans = index.chunk_text(text, 1000, 200)
         self.assertGreater(len(spans), 2)
-        for start, end in spans[:-1]:
+        for _start, end in spans[:-1]:
             self.assertTrue(text[end].isspace(), "an ideographic space is a word boundary")
 
     def test_parameters_are_bounded(self):
@@ -116,7 +116,9 @@ class FormatTests(unittest.TestCase):
         sidecar.write_text(json.dumps(meta), encoding="utf-8")
 
     def test_every_corruption_is_refused(self):
-        vectors = lambda sidecar: sidecar.parent / index.VECTORS
+        def vectors(sidecar):
+            return sidecar.parent / index.VECTORS
+
         self.corrupt(lambda s: self.edit(s, format="bridge-index/2"))
         self.corrupt(lambda s: self.edit(s, model=""))
         self.corrupt(lambda s: self.edit(s, dimensions=4))

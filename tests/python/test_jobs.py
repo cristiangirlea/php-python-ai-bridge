@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import io
 import json
 import math
 import multiprocessing
@@ -16,11 +17,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ai_bridge import jobs, tasks
+from ai_bridge import jobs, log, tasks
 from ai_bridge import server as service
-from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
+from ai_bridge.jobs import TERMINAL, CapacityError, JobStore, Settings
 from ai_bridge.server import BridgeServer
 from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, _entities, _merge, execute, validate
+from test_log import parse as parse_log
 
 
 class FailingDatabase:
@@ -686,10 +688,10 @@ class ModelNameTests(unittest.TestCase):
         from ai_bridge.tasks import MODEL_NAMES
 
         self.assertEqual(set(MODEL_NAMES), {"lexical", "onnx"})
-        for backend, tasks in MODEL_NAMES.items():
+        for backend, names in MODEL_NAMES.items():
             with self.subTest(backend=backend):
-                self.assertEqual(set(tasks), {"rerank", "embed", "redact"})
-                self.assertTrue(all(isinstance(name, str) and name for name in tasks.values()))
+                self.assertEqual(set(names), {"rerank", "embed", "redact"})
+                self.assertTrue(all(isinstance(name, str) and name for name in names.values()))
 
     def test_lexical_results_report_the_names_in_the_table(self):
         from ai_bridge.tasks import MODEL_NAMES
@@ -716,7 +718,7 @@ class ProgressTests(unittest.TestCase):
         for total in [1, 3, 64, 65, 127, 128, 512]:
             events = []
             execute("rerank", {"query": "x", "documents": ["x"] * total}, "lexical", "",
-                    lambda completed, _: events.append(completed))
+                    lambda completed, _: events.append(completed))  # noqa: B023  (called only within this iteration)
             with self.subTest(total=total):
                 self.assertLessEqual(len(events), 66)
                 self.assertEqual(events[0], 0)
@@ -779,7 +781,10 @@ class JobsTests(unittest.TestCase):
             self.assertAlmostEqual(math.sqrt(sum(x * x for x in vector)), 1.0, places=4)
         self.assertEqual(vectors[0], vectors[3])
         self.assertEqual(vectors[0], vectors[1])
-        dot = lambda a, b: sum(x * y for x, y in zip(a, b))
+
+        def dot(a, b):
+            return sum(x * y for x, y in zip(a, b))
+
         self.assertGreater(dot(vectors[0], vectors[1]), dot(vectors[0], vectors[2]))
         self.assertEqual(done["progress"], {"completed": 4, "total": 4})
 
@@ -1415,7 +1420,7 @@ class WarmPoolTests(unittest.TestCase):
 
                     def serve(bridge, **_):
                         self.store = bridge.jobs
-                        reports.append(self.inspect(value))
+                        reports.append(self.inspect(value))  # noqa: B023  (called only within this iteration)
 
                     with patch.dict(os.environ, {"BRIDGE_TEST_TASKS": "1", "BRIDGE_CONCURRENCY": "1", **environment}), \
                             patch.object(sys, "argv", ["ai_bridge.server", "--port", "0"]), \
@@ -1701,6 +1706,158 @@ class OwnerTests(unittest.TestCase):
                              first["id"])
         finally:
             store.close()
+
+    def test_an_owner_at_its_cap_is_refused_while_the_other_still_submits(self):
+        store = JobStore(self.settings(capacity=6, owner_capacity=2, retention_seconds=300))
+        try:
+            # The other owner's retained job would give about 300 s; the capped owner holds only unfinished jobs.
+            self.wait(store, store.submit("test.delay", {"seconds": 0}, owner="other")["id"], "other")
+            for _ in range(2):
+                store.submit("test.delay", {"seconds": 5}, owner="app")
+            for _ in range(2):
+                with self.assertRaises(CapacityError) as caught:
+                    store.submit("test.delay", {"seconds": 0}, owner="app")
+                self.assertEqual(caught.exception.retry_after, 1)
+            store.submit("test.delay", {"seconds": 5}, owner="other")
+            self.assertEqual(store.snapshot()["rejected"], {("app", "capacity"): 2, ("other", "capacity"): 0})
+            with self.assertRaises(CapacityError):
+                store.submit("test.delay", {"seconds": 0}, owner="other")
+            self.assertEqual(store.snapshot()["rejected"], {("app", "capacity"): 2, ("other", "capacity"): 1})
+        finally:
+            store.close()
+
+    def test_cancelled_jobs_hold_the_owner_s_cap_until_they_expire(self):
+        store = JobStore(self.settings(capacity=8, owner_capacity=2, retention_seconds=300))
+        try:
+            running = store.submit("test.delay", {"seconds": 5}, owner="app")
+            deadline = time.monotonic() + 5
+            while store.get(running["id"], "app")["status"] != "running":
+                self.assertLess(time.monotonic(), deadline, "the job never started")
+                time.sleep(0.01)
+            queued = store.submit("test.delay", {"seconds": 5}, owner="app")
+            self.assertEqual(store.get(queued["id"], "app")["status"], "queued")
+            with self.assertRaises(CapacityError):
+                store.submit("test.delay", {"seconds": 0}, owner="app")
+            for job in (running, queued):
+                self.assertEqual(store.cancel(job["id"], "app")["status"], "cancelled")
+            # A cancelled job is retained like any finished one, so it still counts.
+            with self.assertRaises(CapacityError):
+                store.submit("test.delay", {"seconds": 0}, owner="app")
+            store.submit("test.delay", {"seconds": 0}, owner="other")
+            with store._lock:
+                store._jobs[running["id"]]["_finished"] = time.monotonic() - 300
+            store.submit("test.delay", {"seconds": 0}, owner="app")
+            with self.assertRaises(CapacityError):
+                store.submit("test.delay", {"seconds": 0}, owner="app")
+            self.assertIsNone(store.get(running["id"], "app"))
+            self.assertEqual(store.get(queued["id"], "app")["status"], "cancelled")
+        finally:
+            store.close()
+
+    def test_the_cap_s_retry_after_is_the_owner_s_own_earliest_expiry(self):
+        store = JobStore(self.settings(capacity=8, owner_capacity=2, retention_seconds=5))
+        try:
+            self.wait(store, store.submit("test.delay", {"seconds": 0}, owner="other")["id"], "other")
+            time.sleep(2)
+            for _ in range(2):
+                self.wait(store, store.submit("test.delay", {"seconds": 0}, owner="app")["id"], "app")
+            with self.assertRaises(CapacityError) as caught:
+                store.submit("test.delay", {"seconds": 0}, owner="app")
+            # The other owner's job leaves in about 3 s, which would free nothing for this one.
+            self.assertIs(type(caught.exception.retry_after), int)
+            self.assertIn(caught.exception.retry_after, (4, 5))
+        finally:
+            store.close()
+
+    def test_a_repeated_key_is_answered_at_the_owner_s_cap(self):
+        store = JobStore(self.settings(capacity=8, owner_capacity=2))
+        try:
+            keyed = store.submit("test.delay", {"seconds": 5}, idempotency_key="k", owner="app")
+            store.submit("test.delay", {"seconds": 5}, owner="app")
+            self.assertEqual(store.submit("test.delay", {"seconds": 0}, idempotency_key="k", owner="app")["id"],
+                             keyed["id"])
+            with self.assertRaises(CapacityError):
+                store.submit("test.delay", {"seconds": 0}, idempotency_key="new", owner="app")
+            self.assertEqual(store.snapshot()["rejected"]["app", "capacity"], 1)
+        finally:
+            store.close()
+
+    def test_the_total_capacity_holds_when_the_caps_add_up_to_more(self):
+        store = JobStore(self.settings(capacity=3, owner_capacity=2))
+        try:
+            for owner in ("app", "app", "other"):
+                store.submit("test.delay", {"seconds": 5}, owner=owner)
+            with self.assertRaises(CapacityError) as caught:
+                store.submit("test.delay", {"seconds": 0}, owner="other")
+            self.assertEqual(caught.exception.retry_after, 1)
+        finally:
+            store.close()
+
+    def test_a_full_store_answers_with_the_limit_that_applies_to_the_owner(self):
+        store = JobStore(self.settings(capacity=3, owner_capacity=2, retention_seconds=300))
+        try:
+            ages = {}
+            for owner, age in (("app", 20), ("app", 10), ("other", 250)):
+                ages[self.wait(store, store.submit("test.delay", {"seconds": 0}, owner=owner)["id"], owner)["id"]] = age
+            # Stamped finish times: the other owner's job leaves in about 50 s, the capped owner's first in about 280 s.
+            with store._lock:
+                now = time.monotonic()
+                for job_id, age in ages.items():
+                    store._jobs[job_id]["_finished"] = now - age
+            with self.assertRaises(CapacityError) as below:
+                store.submit("test.delay", {"seconds": 0}, owner="other")
+            self.assertIn(below.exception.retry_after, (49, 50))
+            with self.assertRaises(CapacityError) as at_cap:
+                store.submit("test.delay", {"seconds": 0}, owner="app")
+            self.assertIn(at_cap.exception.retry_after, (279, 280))
+        finally:
+            store.close()
+
+    def test_restored_jobs_count_toward_the_owner_s_cap_until_they_expire(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            first = JobStore(self.settings(owner_capacity=3, retention_seconds=300, state_dir=state_dir))
+            try:
+                kept = [self.wait(first, first.submit("test.delay", {"seconds": 0}, idempotency_key=key,
+                                                      owner="app")["id"], "app") for key in ("a", "b")]
+                unfinished = first.submit("test.delay", {"seconds": 5}, owner="app")
+            finally:
+                first.close()
+            reopened = JobStore(self.settings(owner_capacity=3, retention_seconds=300, state_dir=state_dir))
+            try:
+                self.assertEqual(reopened.get(unfinished["id"], "app")["error"]["code"], "service_restarted")
+                with self.assertRaises(CapacityError):
+                    reopened.submit("test.delay", {"seconds": 0}, owner="app")
+                reopened.submit("test.delay", {"seconds": 0}, owner="other")
+                repeat = reopened.submit("test.delay", {"seconds": 0}, idempotency_key="b", owner="app")
+                self.assertEqual(repeat["id"], kept[1]["id"])
+                with reopened._lock:
+                    reopened._jobs[kept[0]["id"]]["_finished"] = time.monotonic() - 300
+                again = reopened.submit("test.delay", {"seconds": 0}, idempotency_key="a", owner="app")
+                self.assertNotEqual(again["id"], kept[0]["id"])
+                with self.assertRaises(CapacityError):
+                    reopened.submit("test.delay", {"seconds": 0}, owner="app")
+            finally:
+                reopened.close()
+
+    def test_without_a_cap_one_owner_may_take_the_whole_capacity(self):
+        self.assertIsNone(Settings().owner_capacity)
+        store = JobStore(self.settings(capacity=2))
+        try:
+            for _ in range(2):
+                store.submit("test.delay", {"seconds": 5}, owner="app")
+            for owner in ("app", "other"):
+                with self.subTest(owner=owner), self.assertRaises(CapacityError):
+                    store.submit("test.delay", {"seconds": 0}, owner=owner)
+        finally:
+            store.close()
+
+    def test_an_owner_cap_outside_1_to_the_capacity_is_refused(self):
+        for value in (0, -1, 5, True, 1.5, "1"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "invalid worker limits"):
+                JobStore(Settings(capacity=4, owner_capacity=value))
+        for value in (1, 4):
+            with self.subTest(value=value):
+                JobStore(Settings(concurrency=1, capacity=4, owner_capacity=value)).close()
 
     def test_an_unknown_owner_or_owner_list_is_refused(self):
         store = JobStore(self.settings())
@@ -2193,6 +2350,106 @@ class WarmUpTests(unittest.TestCase):
                     execute(task, payload, "onnx", "/m", lambda *_: None)
         self.assertEqual(sorted(looked_up), sorted((Path("/m") / name, length, stride)
                                                    for name, length, stride in jobs.WARM_UP["onnx"]))
+
+
+class JobLogTests(unittest.TestCase):
+    """A job line when a job reaches a terminal status: its task, owner and status, and where its time went."""
+
+    def setUp(self):
+        self.stream = io.StringIO()
+        log.configure("json", self.stream)
+        self.addCleanup(log.close)
+        self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+        self.addCleanup(self.store.close)
+
+    def wait(self, job_id, states=TERMINAL, timeout=5):
+        deadline = time.monotonic() + timeout
+        while self.store.get(job_id)["status"] not in states:
+            self.assertLess(time.monotonic(), deadline, f"job did not reach {states}")
+            time.sleep(0.01)
+
+    def lines(self):
+        log.close()
+        self.text = self.stream.getvalue()
+        parsed = parse_log(self.text)
+        # Exactly one line per finished job: a second terminal line would vanish in the dict below.
+        ids = [line["job_id"] for line in parsed]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        return {line["job_id"]: line for line in parsed}
+
+    def test_the_timings_add_up_to_the_job_s_life(self):
+        started = time.monotonic()
+        job = self.store.submit("test.delay", {"seconds": 0.3, "value": "sentinel-input"})
+        self.wait(job["id"])
+        elapsed_ms = (time.monotonic() - started) * 1000
+        line = self.lines()[job["id"]]
+        self.assertEqual((line["task"], line["owner"], line["job_status"], line["level"]),
+                         ("test.delay", "default", "succeeded", "info"))
+        self.assertGreaterEqual(line["queue_ms"], 0)
+        # The parent sees the start and the result on its 10 ms poll of the child, so either may read a little late.
+        self.assertGreaterEqual(line["run_ms"], 270)
+        self.assertLessEqual(line["queue_ms"] + line["run_ms"], elapsed_ms)
+        self.assertNotIn("sentinel-input", self.text)
+
+    def test_a_job_that_never_started_has_no_queue_or_run_time(self):
+        running = self.store.submit("test.delay", {"seconds": 2})
+        self.wait(running["id"], {"running"})
+        queued = self.store.submit("test.delay", {"seconds": 0})
+        self.store.cancel(queued["id"])
+        self.store.cancel(running["id"])
+        lines = self.lines()
+        self.assertEqual((lines[queued["id"]]["job_status"], lines[queued["id"]]["queue_ms"],
+                          lines[queued["id"]]["run_ms"]), ("cancelled", None, None))
+        self.assertEqual(lines[running["id"]]["job_status"], "cancelled")
+        self.assertIsNotNone(lines[running["id"]]["run_ms"])
+
+    def test_failures_and_timeouts_are_warnings(self):
+        # A warm child first, so the 300 ms deadline is spent running rather than waiting for one to start.
+        deadline = time.monotonic() + 10
+        while self.store.readiness() is not None:
+            self.assertLess(time.monotonic(), deadline, "no child became ready")
+            time.sleep(0.01)
+        late = self.store.submit("test.delay", {"seconds": 5}, timeout_ms=300)
+        self.wait(late["id"])
+        failing = self.store.submit("test.error", {})
+        self.wait(failing["id"])
+        crashing = self.store.submit("test.crash", {})
+        self.wait(crashing["id"])
+        lines = self.lines()
+        self.assertEqual([(lines[job["id"]]["job_status"], lines[job["id"]]["level"]) for job in (failing, crashing, late)],
+                         [("failed", "warning")] * 2 + [("timed_out", "warning")])
+        # The deadline counts from submission, so the queue and the run share its 300 ms.
+        self.assertGreaterEqual(lines[late["id"]]["queue_ms"] + lines[late["id"]]["run_ms"], 290)
+        for value in ("internal exception", "task_failed", "worker_crashed", "deadline_exceeded"):
+            self.assertNotIn(value, self.text)
+
+    def test_a_drain_and_a_close_log_the_jobs_they_end_and_close_counts_them(self):
+        running = self.store.submit("test.delay", {"seconds": 5})
+        self.wait(running["id"], {"running"})
+        queued = self.store.submit("test.delay", {"seconds": 0})
+        self.store.drain()
+        self.assertEqual(self.store.close(), 1)
+        lines = self.lines()
+        self.assertEqual((lines[queued["id"]]["job_status"], lines[queued["id"]]["queue_ms"]), ("failed", None))
+        self.assertEqual(lines[running["id"]]["job_status"], "cancelled")
+        self.assertNotIn("service_restarted", self.text)
+
+    def test_a_job_read_back_from_the_table_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            first = JobStore(Settings(test_tasks=True, state_dir=state_dir))
+            try:
+                job = first.submit("test.delay", {"seconds": 0})
+                deadline = time.monotonic() + 5
+                while first.get(job["id"])["status"] not in TERMINAL:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+            finally:
+                first.close()
+            log.close()
+            self.stream = io.StringIO()
+            log.configure("json", self.stream)
+            JobStore(Settings(test_tasks=True, state_dir=state_dir)).close()
+        self.assertEqual(self.lines(), {})
 
 
 if __name__ == "__main__":

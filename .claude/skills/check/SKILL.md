@@ -20,9 +20,11 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml --profile test down
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile php-frameworks --profile tls config
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile py-dev --profile php-frameworks --profile tls config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
+docker compose -f docker/compose.yaml run --rm --no-deps py-dev-fetcher
+docker compose -f docker/compose.yaml run --rm --no-deps py-analysis
 docker compose -f docker/compose.yaml run --rm --no-deps composer-install
 docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps php-frameworks-fetcher
@@ -33,7 +35,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps laravel-tests
 docker compose -f docker/compose.yaml run --rm --no-deps symfony-tests
 docker compose -f docker/compose.yaml up -d tls-proxy
 docker compose -f docker/compose.yaml run --rm --no-deps tls-check
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile php-frameworks --profile tls down
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile py-dev --profile php-frameworks --profile tls down
 ```
 
 The `composer-install` step is the consumer-install check: `composer validate --strict` on the library, then a
@@ -41,6 +43,11 @@ throwaway consumer project in tmpfs installs its `git archive` zip from an `arti
 repository in a git worktree whose git directory is outside the mount) with Packagist disabled, checks what shipped in
 `vendor/`, and autoloads `PhpAiBridge\Client`; the archive is built from the committed `HEAD`, so an uncommitted change
 is not what it tests, and it needs no network and no cache.
+
+`py-dev-fetcher` downloads the mypy and ruff wheels `requirements-dev.lock` pins into `.cache/wheels`, with network,
+and `py-analysis` installs them and the MCP server's wheels from `mcp-fetcher` into a tmpfs and runs, offline,
+`ruff check` over `worker`, `mcp_server`, `scripts` and `tests` and `mypy --strict` over `worker` and `mcp_server`,
+both configured in `pyproject.toml`. Fix a finding with annotations or a small guard, never a behaviour change.
 
 `php-fetcher` installs the PHPStan and the PSR-7/17/18 interfaces that `composer.lock` pins into
 `.cache/php-vendor`, with network, and `php-analysis` runs PHPStan offline at level max over `src`, `examples`

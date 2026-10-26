@@ -2,8 +2,10 @@
 
 A typed PHP client for a small Python service that runs bounded AI tasks (rerank, embed, redact) on a
 pool of warm child processes, one job per child at a time, with a FrankenPHP worker-mode example and a stdio MCP server as a second client of the
-same HTTP protocol. Experimental: jobs live in memory, nothing is durable, no production claim is made.
-README has the overview; `docs/protocol.md`, `docs/integration.md`, `docs/mcp.md`, `docs/security.md`
+same HTTP protocol. Since 0.4.0 it is supported as an internal service for applications that own their host and network
+(one or more instances, each answering its own jobs, behind the operator's TLS and the application's own authentication;
+the job table survives a restart with `BRIDGE_STATE_DIR`), not for public exposure; see `docs/operations.md`.
+README has the overview; `docs/protocol.md`, `docs/integration.md`, `docs/mcp.md`, `docs/operations.md`, `docs/security.md`
 and `docs/testing.md` are the guides. Everything builds, tests and downloads inside `docker/compose.yaml`.
 
 ## Layout
@@ -37,9 +39,11 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml --profile test down
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile php-frameworks --profile tls config
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile py-dev --profile php-frameworks --profile tls config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher   # network once: wheels into .cache/
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
+docker compose -f docker/compose.yaml run --rm --no-deps py-dev-fetcher   # network once: mypy and ruff into .cache/
+docker compose -f docker/compose.yaml run --rm --no-deps py-analysis   # offline mypy --strict and ruff check
 docker compose -f docker/compose.yaml run --rm --no-deps composer-install   # offline consumer install of the library
 docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher   # network once: PHPStan and the PSR interfaces into .cache/
 docker compose -f docker/compose.yaml run --rm --no-deps php-frameworks-fetcher   # network once: Laravel and Symfony into .cache/
@@ -50,7 +54,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps laravel-tests   # offli
 docker compose -f docker/compose.yaml run --rm --no-deps symfony-tests   # offline: the bundle in a bare Symfony kernel
 docker compose -f docker/compose.yaml up -d tls-proxy
 docker compose -f docker/compose.yaml run --rm --no-deps tls-check   # the client over HTTPS through Caddy, example CA only
-docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile php-frameworks --profile tls down
+docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile py-dev --profile php-frameworks --profile tls down
 ```
 
 CI runs the PHP steps on each of PHP 8.2, 8.3, 8.4 and 8.5 with `BRIDGE_PHP_IMAGE` set to the matrix's

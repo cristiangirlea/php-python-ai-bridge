@@ -6,16 +6,29 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Changed
+
+- The MCP server's dependencies moved to `mcp` 2.3.0 (`mcp-types` 2.3.0, `cryptography` 50.0.2, `httpcore2` and `httpx2` 2.16.0, `pycparser` 3.12, `pydantic` 2.14.1, `pydantic-core` 2.50.1, `pyjwt` 2.15.1, `rpds-py` 2026.9.1, `sse-starlette` 3.6.0, `starlette` 1.10.0, `truststore` 0.10.5, `uvicorn` 0.54.0); `requirements-mcp.lock` now also holds the hashes of the Linux aarch64 wheels.
+
+## [0.4.0] - 2026-10-26
+
 ### Added
 
 - A graceful drain: on SIGTERM or SIGINT the worker answers `POST /v1/jobs` with 503 `draining` and `Retry-After: 1`, fails queued jobs as `service_restarted` at once, keeps answering `GET`, and lets running jobs finish for up to `BRIDGE_DRAIN_SECONDS` (integer 0 to 300, default 30) before it stops; a second signal stops it at once.
 - `GET /readyz`, behind any configured token like `/healthz`: 200 when the worker is not draining and a child is idle with its backend's models loaded, otherwise 503 with a reason (`draining`, `no_idle_child`, `models_loading`). A child now loads its backend's models as it starts instead of on its first job. Compose's MCP workers report healthy only once ready.
+- Optional structured logging: `BRIDGE_LOG=json` writes one JSON object per line on stderr, best effort (a full queue or the exit can drop lines), a `request` line after each reply (method, route template, status, duration, the token's name), a `job` line when a job ends (job ID, task, owner, terminal status, queue and run times), and `start`, `drain` and `stop` lines. A fixed schema checked value by value keeps inputs, results, headers, query strings, tokens and exception text out; a stderr that blocks or fails never holds a request. `off`, the default, writes nothing, and any other value stops the worker at start naming `BRIDGE_LOG`.
+- `BRIDGE_OWNER_CAPACITY`, a cap on one token's queued, running and retained jobs (1 to the capacity; unset, the whole capacity, so nothing changes without it). A submission over it is the same 429 `capacity_exceeded` as a full worker, with a `Retry-After` from that token's own first expiry; a repeated idempotency key is still answered, and the total capacity still applies. The `start` log line carries `owner_capacity`.
+- Static analysis of the Python code in the required `deterministic` check: `py-analysis` runs `mypy --strict` over the worker and the MCP server and `ruff check` over them, the scripts and the tests, offline, with mypy 2.4.0 and ruff 0.17.2 hash-pinned in `requirements-dev.lock` and configured in `pyproject.toml`; neither is installed at runtime or shipped in the archive.
 - A full connection budget (32) is answered 503 `service_busy` with `Retry-After: 1` and `Connection: close` instead of a closed socket, and a request line over 8 KiB or a header block over 16 KiB is refused with 431 `headers_too_large`.
+- `docs/operations.md`, the operator's guide: deployment topologies, sizing from the measured figures, the state directory, token rotation, upgrades with a drain, what to graph and alert on, failure modes, and the versioning and support policy.
 
 ### Changed
 
 - Locks moved past published advisories: `certifi` 2026.10.19 and `filelock` 4.2.1 in `requirements-model.lock`, `opentelemetry-api` 1.45.1 and `pyjwt` 2.15.0 in `requirements-mcp.lock`.
-- The MCP server's dependencies moved to `mcp` 2.3.0 (`mcp-types` 2.3.0, `cryptography` 50.0.2, `httpcore2` and `httpx2` 2.16.0, `pycparser` 3.12, `pydantic` 2.14.1, `pydantic-core` 2.50.1, `pyjwt` 2.15.1, `rpds-py` 2026.9.1, `sse-starlette` 3.6.0, `starlette` 1.10.0, `truststore` 0.10.5, `uvicorn` 0.54.0); `requirements-mcp.lock` now also holds the hashes of the Linux aarch64 wheels.
+
+### Fixed
+
+- The JSON log writes a `request` line only for a reply that was written in full: a peer gone mid-reply, or a busy 503 that could not be sent, no longer logs a status it never received. The `drain` line is no longer lost when a second signal stops the worker while the drain thread is held; it is written once, before `stop`. With `BRIDGE_LOG=off` requests, jobs and the drain no longer time or build lines that are never written.
 
 ## [0.3.0] - 2026-10-25
 
@@ -65,7 +78,8 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 
-[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cristiangirlea/php-python-ai-bridge/releases/tag/v0.1.0

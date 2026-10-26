@@ -10,6 +10,8 @@ from urllib.request import Request, urlopen
 BASE = os.environ.get("FRANKENPHP_URL", "http://frankenphp:8080")
 WORKER = os.environ.get("WORKER_URL", "http://worker:8090")
 TOKENS_WORKER = os.environ.get("TOKENS_WORKER_URL", "http://tokens-worker:8090")
+# BRIDGE_OWNER_CAPACITY and BRIDGE_CAPACITY of tokens-worker in docker/compose.yaml.
+OWNER_CAPACITY, CAPACITY = 8, 12
 
 
 def request(path, body=None):
@@ -81,6 +83,55 @@ def owners():
         assert moved[name] - counted[name] == submitted, (name, counted[name], moved[name])
     for token in (app, other):
         assert token not in text
+
+
+def submit(token, body):
+    """Status, Retry-After and decoded body of one submission to the two-token worker."""
+    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    try:
+        with urlopen(Request(TOKENS_WORKER + "/v1/jobs", data=json.dumps(body).encode(), headers=headers),
+                     timeout=5) as response:
+            return response.status, response.headers["Retry-After"], json.load(response)
+    except HTTPError as error:
+        return error.code, error.headers["Retry-After"], json.load(error)
+
+
+def held(samples, owner):
+    """Jobs an owner has submitted, all still held: none is older than the worker's 300 s retention."""
+    prefix = f'bridge_jobs_submitted_total{{owner="{owner}",'
+    return sum(value for series, value in samples.items() if series.startswith(prefix))
+
+
+def owner_capacity():
+    """One token fills its cap and is refused while the other still submits, until the worker as a whole is full."""
+    app, other = os.environ["BRIDGE_APP_TOKEN"], os.environ["BRIDGE_OTHER_TOKEN"]
+    rejected = 'bridge_submissions_rejected_total{{owner="{}",reason="capacity"}}'
+    _, counted = metrics(app, TOKENS_WORKER)
+    rerank = {"task": "rerank", "input": {"query": "needle", "documents": ["needle"]}}
+    keyed = dict(rerank, idempotency_key="python-cap-" + os.urandom(8).hex())
+    first = None
+    for _ in range(OWNER_CAPACITY + 1):
+        status, retry_after, body = submit(app, rerank if first else keyed)
+        if status != 202:
+            break
+        first = first or body
+    assert first is not None and (status, body["error"]["code"]) == (429, "capacity_exceeded"), status
+    assert 1 <= int(retry_after) <= 300, retry_after
+    status, _, again = submit(app, keyed)
+    assert (status, again["id"]) == (202, first["id"]), "a repeated key is answered at the cap"
+    accepted = 0
+    for _ in range(CAPACITY + 1):
+        status, retry_after, body = submit(other, rerank)
+        if status != 202:
+            break
+        accepted += 1
+    assert accepted >= 1 and status == 429, (accepted, status)
+    _, moved = metrics(other, TOKENS_WORKER)
+    assert held(moved, "app") == OWNER_CAPACITY, held(moved, "app")
+    assert held(moved, "app") + held(moved, "other") == CAPACITY and held(moved, "other") < OWNER_CAPACITY
+    for owner in ("app", "other"):
+        name = rejected.format(owner)
+        assert moved[name] - counted[name] == 1, (name, counted[name], moved[name])
 
 
 def wait_ready():
@@ -215,7 +266,8 @@ def main():
     for document in ["unique0 token0", "needle token", "x@y.io", "4111 1111 1111 1111", "red apple", "café"]:
         assert document not in text, document
     owners()
-    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; redaction; invalid and missing-job cases; worker metrics; jobs scoped to their token")
+    owner_capacity()
+    print("PASS: 12 concurrent isolated jobs through a reused FrankenPHP worker; top_k narrowing; embedding; redaction; invalid and missing-job cases; worker metrics; jobs scoped to their token; a per-token capacity cap")
 
 
 if __name__ == "__main__":

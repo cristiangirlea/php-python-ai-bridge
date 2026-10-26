@@ -6,8 +6,10 @@ import math
 import os
 import re
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
-
+from types import FrameType
+from typing import Any
 
 MAX_DOCUMENTS = 512
 # Query-document pairs per forward pass. An estimate, not a measurement: at 512 tokens TinyBERT-L2 keeps
@@ -42,6 +44,10 @@ MODEL_DIRECTORIES = ("rerank", "embed", "redact", "redact-uncased")
 
 # Present only with BRIDGE_TEST_TASKS=1, for the fault tests.
 TEST_TASKS = ("test.delay", "test.crash", "test.error", "test.inspect")
+# Called with (completed, total) as a task advances.
+Progress = Callable[[int, int], None]
+# A found span of text, as (start, end) offsets.
+Finder = Callable[[str], Iterator[tuple[int, int]]]
 
 
 class InvalidInput(ValueError):
@@ -66,7 +72,7 @@ def _strings(values: object, plural: str, singular: str, limit: int, extra: int 
         raise InvalidInput(f"{plural} must total at most {MAX_TOTAL_CHARACTERS} characters")
 
 
-def validate(task: str, payload: object, test_tasks: bool = False) -> dict:
+def validate(task: str, payload: object, test_tasks: bool = False) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise InvalidInput("input must be an object")
     if test_tasks and task in TEST_TASKS:
@@ -111,7 +117,7 @@ def validate(task: str, payload: object, test_tasks: bool = False) -> dict:
     return payload
 
 
-def execute(task: str, payload: dict, backend: str, model_dir: str, progress) -> dict:
+def execute(task: str, payload: dict[str, Any], backend: str, model_dir: str, progress: Progress) -> dict[str, Any]:
     if task == "test.crash":
         os._exit(17)
     if task == "test.error":
@@ -134,7 +140,7 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
     # cannot flood the coordinator pipe.
     step = -(-total // 64)
 
-    def report(completed):
+    def report(completed: int) -> None:
         if completed % step == 0 or completed == total:
             progress(completed, total)
 
@@ -161,7 +167,7 @@ def execute(task: str, payload: dict, backend: str, model_dir: str, progress) ->
     return {"rankings": rankings[:payload.get("top_k", total)], "model": model}
 
 
-def _reachable_holding(needle: str, roots: list) -> int:
+def _reachable_holding(needle: str, roots: list[object]) -> int:
     """How many distinct strings reachable from the roots contain the needle, following every reference the
     collector knows of, the needle object itself excepted. The collector does not track a dict or tuple of plain
     strings, so such a container is reached through whatever holds it rather than listed on its own; the walk
@@ -183,7 +189,7 @@ def _reachable_holding(needle: str, roots: list) -> int:
     return held
 
 
-def _inspect(parts: list) -> dict:
+def _inspect(parts: list[str]) -> dict[str, Any]:
     """What a test may ask a worker child about itself: its process id, whether a service token variable or the text
     joined from parts reached its environment or its initial environment block (which unsetenv leaves in place), and
     how many strings reachable from any live object or any frame's locals still hold that text, which no earlier job
@@ -199,7 +205,9 @@ def _inspect(parts: list) -> dict:
         # cached on the frame and brought up to date only when it is read, so a read here drops what an earlier
         # inspection left in it before the collector's objects are listed. The own frame is known by id, not
         # held: a frame object still referenced when its function returns takes over the locals.
-        roots, own = [], id(sys._getframe())
+        roots: list[object] = []
+        own = id(sys._getframe())
+        frame: FrameType | None
         for frame in sys._current_frames().values():
             while frame is not None:
                 if id(frame) != own:
@@ -208,6 +216,8 @@ def _inspect(parts: list) -> dict:
         gc.collect()
         roots.extend(gc.get_objects())
         held = _reachable_holding(needle, roots)
+    in_block: bool | None
+    needle_in_block: bool | None
     try:
         with open("/proc/self/environ", "rb") as environ:
             block = environ.read().split(b"\0")
@@ -221,7 +231,7 @@ def _inspect(parts: list) -> dict:
             "needle_in_environment_block": needle_in_block}
 
 
-def _tensors(encodings: list) -> dict:
+def _tensors(encodings: list[Any]) -> dict[str, Any]:
     """The model inputs for a list of encodings of equal length, as int64 arrays. The only numpy touchpoint."""
     import numpy as np
 
@@ -232,8 +242,8 @@ def _tensors(encodings: list) -> dict:
     }
 
 
-def _score_pairs(tokenizer, session, names: set, query: str, documents: list, report,
-                 batch_size: int = RERANK_BATCH_SIZE) -> list:
+def _score_pairs(tokenizer: Any, session: Any, names: set[str], query: str, documents: list[str],
+                 report: Callable[[int], None], batch_size: int = RERANK_BATCH_SIZE) -> list[float]:
     """One cross-encoder forward pass per batch of (query, document) pairs, scores in document order.
 
     The tokenizer pads each batch to its own longest pair and the attention mask hides the padding, so a
@@ -241,7 +251,7 @@ def _score_pairs(tokenizer, session, names: set, query: str, documents: list, re
     """
     if batch_size < 1:
         raise ValueError("batch size must be positive")
-    scores = []
+    scores: list[float] = []
     for start in range(0, len(documents), batch_size):
         batch = documents[start:start + batch_size]
         inputs = _tensors(tokenizer.encode_batch([(query, document) for document in batch]))
@@ -257,17 +267,17 @@ def _score_pairs(tokenizer, session, names: set, query: str, documents: list, re
 
 # Loaded tokenizers and sessions by model directory and tokenizer settings. A worker child loads each model it needs
 # once, on first use, and keeps it for its next jobs; the coordinator never runs a task, so it holds none.
-_LOADED = {}
+_LOADED: dict[tuple[str, int, int], tuple[Any, Any, set[str]]] = {}
 
 
-def _onnx(directory: Path, max_length: int, stride: int = 0):
+def _onnx(directory: Path, max_length: int, stride: int = 0) -> tuple[Any, Any, set[str]]:
     key = (str(directory), max_length, stride)
     if key not in _LOADED:
         _LOADED[key] = _load_onnx(directory, max_length, stride)
     return _LOADED[key]
 
 
-def _load_onnx(directory: Path, max_length: int, stride: int):
+def _load_onnx(directory: Path, max_length: int, stride: int) -> tuple[Any, Any, set[str]]:
     # Optional dependencies are installed separately; no runtime downloads.
     import onnxruntime as ort
     from tokenizers import Tokenizer
@@ -284,13 +294,13 @@ def _load_onnx(directory: Path, max_length: int, stride: int):
     return tokenizer, session, {item.name for item in session.get_inputs()}
 
 
-def missing_models(model_dir: str) -> list:
+def missing_models(model_dir: str) -> list[str]:
     """The model directories under model_dir that lack either file, in MODEL_DIRECTORIES order."""
     return [name for name in MODEL_DIRECTORIES
             if not all((Path(model_dir) / name / file).is_file() for file in ("tokenizer.json", "model.onnx"))]
 
 
-def _signed_counts(words: list) -> list:
+def _signed_counts(words: list[str]) -> list[float]:
     # sha256 keeps the demo stable across processes; hash() is salted per process.
     vector = [0.0] * EMBED_DIMENSIONS
     for word in words:
@@ -299,7 +309,7 @@ def _signed_counts(words: list) -> list:
     return vector
 
 
-def _hashing_vector(text: str) -> list:
+def _hashing_vector(text: str) -> list[float]:
     vector = _signed_counts(re.findall(r"\w+", text.casefold()) or [text.strip()])
     if not any(vector):
         # Opposite signs in a shared bucket can cancel exactly; a single token never does.
@@ -308,7 +318,7 @@ def _hashing_vector(text: str) -> list:
     return [value / norm for value in vector]
 
 
-def _embed(texts: list, backend: str, model_dir: str, progress) -> dict:
+def _embed(texts: list[str], backend: str, model_dir: str, progress: Progress) -> dict[str, Any]:
     total = len(texts)
     progress(0, total)
     if backend == "onnx":
@@ -337,7 +347,7 @@ def _embed(texts: list, backend: str, model_dir: str, progress) -> dict:
     return {"model": model, "dimensions": EMBED_DIMENSIONS, "vectors": vectors}
 
 
-def _output(session, outputs: list, name: str):
+def _output(session: Any, outputs: list[Any], name: str) -> Any:
     # Take an output by name; position is only a fallback for exports without names.
     names = [item.name for item in session.get_outputs()]
     return outputs[names.index(name)] if name in names else outputs[0]
@@ -353,7 +363,7 @@ def _luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
-def _card_range(text: str, groups: list, start: int):
+def _card_range(text: str, groups: list[tuple[int, int]], start: int) -> tuple[int, int] | None:
     # Longest range first, then leftmost, so the most conservative valid mask wins.
     ranges = []
     for first in range(start, len(groups)):
@@ -369,7 +379,7 @@ def _card_range(text: str, groups: list, start: int):
     return None
 
 
-def _cards(text: str):
+def _cards(text: str) -> Iterator[tuple[int, int]]:
     # Cards are written in separated groups, so only whole-group ranges are tried: a card beside
     # an expiry is still found, while a random digit run gains no Luhn-valid sub-window.
     for run in re.finditer(r"(?<!\d)\d(?:[ -]?\d){12,}(?!\d)", text):
@@ -404,14 +414,14 @@ IBAN_COUNTRIES = frozenset(
     "SI SK SM SO ST SV TL TN TR UA VA VG XK YE".split())
 
 
-def _iban_matches(text: str):
+def _iban_matches(text: str) -> Iterator[re.Match[str]]:
     yield from IBAN_PATTERN.finditer(text)
     for match in LOWER_IBAN_PATTERN.finditer(text):
         if match.group()[:2].upper() in IBAN_COUNTRIES:
             yield match
 
 
-def _ibans(text: str):
+def _ibans(text: str) -> Iterator[tuple[int, int]]:
     for match in _iban_matches(text):
         candidate = match.group()
         # The greedy match can swallow following upper-case tokens; drop trailing groups until it checks.
@@ -450,7 +460,7 @@ def _is_ipv6(candidate: str) -> bool:
     return True
 
 
-def _ipv6s(text: str):
+def _ipv6s(text: str) -> Iterator[tuple[int, int]]:
     for match in IPV6_CANDIDATE.finditer(text):
         candidate = match.group().rstrip(".")  # a sentence's full stop is not part of the address
         if candidate.endswith(":") and not _is_ipv6(candidate):
@@ -469,8 +479,8 @@ EMAIL_PATTERN = re.compile(r"(?<![\w.%+-])[\w.%+-]+@[^\W_](?:[\w-]*[^\W_])?(?:\.
                            r"\.(?:[Xx][Nn]--[A-Za-z0-9-]+|[^\W\d_]{2,})")
 
 
-def _matches(pattern, accept=None):
-    def find(text: str):
+def _matches(pattern: re.Pattern[str], accept: Callable[[str], bool] | None = None) -> Finder:
+    def find(text: str) -> Iterator[tuple[int, int]]:
         for match in pattern.finditer(text):
             if accept is None or accept(match.group()):
                 yield match.start(), match.end()
@@ -479,7 +489,7 @@ def _matches(pattern, accept=None):
 
 # Precedence for overlapping candidates: checksummed and exact rules before patterns. Every
 # pattern is anchored on its left so scanning stays linear in the text length.
-RULES = (
+RULES: tuple[tuple[str, Finder, float], ...] = (
     ("CARD", _cards, 1.0),
     ("IBAN", _ibans, 1.0),
     ("EMAIL", _matches(EMAIL_PATTERN), 1.0),
@@ -494,9 +504,10 @@ RULES = (
 JOINERS = frozenset({"", "-", ".", "'", "\u2019"})
 
 
-def _entities(window, probabilities: list, entities: list, min_score: float, text: str) -> list:
+def _entities(window: Any, probabilities: list[list[float]], entities: list[str], min_score: float,
+              text: str) -> list[dict[str, Any]]:
     # Each word takes its first word piece's label, the usual BERT aggregation; later pieces only extend it.
-    words = []
+    words: list[list[Any]] = []
     for position, word_id in enumerate(window.word_ids):
         if word_id is None:
             continue
@@ -507,13 +518,15 @@ def _entities(window, probabilities: list, entities: list, min_score: float, tex
         row = probabilities[position]
         label_id = max(range(len(row)), key=row.__getitem__)
         words.append([start, end, NER_LABELS[label_id], float(row[label_id]), word_id])
-    pieces, current = [], None
+    pieces: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
     for start, end, label, score, _ in words:
         prefix, _, kind = label.partition("-")
         if prefix == "B" or (prefix == "I" and (current is None or current["label"] != kind)):
             current = {"start": start, "end": end, "label": kind, "scores": [score]}
             pieces.append(current)
         elif prefix == "I":
+            assert current is not None  # the branch above took an I- piece without one
             current["end"] = end
             current["scores"].append(score)
         else:
@@ -521,7 +534,7 @@ def _entities(window, probabilities: list, entities: list, min_score: float, tex
     # The model often starts a new entity at the full stop of an initial and is less sure of what follows, so touching
     # pieces are joined before the threshold and scored by their most confident piece: the initial carries the
     # surname, and an unsure piece never hides a confident one, as an average over "Jean-Luc Moreau" did.
-    joined = []
+    joined: list[dict[str, Any]] = []
     for piece in pieces:
         score = sum(piece["scores"]) / len(piece["scores"])
         if joined and joined[-1]["label"] == piece["label"] and text[joined[-1]["end"]:piece["start"]] in JOINERS:
@@ -541,18 +554,19 @@ LETTERS = re.compile(r"[^\W\d_]+")
 GIVEN_NAME_AFTER = re.compile(r",\s+([^\W\d_]+)")
 
 
-def _cased_variant(text: str):
+def _cased_variant(text: str) -> str | None:
     return _recase(text)[0]
 
 
-def _recase(text: str):
+def _recase(text: str) -> tuple[str | None, list[tuple[int, int]]]:
     """(copy, ranges): a copy of text, offset for offset, with each sentence written all in lower case or all in
     capitals in title case, or (None, []) when no sentence is. The model was trained on cased news and finds almost no lower-case name;
     sentence case and mixed case are left alone, since title-casing "the board approved" makes "Board" an
     organisation, except for a surname in capitals before a comma and a given name, the records convention, which
     the model otherwise takes for a place or misses. A character whose case change would alter its length stays.
     The ranges are the runs of rewritten sentences, the only part a second reading needs."""
-    chars, start, ranges = list(text), 0, []
+    chars, start = list(text), 0
+    ranges: list[tuple[int, int]] = []
     for end in [match.end() for match in SENTENCE_END.finditer(text)] + [len(text)]:
         cased = [char for char in text[start:end] if char.isupper() or char.islower()]
         uncased = bool(cased) and not (any(char.isupper() for char in cased) and any(char.islower() for char in cased))
@@ -575,17 +589,18 @@ def _recase(text: str):
     return (variant, ranges) if variant != text else (None, [])
 
 
-def _probabilities(session, names, window) -> list:
+def _probabilities(session: Any, names: set[str], window: Any) -> list[list[float]]:
     import numpy as np
 
     inputs = _tensors([window])
     outputs = session.run(None, {key: value for key, value in inputs.items() if key in names})
     logits = _output(session, outputs, "logits")[0]
     shifted = np.exp(logits - logits.max(axis=-1, keepdims=True))
-    return (shifted / shifted.sum(axis=-1, keepdims=True)).tolist()
+    rows: list[list[float]] = (shifted / shifted.sum(axis=-1, keepdims=True)).tolist()
+    return rows
 
 
-def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) -> list:
+def _ner(text: str, entities: list[str], min_score: float, model_dir: str, progress: Progress) -> list[dict[str, Any]]:
     # Overlapping 512 piece windows cover long text; offsets stay relative to the whole text. The cased model reads the
     # text, and each run of uncased sentences again from its title-cased copy, and only that run, so a second reading
     # costs a window or two and cannot relabel a sentence that needed no help. The uncased model then reads the whole
@@ -595,13 +610,15 @@ def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) 
     cased = _onnx(Path(model_dir) / "redact", 512, stride=64)
     uncased = _onnx(Path(model_dir) / "redact-uncased", 512, stride=64)
     variant, ranges = _recase(text)
-    readings = [(cased, 0, text)] + [(cased, start, variant[start:end]) for start, end in ranges] + [(uncased, 0, text)]
-    windows = []
+    # _recase returns ranges only with a copy, so the filter drops nothing.
+    readings = ([(cased, 0, text)] + [(cased, start, variant[start:end]) for start, end in ranges if variant is not None]
+                + [(uncased, 0, text)])
+    windows: list[tuple[Any, set[str], int, str, Any]] = []
     for (tokenizer, session, names), offset, reading in readings:
         encoding = tokenizer.encode(reading)
         windows.extend((session, names, offset, reading, window) for window in [encoding, *encoding.overflowing])
     progress(0, len(windows))
-    candidates = []
+    candidates: list[dict[str, Any]] = []
     for index, (session, names, offset, reading, window) in enumerate(windows):
         for span in _entities(window, _probabilities(session, names, window), entities, min_score, reading):
             candidates.append({**span, "start": span["start"] + offset, "end": span["end"] + offset})
@@ -609,11 +626,11 @@ def _ner(text: str, entities: list, min_score: float, model_dir: str, progress) 
     return candidates
 
 
-def _merge(candidates: list) -> list:
+def _merge(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # Leftmost first, then longest, then the stronger source, then the more confident: of two model readings of the
     # same words, a sure "person" beats an unsure "place". A candidate overlapping the kept span extends it instead of
     # being dropped, so no part of either stays visible.
-    spans = []
+    spans: list[dict[str, Any]] = []
     for span in sorted(candidates,
                        key=lambda span: (span["start"], span["start"] - span["end"], span["priority"], -span["score"])):
         if spans and span["start"] < spans[-1]["end"]:
@@ -623,7 +640,7 @@ def _merge(candidates: list) -> list:
     return spans
 
 
-def _redact(payload: dict, backend: str, model_dir: str, progress) -> dict:
+def _redact(payload: dict[str, Any], backend: str, model_dir: str, progress: Progress) -> dict[str, Any]:
     text = payload["text"]
     entities = payload.get("entities", REDACT_DEFAULTS["entities"])
     candidates = []

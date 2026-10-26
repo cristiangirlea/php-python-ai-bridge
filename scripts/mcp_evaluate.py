@@ -37,6 +37,7 @@ BUILD = ("docker compose -f docker/compose.yaml run --rm {builder} /data/notes -
 BACKENDS = {"lexical": ("mcp_stdio.sh", "mcp-index"), "onnx": ("mcp_stdio_onnx.sh", "mcp-model-index")}
 sys.path.insert(0, str(REPO / "worker"))
 from ai_bridge.tasks import MODEL_NAMES  # noqa: E402  (standard library only at import)
+
 # Set by a Claude Code session for its children; a nested `claude` started with them believes it is inside one.
 NESTING = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 
