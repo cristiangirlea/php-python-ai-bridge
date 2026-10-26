@@ -1,0 +1,39 @@
+# The ONNX worker: the hash-locked model wheels are in the image, the models never are. They are fetched into a
+# volume mounted at /cache with `docker run ... fetch`, which runs scripts/fetch_model.py.
+FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/bridge \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+COPY requirements-model.lock /tmp/requirements-model.lock
+# A named volume mounted at /cache starts with this directory's owner, so the fetcher can write to it.
+RUN python -m pip install --root-user-action=ignore --require-hashes --no-compile --only-binary=:all: \
+        -r /tmp/requirements-model.lock \
+    && rm /tmp/requirements-model.lock \
+    && mkdir /cache \
+    && chown 65532:65532 /cache
+
+COPY worker/ai_bridge /opt/bridge/ai_bridge
+COPY scripts/fetch_model.py /opt/bridge/fetch_model.py
+# A Python launcher rather than a shell script, so the image runs nothing through a shell.
+COPY --chmod=0755 <<'EOF' /usr/local/bin/bridge-worker
+#!/usr/local/bin/python
+import os
+import sys
+
+if sys.argv[1:2] == ["fetch"]:
+    os.execv(sys.executable, [sys.executable, "/opt/bridge/fetch_model.py", *sys.argv[2:]])
+os.execv(sys.executable, [sys.executable, "-m", "ai_bridge.server", *sys.argv[1:]])
+EOF
+
+ENV BRIDGE_BACKEND=onnx \
+    BRIDGE_MODEL_DIR=/cache/models \
+    BRIDGE_CONCURRENCY=1
+USER 65532:65532
+WORKDIR /opt/bridge
+EXPOSE 8090
+ENTRYPOINT ["/usr/local/bin/bridge-worker"]
+CMD ["--host", "0.0.0.0"]

@@ -1,0 +1,7 @@
+.cache
+.git
+tests
+docs
+**/__pycache__
+.env
+*.sqlite
