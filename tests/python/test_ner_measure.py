@@ -154,5 +154,67 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(measure.rate(0, 0), "n/a")
 
 
+class Wnut17Tests(unittest.TestCase):
+    CONLL = ("@paul\tO\nPaul\tB-person\nSmith\tI-person\nmet\tO\nGoogle\tB-corporation\nstaff\tO\nin\tO\n"
+             "New\tB-location\nYork\tI-location\n\n"
+             "the\tO\nBeatles\tB-group\nplayed\tO\nHey\tB-creative-work\nJude\tI-creative-work\non\tO\n"
+             "iPhone\tB-product\n\n\n"
+             "Lyon\tB-location\nRome\tB-location\nParis\tI-person\n")
+
+    def test_the_dataset_is_the_invented_sample_unless_wnut17_is_asked_for(self):
+        self.assertEqual(measure.dataset({}), "")
+        self.assertEqual(measure.dataset({"NER_DATASET": "wnut17"}), "wnut17")
+        for environ in ({"NER_DATASET": "conll2003"}, {"NER_DATASET": "wnut17", "NER_SAMPLE": "tests/fixtures/ner-dev.json"}):
+            with self.subTest(environ=environ), self.assertRaises(SystemExit):
+                measure.dataset(environ)
+
+    def test_sentences_are_their_tokens_joined_by_spaces(self):
+        items = measure.parse_conll(self.CONLL)
+        self.assertEqual([item["text"] for item in items], [
+            "@paul Paul Smith met Google staff in New York", "the Beatles played Hey Jude on iPhone", "Lyon Rome Paris"])
+        self.assertEqual({item["register"] for item in items}, {"all labels"})
+
+    def test_person_corporation_group_and_location_map_to_per_org_and_loc(self):
+        first, second, third = measure.parse_conll(self.CONLL)
+        self.assertEqual([(first["text"][s:e], label) for s, e, label in measure.gold_spans(first)],
+                         [("Paul Smith", "PER"), ("Google", "ORG"), ("New York", "LOC")])
+        # A creative work and a product have no label among PER, ORG and LOC, so they are not gold spans.
+        self.assertEqual([(second["text"][s:e], label) for s, e, label in measure.gold_spans(second)],
+                         [("Beatles", "ORG")])
+        # A B- tag starts a new entity even after one of the same type; an I- tag of another type starts one too.
+        self.assertEqual([(third["text"][s:e], label) for s, e, label in measure.gold_spans(third)],
+                         [("Lyon", "LOC"), ("Rome", "LOC"), ("Paris", "PER")])
+
+    def test_a_malformed_line_is_refused_with_its_number(self):
+        for text in ("Paul B-person\n", "Paul\tX-person\n", "Paul\tB-\n", "\tO\n"):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "line 1"):
+                measure.parse_conll(text)
+
+    def test_parsed_sentences_are_scored_like_the_sample(self):
+        items = measure.parse_conll("Ada\tB-person\nvisited\tO\nOslo\tB-location\n")
+        found = [{"start": 0, "end": 3, "label": "PER", "source": "model:PER", "score": 0.99},
+                 {"start": 12, "end": 16, "label": "ORG", "source": "model:ORG", "score": 0.9}]
+        counts = {name: value for _, name, value in measure.tally(items, {0.85: [found]})}
+        self.assertEqual(counts["all labels"], {"gold": 2, "predicted": 2, "exact": 1, "overlapping": 1, "masked": 2})
+        # A label's row sees only that label's predictions, so the ORG span over Oslo masks nothing in LOC's row.
+        self.assertEqual(counts["LOC"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts["ORG"], {"gold": 0, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts["PER"], {"gold": 1, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
+
+    def test_f1_is_the_harmonic_mean_of_precision_and_recall(self):
+        self.assertEqual(measure.f1(3, 4, 6), "0.60")  # precision 0.5, recall 0.75
+        self.assertEqual(measure.f1(0, 4, 0), "0.00")
+        self.assertEqual(measure.f1(0, 0, 0), "n/a")
+
+    def test_the_table_reports_precision_recall_and_f1_per_label(self):
+        counts = {"gold": 4, "predicted": 6, "exact": 3, "overlapping": 4, "masked": 4}
+        self.assertEqual(measure.f1_table([(0.85, "all labels", counts)]).splitlines(), [
+            "| Threshold | Label | Gold | Predicted | Precision, exact | Recall, exact | F1, exact "
+            "| Precision, overlapping | Recall, overlapping | F1, overlapping | Masked |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| 0.85 | all labels | 4 | 6 | 0.50 | 0.75 | 0.60 | 0.67 | 1.00 | 0.80 | 1.00 |",
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()

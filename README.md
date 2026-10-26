@@ -96,7 +96,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps model-test
 docker compose -f docker/compose.yaml run --rm --no-deps model-integration
 ```
 
-`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational), and throughput and latency percentiles under concurrent load beside them in [its load section](docs/testing.md#measured-throughput-and-latency-under-load-informational). Model scores are relevance logits, not probabilities.
+`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational), throughput and latency percentiles under concurrent load beside them in [its load section](docs/testing.md#measured-throughput-and-latency-under-load-informational), and quality on public data, reranking on ArguAna and NER on WNUT-17, in [its quality sections](docs/testing.md#measured-reranking-quality-on-arguana-informational). Model scores are relevance logits, not probabilities.
 
 Stop this project's containers when finished:
 
@@ -131,6 +131,40 @@ echo $documents[$result->rankings[0]['index']];
 ```
 
 `submitEmbed($texts)` works the same way and `EmbedResult::fromJob($job, count($texts))` yields one unit-length vector per text; the service stores nothing, so persist vectors in an index your application owns. `submitRedact($text)` returns a job whose `RedactResult::fromJob($job, $text)` holds the masked text and the spans found, each tagged with the rule or model that found it. `wait()` returns terminal jobs, including failures; `RerankResult::fromJob()` refuses anything except a successful rerank result. Use `cancel($id)` explicitly to stop remote work. A local wait timeout does **not** cancel the job.
+
+## Two things people use it for
+
+**Scrub text before it leaves your systems.** A support ticket or a document is redacted locally,
+then the masked text goes to a hosted model. Nothing personal leaves the network, and the spans
+tell you what was hidden and by which rule or model.
+
+```php
+$job = $client->submitRedact($ticket, ['PER', 'ORG', 'LOC']);
+$result = RedactResult::fromJob($client->wait($job->id), $ticket);
+$answer = $yourLlmClient->ask($result->text);   // the masked text, never the original
+```
+
+Redaction is a pre-filter, not a compliance control: on public social-media text it hides about
+half of the named entities at the default threshold, and nearly all card numbers, IBANs, emails and
+IP addresses ([measured](docs/testing.md#measured-ner-quality-on-wnut-17-informational)).
+
+**Reorder search results by meaning.** Keep the search you have (a database, Meilisearch, Elastic),
+take its top results, and let the cross-encoder order them for the query. It is the cheapest visible
+quality change a search box can get; measure on your own data first, since on some corpora BM25 alone
+is better ([measured](docs/testing.md#measured-reranking-quality-on-arguana-informational)).
+
+```php
+$hits = $search->query($q, limit: 100);            // your existing search
+$job = $client->submitRerank($q, array_column($hits, 'text'), topK: 10);
+$top = RerankResult::fromJob($client->wait($job->id), count($hits), topK: 10);
+```
+
+## Support
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md). If you want help putting the bridge into your application, sizing it or
+reviewing a redaction setup, open an issue describing the context, or sponsor the project through the
+Sponsor button.
 
 ## Test layers
 
@@ -169,7 +203,7 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 ## Important limits
 
 - **Durable job table only when `BRIDGE_STATE_DIR` is set:** the worker then keeps its job table (never inputs) in SQLite, so finished results and idempotency keys survive a restart until retention ends and unfinished jobs become `failed` with `service_restarted`; unset, a restart loses everything. Completed results expire after 300 seconds by default; 404 can mean expired, lost or unknown. An optional `idempotency_key` makes resubmitting after an uncertain POST safe while the job is retained. There is still no replay of unfinished jobs, durable delivery or automatic retry.
-- **Trusted services only:** a bearer token reaches only the jobs it submitted; give each application its own (`BRIDGE_TOKENS`, [the protocol](docs/protocol.md#tokens)), since they still share one worker's capacity. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
+- **Trusted services only:** a bearer token reaches only the jobs it submitted; give each application its own (`BRIDGE_TOKENS`, [the protocol](docs/protocol.md#tokens)), since they still share one worker's capacity. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization. Report a vulnerability privately as [SECURITY.md](SECURITY.md) says.
 - **Private HTTP transport:** deploy behind an authenticated TLS boundary for cross-host use; the [integration guide](docs/integration.md#cross-host-use-behind-tls) has a tested example with Caddy in front of the worker. The sample Python HTTP server is not an internet-facing production server.
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
 - **One job per warm child, no sharing across jobs:** the worker keeps `BRIDGE_CONCURRENCY` child processes alive and each loads its backend's models as it starts and keeps them, so a job waits for loading only while no child has finished starting; a child is replaced after a cancellation, a deadline or a crash, and after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no sharing of a loaded model between children, and no claim of GPU support, multi-host scaling or stateful agents.
