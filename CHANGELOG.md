@@ -14,6 +14,7 @@ All notable changes to this project are documented in this file. The format foll
 - `BRIDGE_OWNER_CAPACITY`, a cap on one token's queued, running and retained jobs (1 to the capacity; unset, the whole capacity, so nothing changes without it). A submission over it is the same 429 `capacity_exceeded` as a full worker, with a `Retry-After` from that token's own first expiry; a repeated idempotency key is still answered, and the total capacity still applies. The `start` log line carries `owner_capacity`.
 - Static analysis of the Python code in the required `deterministic` check: `py-analysis` runs `mypy --strict` over the worker and the MCP server and `ruff check` over them, the scripts and the tests, offline, with mypy 2.4.0 and ruff 0.17.2 hash-pinned in `requirements-dev.lock` and configured in `pyproject.toml`; neither is installed at runtime or shipped in the archive.
 - A full connection budget (32) is answered 503 `service_busy` with `Retry-After: 1` and `Connection: close` instead of a closed socket, and a request line over 8 KiB or a header block over 16 KiB is refused with 431 `headers_too_large`.
+- `docs/operations.md`, the operator's guide: deployment topologies, sizing from the measured figures, the state directory, token rotation, upgrades with a drain, what to graph and alert on, failure modes, and the versioning and support policy.
 
 ### Changed
 

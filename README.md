@@ -216,7 +216,7 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 - **Cancellation cannot undo effects:** registered future tasks must manage their own external side effects. A transport failure during POST has an uncertain submission outcome; the client never retries POST automatically.
 - **No token streaming:** progress is polled by job ID. The MCP server forwards that progress to a host that asks for it; there is no SSE, framework plugin or chat SDK.
 
-See [the integration guide](docs/integration.md), [test evidence and limits](docs/testing.md), [the protocol](docs/protocol.md), [security boundaries](docs/security.md), and [contributing](CONTRIBUTING.md).
+See [the integration guide](docs/integration.md), [test evidence and limits](docs/testing.md), [the protocol](docs/protocol.md), [security boundaries](docs/security.md), [operations](docs/operations.md), and [contributing](CONTRIBUTING.md).
 
 ## License
 
