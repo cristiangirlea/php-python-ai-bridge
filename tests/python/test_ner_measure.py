@@ -123,10 +123,9 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(counts[(0.85, "informal")],
                          {"gold": 2, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts[(0.5, "informal")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
-        # Acme predicted as a place is an ORG missed and a LOC that is wrong, in each label's own row; in the
-        # register's row it is still a name masked.
+        # A wrong label misses ORG recall but still masks Acme in both the register and ORG rows.
         self.assertEqual(counts[(0.85, "news")], {"gold": 2, "predicted": 2, "exact": 1, "overlapping": 1, "masked": 2})
-        self.assertEqual(counts[(0.85, "ORG")], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+        self.assertEqual(counts[(0.85, "ORG")], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
         self.assertEqual(counts[(0.85, "LOC")], {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts[(0.85, "PER")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
 
@@ -196,10 +195,18 @@ class Wnut17Tests(unittest.TestCase):
                  {"start": 12, "end": 16, "label": "ORG", "source": "model:ORG", "score": 0.9}]
         counts = {name: value for _, name, value in measure.tally(items, {0.85: [found]})}
         self.assertEqual(counts["all labels"], {"gold": 2, "predicted": 2, "exact": 1, "overlapping": 1, "masked": 2})
-        # A label's row sees only that label's predictions, so the ORG span over Oslo masks nothing in LOC's row.
-        self.assertEqual(counts["LOC"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 0})
+        # The ORG span over Oslo is no LOC prediction, but it hides Oslo, so LOC's row counts it masked.
+        self.assertEqual(counts["LOC"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
         self.assertEqual(counts["ORG"], {"gold": 0, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts["PER"], {"gold": 1, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
+
+    def test_a_label_s_masked_entities_add_up_to_the_all_labels_row(self):
+        # One span over two names masks one of them, in the labels' rows as in the whole, so they sum to it.
+        items = measure.parse_conll("Ada\tB-person\nOslo\tB-location\n")
+        found = [{"start": 0, "end": 8, "label": "ORG", "source": "model:ORG", "score": 0.9}]
+        counts = {name: value for _, name, value in measure.tally(items, {0.85: [found]})}
+        self.assertEqual(counts["all labels"]["masked"], 1)
+        self.assertEqual([counts[label]["masked"] for label in ("PER", "ORG", "LOC")], [1, 0, 0])
 
     def test_f1_is_the_harmonic_mean_of_precision_and_recall(self):
         self.assertEqual(measure.f1(3, 4, 6), "0.60")  # precision 0.5, recall 0.75

@@ -216,29 +216,29 @@ docker rm -f bridge-load-lexical bridge-load-worker
 
 ## Measured NER precision and recall (informational)
 
-`scripts/ner_measure.py` runs every sentence of `tests/fixtures/ner-sample.json` through the ONNX worker's redact task with PER, ORG and LOC, at the task's default threshold and a lower one, each its own job, and compares the models' spans with the sample's labels; rule spans are not counted. The model workflow prints a fresh table to its job summary on every run, and fails only if a job fails, never on a score. The table below is from that workflow, run 36902794112 on pull request #19 at branch head `e49e388`; the commit in its header is GitHub's merge ref. The sample is invented and small, so these figures describe these pinned models on these three registers, not a quality guarantee.
+`scripts/ner_measure.py` runs every sentence of `tests/fixtures/ner-sample.json` through the ONNX worker's redact task with PER, ORG and LOC, at the task's default threshold and a lower one, each its own job, and compares the models' spans with the sample's labels; rule spans are not counted. The model workflow prints a fresh table to its job summary on every run, and fails only if a job fails, never on a score. The table below was measured locally with this script over `main` at `dd2cd9d`, the commit its header names; a label's Masked counts that label's entities hidden under any label, so it can exceed the label's overlapping recall. The sample is invented and small, so these figures describe these pinned models on these three registers, not a quality guarantee.
 
-Measured 2026-10-01 UTC, commit `d5b3edc039b6370b51f5fe455785b88ef2aa5e29`, runner: GitHub-hosted ubuntu-latest, CPU: AMD EPYC 7763 64-Core Processor.
-Model `Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncased:int8`; `tests/fixtures/ner-sample.json`, 48 invented sentences with 104 labelled entities; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: a shared character under any label, the share of entities a redaction hides.
+Measured 2026-10-26 UTC, commit `dd2cd9d`, runner: local, Windows 11 Pro with Docker Desktop 29.8.2, CPU: AMD Ryzen 9 9950X 16-Core Processor.
+Model `Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncased:int8`; `tests/fixtures/ner-sample.json`, 48 invented sentences with 104 labelled entities; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: a shared character under any label, one gold span per predicted span, the share of entities a redaction hides; a label's row counts that label's entities hidden under any label.
 
 | Threshold | Register or label | Gold | Predicted | Precision, exact | Recall, exact | Precision, overlapping | Recall, overlapping | Masked |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0.85 | news | 38 | 38 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
-| 0.85 | informal | 30 | 25 | 0.72 | 0.60 | 0.84 | 0.70 | 0.80 |
+| 0.85 | informal | 30 | 24 | 0.75 | 0.60 | 0.88 | 0.70 | 0.80 |
 | 0.85 | records | 36 | 36 | 0.94 | 0.94 | 0.94 | 0.94 | 1.00 |
-| 0.85 | PER | 42 | 37 | 0.92 | 0.81 | 1.00 | 0.88 | 0.88 |
-| 0.85 | ORG | 24 | 24 | 0.88 | 0.88 | 0.88 | 0.88 | 0.88 |
-| 0.85 | LOC | 38 | 38 | 0.92 | 0.92 | 0.92 | 0.92 | 0.92 |
+| 0.85 | PER | 42 | 37 | 0.92 | 0.81 | 1.00 | 0.88 | 0.93 |
+| 0.85 | ORG | 24 | 23 | 0.91 | 0.88 | 0.91 | 0.88 | 0.96 |
+| 0.85 | LOC | 38 | 38 | 0.92 | 0.92 | 0.92 | 0.92 | 0.95 |
 | 0.5 | news | 38 | 38 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
-| 0.5 | informal | 30 | 33 | 0.67 | 0.73 | 0.73 | 0.80 | 1.00 |
+| 0.5 | informal | 30 | 31 | 0.68 | 0.70 | 0.74 | 0.77 | 0.97 |
 | 0.5 | records | 36 | 36 | 0.94 | 0.94 | 0.94 | 0.94 | 1.00 |
-| 0.5 | PER | 42 | 38 | 0.95 | 0.86 | 1.00 | 0.90 | 0.90 |
-| 0.5 | ORG | 24 | 30 | 0.73 | 0.92 | 0.73 | 0.92 | 0.92 |
-| 0.5 | LOC | 38 | 39 | 0.92 | 0.95 | 0.92 | 0.95 | 0.95 |
+| 0.5 | PER | 42 | 38 | 0.95 | 0.86 | 1.00 | 0.90 | 1.00 |
+| 0.5 | ORG | 24 | 28 | 0.75 | 0.88 | 0.75 | 0.88 | 0.96 |
+| 0.5 | LOC | 38 | 39 | 0.92 | 0.95 | 0.92 | 0.95 | 1.00 |
 
 Since pull request #18, the redact task reads a sentence written all in lower case or all in capitals a second time, from a title-cased copy with the same offsets, and likewise a surname in capitals before a comma and a given name (`WIERZBICKI, Tomasz`), the records convention. It joins pieces of one name that touch or meet at a hyphen, full stop or apostrophe before the threshold, scored by the most confident piece, so the initial of `A. Okonkwo` carries the surname; and of two readings of the same span it keeps the more confident. Since pull request #19, the uncased `dslim/bert-base-NER-uncased` reads the whole text once more, ignoring case, beside the cased model, which keeps what capitals tell in news and records: alone, the uncased model masked only 0.54 of the development set's records against 0.77 for the cased readings. Those choices were made on a separate development set, `tests/fixtures/ner-dev.json`, which before the uncased model was measured gained lower-case names among capitals, news sentences and sentences of common words that are also names (`pay the bill`, `a rose`, `Will the courier`); the uncased model invented no name in any of them. This sample stayed unseen until each final measurement; both sets are small and were written by the same author, so the figures describe these sentences, not informal text in general.
 
-Against pull request #18's run on the same CPU type, exact recall at 0.85 rose from 0.47 to 0.60 in informal messages and from 0.92 to 0.94 in records, and news stayed at 1.00; the share of entities masked under any label, which is what a redaction hides, rose from 0.63 to 0.80 in informal messages and from 0.97 to 1.00 in records, and at 0.5 it is 1.00 in all three. Exact precision held at 0.94 in records and moved from 0.74 to 0.72 in informal messages. What still leaks at 0.85: a name after a sign-off (`Regards, olumide`), a handle (`@nadia`), some lower-case places and first names (`porto`, `galway`, `fatima`) and a capitalised company in an informal note (`Halvern`). A reading can still take a filler word into a name (`lol tomasz`) or give a name the wrong label, which still hides it, and the uncased model tags a domain name such as `example.com` as an organisation.
+In the model workflow's run for pull request #19 on GitHub's EPYC runners, against pull request #18's run on the same CPU type, exact recall at 0.85 rose from 0.47 to 0.60 in informal messages and from 0.92 to 0.94 in records, and news stayed at 1.00; the share of entities masked under any label, which is what a redaction hides, rose from 0.63 to 0.80 in informal messages and from 0.97 to 1.00 in records, and at 0.5 it is 1.00 in all three. Exact precision held at 0.94 in records and moved from 0.74 to 0.72 in informal messages. The local table above differs from that run in informal messages, with 24 spans instead of 25 at 0.85 (exact precision 0.75) and 31 instead of 33 at 0.5, where 0.97 of the entities are masked, and in ORG, with 23 spans instead of 24 at 0.85 and 28 instead of 30 at 0.5. What still leaks at 0.85: a name after a sign-off (`Regards, olumide`), a handle (`@nadia`), some lower-case places and first names (`porto`, `galway`, `fatima`) and a capitalised company in an informal note (`Halvern`). A reading can still take a filler word into a name (`lol tomasz`) or give a name the wrong label, which still hides it, and the uncased model tags a domain name such as `example.com` as an organisation.
 
 int8 inference is not bit-identical across CPUs: a local run on an AMD Ryzen 9 9950X has differed from GitHub's EPYC runners by a span or two, so read such differences as noise. The redact tool's description quotes these figures; re-measure and update both together. To reproduce locally after acquiring the models:
 
@@ -279,21 +279,21 @@ docker compose -f docker/compose.yaml --profile model down
 
 `NER_DATASET=wnut17 scripts/ner_measure.py` runs the WNUT-17 test split (Derczynski et al., emerging and rare entities in social media and forum posts) through the redact task, one sentence per job, at the same two thresholds as the invented sample. The split is CC BY 4.0 as its repository's README states, pinned to a commit and a SHA-256 in `scripts/public_data.py` and stored by `quality-fetcher`. Its person entities count as PER, corporation and group as ORG, and location as LOC; product and creative-work have no label among the task's three, so they are not gold spans and a span over one counts against precision. Rule spans are not counted. The table adds F1 to the invented sample's columns and replaces its registers with one row over all three labels.
 
-Measured 2026-10-21 UTC, commit `e77310f`, runner: local, Windows 11 with Docker Desktop, CPU: AMD Ryzen 9 9950X 16-Core Processor.
-Model `Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncased:int8`; WNUT-17 test split, `emerging.test.annotated` at SHA-256 `2aa79b764e56`, CC-BY-4.0: 1287 sentences with 810 entities mapped to labels, person to PER, corporation and group to ORG, location to LOC; product and creative-work have no label here, so a span over one counts against precision. Each sentence is its tokens joined by single spaces; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: gold spans that share a character with a predicted span of any label, one gold span per predicted span; a label's row counts only that label's predictions, so there it equals overlapping recall.
+Measured 2026-10-26 UTC, commit `dd2cd9d`, runner: local, Windows 11 Pro with Docker Desktop 29.8.2, CPU: AMD Ryzen 9 9950X 16-Core Processor.
+Model `Xenova/bert-base-NER:int8+Xenova/bert-base-NER-uncased:int8`; WNUT-17 test split, `emerging.test.annotated` at SHA-256 `2aa79b764e56`, CC-BY-4.0: 1287 sentences with 810 entities mapped to labels, person to PER, corporation and group to ORG, location to LOC; product and creative-work have no label here, so a span over one counts against precision. Each sentence is its tokens joined by single spaces; one redact job per sentence and threshold, entities PER, ORG and LOC. Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted span. Masked: gold spans that share a character with a predicted span of any label, one gold span per predicted span; a label's row counts that label's gold spans hidden under any label, so it can exceed overlapping recall.
 
 | Threshold | Label | Gold | Predicted | Precision, exact | Recall, exact | F1, exact | Precision, overlapping | Recall, overlapping | F1, overlapping | Masked |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0.85 | all labels | 810 | 939 | 0.42 | 0.49 | 0.45 | 0.45 | 0.52 | 0.48 | 0.59 |
-| 0.85 | PER | 429 | 310 | 0.75 | 0.54 | 0.63 | 0.78 | 0.56 | 0.65 | 0.56 |
-| 0.85 | ORG | 231 | 487 | 0.17 | 0.36 | 0.23 | 0.19 | 0.40 | 0.26 | 0.40 |
-| 0.85 | LOC | 150 | 142 | 0.57 | 0.54 | 0.55 | 0.62 | 0.59 | 0.60 | 0.59 |
+| 0.85 | PER | 429 | 310 | 0.75 | 0.54 | 0.63 | 0.78 | 0.56 | 0.65 | 0.63 |
+| 0.85 | ORG | 231 | 487 | 0.17 | 0.36 | 0.23 | 0.19 | 0.40 | 0.26 | 0.45 |
+| 0.85 | LOC | 150 | 142 | 0.57 | 0.54 | 0.55 | 0.62 | 0.59 | 0.60 | 0.69 |
 | 0.5 | all labels | 810 | 1892 | 0.24 | 0.55 | 0.33 | 0.26 | 0.60 | 0.36 | 0.78 |
-| 0.5 | PER | 429 | 395 | 0.63 | 0.58 | 0.61 | 0.67 | 0.62 | 0.65 | 0.62 |
-| 0.5 | ORG | 231 | 1278 | 0.08 | 0.45 | 0.14 | 0.09 | 0.52 | 0.16 | 0.52 |
-| 0.5 | LOC | 150 | 219 | 0.43 | 0.63 | 0.51 | 0.48 | 0.70 | 0.57 | 0.70 |
+| 0.5 | PER | 429 | 395 | 0.63 | 0.58 | 0.61 | 0.67 | 0.62 | 0.65 | 0.85 |
+| 0.5 | ORG | 231 | 1278 | 0.08 | 0.45 | 0.14 | 0.09 | 0.52 | 0.16 | 0.59 |
+| 0.5 | LOC | 150 | 219 | 0.43 | 0.63 | 0.51 | 0.48 | 0.70 | 0.57 | 0.85 |
 
-On real user-generated text the models find about half of the entities at the default threshold: exact F1 0.45 over all three labels, 0.63 for persons (precision 0.75, recall 0.54), 0.55 for places and 0.23 for organisations, where 487 predicted spans meet 231 gold ones. At 0.85, 0.59 of the entities share a character with a predicted span of some label (the Masked column, one entity per predicted span; an overlap, not a count of characters hidden), against 0.80 in the invented sample's informal messages; at 0.5 the share is 0.78, at the cost of 1278 ORG spans, nine in ten of them wrong. Part of the ORG excess may be WNUT-17's 269 products and creative works, which this mapping leaves without a label; how much was not counted. WNUT-17 was built from entities that are rare or new, which makes it harder than text naming well-known people and companies.
+On real user-generated text the models find about half of the entities at the default threshold: exact F1 0.45 over all three labels, 0.63 for persons (precision 0.75, recall 0.54), 0.55 for places and 0.23 for organisations, where 487 predicted spans meet 231 gold ones. At 0.85, 0.59 of the entities share a character with a predicted span of some label (the Masked column, one entity per predicted span; an overlap, not a count of characters hidden; by label 0.63 of persons, 0.45 of organisations and 0.69 of places, some of them under another label), against 0.80 in the invented sample's informal messages; at 0.5 the share is 0.78, at the cost of 1278 ORG spans, nine in ten of them wrong. Part of the ORG excess may be WNUT-17's 269 products and creative works, which this mapping leaves without a label; how much was not counted. WNUT-17 was built from entities that are rare or new, which makes it harder than text naming well-known people and companies.
 
 These figures carry what the models do with this public, English, informal text, at character-level matching on tokens joined by single spaces, so `&gt;` reads as `& gt ;` and punctuation stands apart from words, as in the file. They are not WNUT-17's own entity F1, which counts six types; and they are one run: int8 inference is not bit-identical across CPUs, as the section above notes. The redact tool's description still quotes the invented sample's figures. To reproduce, run `model-quality` as above, or the NER half alone:
 
