@@ -2,7 +2,9 @@
 
 A framework-independent PHP client and a small Python task service. Submit document reranking from PHP, poll progress, receive typed results, and cancel work without keeping the original HTTP request open.
 
-Includes a FrankenPHP worker-mode example, deterministic fault tests, and an optional real ONNX reranker. No hosted AI account is required. This is an **experimental prototype**, not a production job queue.
+Includes a FrankenPHP worker-mode example, deterministic fault tests, and an optional real ONNX reranker. No hosted AI account is required.
+
+Since 0.4.0 it is supported as an internal service for applications that own their host and network: one or more worker instances, each answering only the jobs it took, on a private network behind the operator's TLS and the application's own authentication, with the job table kept across a restart by `BRIDGE_STATE_DIR`. It is not for exposing the worker publicly, nor for throughput beyond the measured figures (one ONNX child on one CPU served about 3.5 jobs/s of the rerank, embed and redact mix, and an instance admits at most `BRIDGE_CAPACITY` jobs per `BRIDGE_RETENTION_SECONDS`) without more instances; [the operations guide](docs/operations.md) has the topologies and the sizing.
 
 ## What is implemented
 
@@ -111,7 +113,7 @@ The downloaded cache remains for reuse; it is not included in Git.
 See the [integration guide](docs/integration.md) for Composer setup, the Laravel service provider and the Symfony bundle that configure the client from `BRIDGE_URL` and `BRIDGE_TOKEN`, application job ownership and failure handling.
 The client sends through `ext-curl` by default; an application with a PSR-18 client such as Symfony HttpClient or Guzzle can pass `PhpAiBridge\Psr18Transport` instead, configured as the [integration guide](docs/integration.md#through-a-psr-18-http-client) shows.
 
-This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. The latest tagged release is `v0.3.0` ([changelog](CHANGELOG.md)): install it with `composer require cristiangirlea/php-python-ai-bridge:^0.3` once the package is on Packagist, or from a VCS repository pinned to the tag until then, as the integration guide shows. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
+This source tree is a Composer library with PSR-4 autoloading under `PhpAiBridge\`. The latest tagged release is `v0.4.0` ([changelog](CHANGELOG.md)): install it with `composer require cristiangirlea/php-python-ai-bridge:^0.4` once the package is on Packagist, or from a VCS repository pinned to the tag until then, as the integration guide shows. `examples/bootstrap.php` is a repository-only autoloader for dependency-free examples, not an application installation method.
 
 ```php
 use PhpAiBridge\Client;

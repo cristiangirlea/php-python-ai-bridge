@@ -1,8 +1,8 @@
 # Operations
 
-How to deploy, size, upgrade and watch the worker. The [protocol](protocol.md) is the contract and the [security boundaries](security.md) say what the service protects; this guide links to them rather than repeating them. Every figure below comes from the measured tables in [the testing guide](testing.md), and every setting from `worker/ai_bridge/server.py` (`main()`) or `worker/ai_bridge/jobs.py`. The service is an experimental prototype, not a durable job queue.
+How to deploy, size, upgrade and watch the worker. The [protocol](protocol.md) is the contract and the [security boundaries](security.md) say what the service protects; this guide links to them rather than repeating them. Every figure below comes from the measured tables in [the testing guide](testing.md), and every setting from `worker/ai_bridge/server.py` (`main()`) or `worker/ai_bridge/jobs.py`. The service keeps results, not work: a restart answers retained results and reports unfinished jobs, it never replays them, so it is not a durable job queue.
 
-Some of what follows is on `main`, unreleased (under Unreleased in [CHANGELOG.md](../CHANGELOG.md), planned for the next release, 0.4.0): the drain and `BRIDGE_DRAIN_SECONDS`, `GET /readyz`, `BRIDGE_OWNER_CAPACITY`, the 503 `service_busy` and 431 answers, and `BRIDGE_LOG`.
+Some of what follows is available since 0.4.0 ([CHANGELOG.md](../CHANGELOG.md)): the drain and `BRIDGE_DRAIN_SECONDS`, `GET /readyz`, `BRIDGE_OWNER_CAPACITY`, the 503 `service_busy` and 431 answers, and `BRIDGE_LOG`.
 
 ## 1. Deployment topologies
 
@@ -101,7 +101,7 @@ Images are tagged with the version without its `v` (`0.3.0`). A stable release a
 | Readiness | `/readyz`, and `bridge_pool_ready` against `bridge_pool_size` | Not ready for longer than a model load, or ready children stay below the pool size |
 | p95 job duration | `histogram_quantile(0.95, sum by (le, task) (rate(bridge_job_duration_seconds_bucket[5m])))` | It nears the clients' `timeout_ms` |
 
-`bridge_job_queue_seconds` separates waiting from running, and `bridge_jobs_total{status="timed_out"}` counts deadlines. Structured logs (on `main`, unreleased): `BRIDGE_LOG=json` writes one JSON line on stderr per request and per finished job, plus start, drain and stop, with a fixed schema that never holds inputs, results, headers, tokens or exception text; off by default. Logging is best effort: lines are written behind a bounded queue and are dropped when it is full or at exit, so a log is no audit record and no substitute for `/metrics`. [The protocol](protocol.md#logging) has the schema.
+`bridge_job_queue_seconds` separates waiting from running, and `bridge_jobs_total{status="timed_out"}` counts deadlines. Structured logs (since 0.4.0): `BRIDGE_LOG=json` writes one JSON line on stderr per request and per finished job, plus start, drain and stop, with a fixed schema that never holds inputs, results, headers, tokens or exception text; off by default. Logging is best effort: lines are written behind a bounded queue and are dropped when it is full or at exit, so a log is no audit record and no substitute for `/metrics`. [The protocol](protocol.md#logging) has the schema.
 
 ## 7. Failure modes
 

@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-26
+
 ### Added
 
 - A graceful drain: on SIGTERM or SIGINT the worker answers `POST /v1/jobs` with 503 `draining` and `Retry-After: 1`, fails queued jobs as `service_restarted` at once, keeps answering `GET`, and lets running jobs finish for up to `BRIDGE_DRAIN_SECONDS` (integer 0 to 300, default 30) before it stops; a second signal stops it at once.
@@ -68,7 +70,8 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 
-[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cristiangirlea/php-python-ai-bridge/releases/tag/v0.1.0
