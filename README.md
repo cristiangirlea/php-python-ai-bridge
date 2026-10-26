@@ -22,7 +22,7 @@ The default backends are **`lexical-demo-not-a-model`** for reranking and **`has
 
 ## Try it with Docker
 
-Requirements: Docker Engine/Desktop with Linux containers and Docker Compose. The provided images and model wheel lock target **Linux x86_64 / Python 3.12**; other architectures are not verified. No local PHP or Python installation is needed.
+Requirements: Docker Engine/Desktop with Linux containers and Docker Compose. The provided images and model wheel lock target **Linux x86_64 / Python 3.12**; the [published worker images](#run-the-published-image) and the lock also cover arm64, which the tests do not run. No local PHP or Python installation is needed.
 
 One Composer package supports PHP 8.2, 8.3, 8.4 and 8.5: the upstream-supported PHP branches as of September 2026. The default demo uses PHP 8.5; CI exercises all four branches. See [support policy and verification limits](docs/testing.md).
 
@@ -51,6 +51,33 @@ The CLI example prints sorted document indexes and scores. The integration test 
 
 No host ports are published. Example/test clients connect over a Docker-internal network. The example HTTP routes have **no end-user authentication** and must not be exposed publicly.
 
+### Run the published image
+
+Every release tag publishes the worker as an image, so a deployment needs no checkout: `ghcr.io/cristiangirlea/php-python-ai-bridge-worker` (the demo backends, standard library only) and `ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx` (the hash-locked model wheels, no models), each tagged with the version, for linux/amd64 and linux/arm64. A stable release (`v1.2.0`) also moves `latest`; a prerelease (`v1.2.0-rc.1`) gets its version tag only. Both run as UID 65532 and listen on port 8090. Pin the version, not `latest`, and attach your application to the same private network:
+
+```sh
+docker pull ghcr.io/cristiangirlea/php-python-ai-bridge-worker:latest
+docker network create --internal bridge-private
+docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -e BRIDGE_STATE_DIR=/state \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 512m \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532 \
+  --tmpfs /state:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700 \
+  ghcr.io/cristiangirlea/php-python-ai-bridge-worker:latest
+```
+
+`-e BRIDGE_TOKEN` passes the token from your shell without writing it on the command line. The ONNX image never holds models: `fetch` downloads the pinned, hash-checked files into a volume once, and the worker reads them from there without network:
+
+```sh
+docker volume create bridge-models
+docker run --rm -v bridge-models:/cache ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:latest fetch
+docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -v bridge-models:/cache:ro \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 1536m \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532 \
+  ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:latest
+```
+
+Compose's `release` profile runs the same images under the limits above: `BRIDGE_IMAGE_TAG=<version> docker compose -f docker/compose.yaml --profile release up -d worker-image` (or `model-worker-image`, which reads `.cache/models` from the `fetcher`). Each image carries build provenance and an SBOM; `gh attestation verify oci://ghcr.io/cristiangirlea/php-python-ai-bridge-worker:<version> --owner cristiangirlea` checks it. The arm64 images are built under emulation and not run by the tests.
+
 ### Run the real model
 
 Acquire dependencies and model data in the bounded, network-enabled fetcher:
@@ -69,7 +96,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps model-test
 docker compose -f docker/compose.yaml run --rm --no-deps model-integration
 ```
 
-`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational), and throughput and latency percentiles under concurrent load beside them in [its load section](docs/testing.md#measured-throughput-and-latency-under-load-informational). Model scores are relevance logits, not probabilities.
+`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational), throughput and latency percentiles under concurrent load beside them in [its load section](docs/testing.md#measured-throughput-and-latency-under-load-informational), and quality on public data, reranking on ArguAna and NER on WNUT-17, in [its quality sections](docs/testing.md#measured-reranking-quality-on-arguana-informational). Model scores are relevance logits, not probabilities.
 
 Stop this project's containers when finished:
 
@@ -104,6 +131,40 @@ echo $documents[$result->rankings[0]['index']];
 ```
 
 `submitEmbed($texts)` works the same way and `EmbedResult::fromJob($job, count($texts))` yields one unit-length vector per text; the service stores nothing, so persist vectors in an index your application owns. `submitRedact($text)` returns a job whose `RedactResult::fromJob($job, $text)` holds the masked text and the spans found, each tagged with the rule or model that found it. `wait()` returns terminal jobs, including failures; `RerankResult::fromJob()` refuses anything except a successful rerank result. Use `cancel($id)` explicitly to stop remote work. A local wait timeout does **not** cancel the job.
+
+## Two things people use it for
+
+**Scrub text before it leaves your systems.** A support ticket or a document is redacted locally,
+then the masked text goes to a hosted model. Nothing personal leaves the network, and the spans
+tell you what was hidden and by which rule or model.
+
+```php
+$job = $client->submitRedact($ticket, ['PER', 'ORG', 'LOC']);
+$result = RedactResult::fromJob($client->wait($job->id), $ticket);
+$answer = $yourLlmClient->ask($result->text);   // the masked text, never the original
+```
+
+Redaction is a pre-filter, not a compliance control: on public social-media text it hides about
+half of the named entities at the default threshold, and nearly all card numbers, IBANs, emails and
+IP addresses ([measured](docs/testing.md#measured-ner-quality-on-wnut-17-informational)).
+
+**Reorder search results by meaning.** Keep the search you have (a database, Meilisearch, Elastic),
+take its top results, and let the cross-encoder order them for the query. It is the cheapest visible
+quality change a search box can get; measure on your own data first, since on some corpora BM25 alone
+is better ([measured](docs/testing.md#measured-reranking-quality-on-arguana-informational)).
+
+```php
+$hits = $search->query($q, limit: 100);            // your existing search
+$job = $client->submitRerank($q, array_column($hits, 'text'), topK: 10);
+$top = RerankResult::fromJob($client->wait($job->id), count($hits), topK: 10);
+```
+
+## Support
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md). If you want help putting the bridge into your application, sizing it or
+reviewing a redaction setup, open an issue describing the context, or sponsor the project through the
+Sponsor button.
 
 ## Test layers
 
@@ -147,7 +208,7 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 ## Important limits
 
 - **Durable job table only when `BRIDGE_STATE_DIR` is set:** the worker then keeps its job table (never inputs) in SQLite, so finished results and idempotency keys survive a restart until retention ends and unfinished jobs become `failed` with `service_restarted`; unset, a restart loses everything. Completed results expire after 300 seconds by default; 404 can mean expired, lost or unknown. An optional `idempotency_key` makes resubmitting after an uncertain POST safe while the job is retained. There is still no replay of unfinished jobs, durable delivery or automatic retry.
-- **Trusted services only:** a bearer token reaches only the jobs it submitted; give each application its own (`BRIDGE_TOKENS`, [the protocol](docs/protocol.md#tokens)), since they still share one worker's capacity. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization.
+- **Trusted services only:** a bearer token reaches only the jobs it submitted; give each application its own (`BRIDGE_TOKENS`, [the protocol](docs/protocol.md#tokens)), since they still share one worker's capacity. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization. Report a vulnerability privately as [SECURITY.md](SECURITY.md) says.
 - **Private HTTP transport:** deploy behind an authenticated TLS boundary for cross-host use; the [integration guide](docs/integration.md#cross-host-use-behind-tls) has a tested example with Caddy in front of the worker. The sample Python HTTP server is not an internet-facing production server.
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
 - **One job per warm child, no sharing across jobs:** the worker keeps `BRIDGE_CONCURRENCY` child processes alive and each loads its backend's models as it starts and keeps them, so a job waits for loading only while no child has finished starting; a child is replaced after a cancellation, a deadline or a crash, and after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no sharing of a loaded model between children, and no claim of GPU support, multi-host scaling or stateful agents.

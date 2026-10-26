@@ -4,12 +4,14 @@
 
 # Consumers need only the PHP client, its composer.json, license, changelog and documentation in dist archives.
 /.claude export-ignore
+/.dockerignore export-ignore
 /.gitattributes export-ignore
 /.github export-ignore
 /.gitignore export-ignore
 /AGENTS.md export-ignore
 /CLAUDE.md export-ignore
 /CONTRIBUTING.md export-ignore
+/SECURITY.md export-ignore
 /composer.lock export-ignore
 /docker export-ignore
 /examples export-ignore

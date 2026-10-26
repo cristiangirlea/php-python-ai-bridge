@@ -15,6 +15,10 @@ All notable changes to this project are documented in this file. The format foll
 - Static analysis of the Python code in the required `deterministic` check: `py-analysis` runs `mypy --strict` over the worker and the MCP server and `ruff check` over them, the scripts and the tests, offline, with mypy 2.4.0 and ruff 0.17.2 hash-pinned in `requirements-dev.lock` and configured in `pyproject.toml`; neither is installed at runtime or shipped in the archive.
 - A full connection budget (32) is answered 503 `service_busy` with `Retry-After: 1` and `Connection: close` instead of a closed socket, and a request line over 8 KiB or a header block over 16 KiB is refused with 431 `headers_too_large`.
 
+### Changed
+
+- Locks moved past published advisories: `certifi` 2026.10.19 and `filelock` 4.2.1 in `requirements-model.lock`, `opentelemetry-api` 1.45.1 and `pyjwt` 2.15.0 in `requirements-mcp.lock`.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added
@@ -26,6 +30,8 @@ All notable changes to this project are documented in this file. The format foll
 - `PhpAiBridge\Symfony\PhpAiBridgeBundle` registers `Client` as an autowirable service from a `php_ai_bridge` configuration whose `url`, `token` and `request_timeout_ms` default to the same environment variables.
 - Both fail on a missing or invalid setting with a message that names it and never quotes the token. `laravel/framework` and `symfony/http-kernel` are suggested, not required: the library's requirements are unchanged.
 - A TLS example: compose's `tls` profile runs Caddy from the pinned FrankenPHP image in front of the worker (`examples/tls/Caddyfile`, `tls internal`, no plain-HTTP listener, no token held), and `tls-check` drives the unchanged client through it trusting only the example CA. The integration guide's new "Cross-host use behind TLS" section says what to change for production.
+- `SECURITY.md` with private vulnerability reporting, response windows and scope; Dependabot now also proposes weekly pip and Composer updates, a weekly `audit` job runs `pip-audit` over both Python locks and `composer audit` over `composer.lock` (accepted advisories in `.github/audit-ignore.txt`), and CodeQL scans the Python code.
+- Published worker images: a `v*` tag pushes `ghcr.io/cristiangirlea/php-python-ai-bridge-worker` and `-worker-onnx` (`docker/Dockerfile.worker`, `docker/Dockerfile.worker-onnx`) for linux/amd64 and linux/arm64 with provenance, an SBOM and an attestation, and attaches the source archive to the release. The ONNX image installs the hash-locked wheels, which `requirements-model.lock` now pins for aarch64 too, and fetches models into a volume with `fetch`, never into the image. Compose's `release` profile runs both; CI builds and starts both on every pull request.
 - `GET /metrics` on the worker, in the Prometheus text format and behind the service token: jobs by task and terminal status, submissions, 429 refusals, queue depth, running jobs, pool size and readiness, the concurrency and capacity settings, and per-task histograms of job and queue durations. Aggregates only, with labels from fixed sets; they live in memory and reset when the worker restarts.
 
 ## [0.2.0] - 2026-10-21

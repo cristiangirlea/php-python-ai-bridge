@@ -104,15 +104,88 @@ jobs:
         if: always()
         run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile py-dev --profile php-frameworks --profile tls down
 
+  # The images publish.yml pushes, built for this runner's platform only and never pushed.
+  images:
+    name: Worker images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the worker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.worker
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: bridge-worker:ci
+      - name: Build the ONNX worker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.worker-onnx
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: bridge-worker-onnx:ci
+      - name: The images start the worker
+        run: |
+          docker run --rm --entrypoint python bridge-worker:ci -c 'import ai_bridge.server'
+          docker run --rm bridge-worker:ci --help
+          docker run --rm --entrypoint python bridge-worker-onnx:ci -c 'import onnxruntime, tokenizers, numpy, ai_bridge.server'
+          docker run --rm bridge-worker-onnx:ci --help
+      # Each image serves an authenticated /healthz; the ONNX one on the lexical backend, since CI has no models.
+      - name: The images answer /healthz
+        timeout-minutes: 3
+        env:
+          BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+          PROBE: |
+            import json, os, sys, time, urllib.error, urllib.request
+            request = urllib.request.Request("http://127.0.0.1:8090/healthz",
+                                             headers={"Authorization": "Bearer " + os.environ["BRIDGE_TOKEN"]})
+            for attempt in range(30):
+                try:
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        body = json.load(response)
+                    break
+                except urllib.error.HTTPError:
+                    raise
+                except OSError:
+                    time.sleep(1)
+            else:
+                sys.exit("/healthz never answered")
+            expected = {"status": "ok", "protocol": 1, "backend": sys.argv[1]}
+            if body != expected:
+                sys.exit(f"/healthz said {body}, expected {expected}")
+            print(body)
+        run: |
+          docker run -d --name bridge-worker-ci -e BRIDGE_TOKEN bridge-worker:ci
+          docker run --rm --network container:bridge-worker-ci -e BRIDGE_TOKEN --entrypoint python bridge-worker:ci \
+            -c "$PROBE" lexical
+          docker run -d --name bridge-worker-onnx-ci -e BRIDGE_TOKEN -e BRIDGE_BACKEND=lexical bridge-worker-onnx:ci
+          docker run --rm --network container:bridge-worker-onnx-ci -e BRIDGE_TOKEN --entrypoint python \
+            bridge-worker-onnx:ci -c "$PROBE" lexical
+          # The fetcher takes no arguments and `fetch` downloads at once, so it is only loaded here, offline.
+          docker run --rm --network none --entrypoint python bridge-worker-onnx:ci -c \
+            'import importlib.util as u; s = u.spec_from_file_location("fetch_model", "/opt/bridge/fetch_model.py"); s.loader.exec_module(u.module_from_spec(s))'
+      - name: Stop the image checks' containers
+        if: always()
+        run: docker rm -f bridge-worker-ci bridge-worker-onnx-ci || true
+
   # Keep the required branch-protection check stable as the matrix changes.
   deterministic:
     if: always()
-    needs: [php, mcp]
+    needs: [php, mcp, images]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - name: Require every supported PHP version and the MCP server to pass
+      - name: Require every supported PHP version, the MCP server and the images to pass
         env:
           MATRIX_RESULT: ${{ needs.php.result }}
           MCP_RESULT: ${{ needs.mcp.result }}
-        run: test "$MATRIX_RESULT" = success -a "$MCP_RESULT" = success
+          IMAGES_RESULT: ${{ needs.images.result }}
+        run: test "$MATRIX_RESULT" = success -a "$MCP_RESULT" = success -a "$IMAGES_RESULT" = success

@@ -1,0 +1,16 @@
+# The lexical worker: standard library only, no model and no network access of its own.
+# The same Python release as compose's python:3.12 image, slim and pinned to its multi-arch index.
+FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/bridge
+
+# Owned by root, so the service cannot rewrite its own code.
+COPY worker/ai_bridge /opt/bridge/ai_bridge
+
+USER 65532:65532
+WORKDIR /opt/bridge
+EXPOSE 8090
+ENTRYPOINT ["python", "-m", "ai_bridge.server"]
+CMD ["--host", "0.0.0.0"]
