@@ -24,12 +24,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
+import public_data  # noqa: E402
+
 # The worker's own limits, so that no job is refused for its size.
 from ai_bridge.server import MAX_BODY  # noqa: E402
-from ai_bridge.tasks import MAX_DOCUMENTS, MAX_FIELD_CHARACTERS, MAX_TOTAL_CHARACTERS  # noqa: E402
+from ai_bridge.tasks import MAX_DOCUMENTS, MAX_FIELD_CHARACTERS, MAX_TOTAL_CHARACTERS  # noqa: E402, F401  (the tests hold CANDIDATES to MAX_DOCUMENTS)
 from benchmark import cpu_model, wait_ready  # noqa: E402
 from ner_measure import finish  # noqa: E402  (submits a job and waits out a full worker)
-import public_data  # noqa: E402
 
 DATASET = "arguana"
 QUERIES, CANDIDATES, K = 200, 100, 10
@@ -168,7 +169,7 @@ def main() -> None:
     lists = [candidates(index, ids, query_id, text, CANDIDATES) for query_id, text in chosen]
     bm25_seconds = time.monotonic() - started
     reranked, models, shortened, seconds = [], set(), 0, []
-    for number, ((query_id, text), found) in enumerate(zip(chosen, lists), start=1):
+    for number, ((_query_id, text), found) in enumerate(zip(chosen, lists), start=1):
         if not found:
             reranked.append([])
             continue

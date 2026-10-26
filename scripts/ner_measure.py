@@ -23,8 +23,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from benchmark import POLL_S, TERMINAL, call, cpu_model, wait_ready  # noqa: E402  (the same protocol helpers)
 import public_data  # noqa: E402
+from benchmark import POLL_S, TERMINAL, call, cpu_model, wait_ready  # noqa: E402  (the same protocol helpers)
 
 REPO = Path(__file__).resolve().parents[1]
 SAMPLE = REPO / "tests" / "fixtures" / "ner-sample.json"
