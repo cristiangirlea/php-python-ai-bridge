@@ -3,7 +3,7 @@
 A typed PHP client for a small Python service that runs bounded AI tasks (rerank, embed, redact) on a
 pool of warm child processes, one job per child at a time, with a FrankenPHP worker-mode example and a stdio MCP server as a second client of the
 same HTTP protocol. Experimental: jobs live in memory, nothing is durable, no production claim is made.
-README has the overview; `docs/protocol.md`, `docs/integration.md`, `docs/mcp.md`, `docs/security.md`
+README has the overview; `docs/protocol.md`, `docs/integration.md`, `docs/mcp.md`, `docs/operations.md`, `docs/security.md`
 and `docs/testing.md` are the guides. Everything builds, tests and downloads inside `docker/compose.yaml`.
 
 ## Layout
