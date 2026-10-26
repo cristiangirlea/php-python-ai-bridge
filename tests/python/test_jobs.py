@@ -1726,6 +1726,34 @@ class OwnerTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_cancelled_jobs_hold_the_owner_s_cap_until_they_expire(self):
+        store = JobStore(self.settings(capacity=8, owner_capacity=2, retention_seconds=300))
+        try:
+            running = store.submit("test.delay", {"seconds": 5}, owner="app")
+            deadline = time.monotonic() + 5
+            while store.get(running["id"], "app")["status"] != "running":
+                self.assertLess(time.monotonic(), deadline, "the job never started")
+                time.sleep(0.01)
+            queued = store.submit("test.delay", {"seconds": 5}, owner="app")
+            self.assertEqual(store.get(queued["id"], "app")["status"], "queued")
+            with self.assertRaises(CapacityError):
+                store.submit("test.delay", {"seconds": 0}, owner="app")
+            for job in (running, queued):
+                self.assertEqual(store.cancel(job["id"], "app")["status"], "cancelled")
+            # A cancelled job is retained like any finished one, so it still counts.
+            with self.assertRaises(CapacityError):
+                store.submit("test.delay", {"seconds": 0}, owner="app")
+            store.submit("test.delay", {"seconds": 0}, owner="other")
+            with store._lock:
+                store._jobs[running["id"]]["_finished"] = time.monotonic() - 300
+            store.submit("test.delay", {"seconds": 0}, owner="app")
+            with self.assertRaises(CapacityError):
+                store.submit("test.delay", {"seconds": 0}, owner="app")
+            self.assertIsNone(store.get(running["id"], "app"))
+            self.assertEqual(store.get(queued["id"], "app")["status"], "cancelled")
+        finally:
+            store.close()
+
     def test_the_cap_s_retry_after_is_the_owner_s_own_earliest_expiry(self):
         store = JobStore(self.settings(capacity=8, owner_capacity=2, retention_seconds=5))
         try:
