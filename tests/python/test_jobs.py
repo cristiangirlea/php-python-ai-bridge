@@ -1456,6 +1456,18 @@ class WarmPoolTests(unittest.TestCase):
         pins = [entry for entry in block if entry.startswith((b"OMP_NUM_THREADS=", b"OPENBLAS_NUM_THREADS=", b"RAYON_NUM_THREADS="))]
         self.assertEqual(sorted(pins), [b"OMP_NUM_THREADS=1", b"OPENBLAS_NUM_THREADS=1", b"RAYON_NUM_THREADS=1"])
 
+    @unittest.skipUnless(os.path.exists("/proc/self/environ"), "needs /proc to read a child's environment block")
+    def test_a_child_starts_with_onnx_runtime_telemetry_off(self):
+        # ONNX Runtime 1.31 starts a client on import that posts to Microsoft's collector unless this is set, so
+        # an operator's value cannot turn it back on.
+        self.store.close()
+        with patch.dict(os.environ, {"ORT_DISABLE_TELEMETRY": "0"}):
+            self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+            pid = self.inspect()["pid"]
+            block = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        switch = [entry for entry in block if entry.startswith(b"ORT_DISABLE_TELEMETRY=")]
+        self.assertEqual(switch, [b"ORT_DISABLE_TELEMETRY=1"])
+
     @unittest.skipIf(os.name == "nt", "os.kill cannot deliver SIGINT to a process on Windows")
     def test_a_child_ignores_sigint_idle_and_running(self):
         pid = self.inspect()["pid"]
