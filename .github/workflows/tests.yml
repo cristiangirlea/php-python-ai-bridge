@@ -136,7 +136,7 @@ jobs:
         run: |
           docker run --rm --entrypoint python bridge-worker:ci -c 'import ai_bridge.server'
           docker run --rm bridge-worker:ci --help
-          docker run --rm --entrypoint python bridge-worker-onnx:ci -c 'import onnxruntime, tokenizers, numpy, ai_bridge.server'
+          docker run --rm -e ORT_DISABLE_TELEMETRY=1 --entrypoint python bridge-worker-onnx:ci -c 'import onnxruntime, tokenizers, numpy, ai_bridge.server'
           docker run --rm bridge-worker-onnx:ci --help
       # Each image serves an authenticated /healthz; the ONNX one on the lexical backend, since CI has no models.
       - name: The images answer /healthz

@@ -446,6 +446,8 @@ class JobStore:
             parent, child = self._context.Pipe()
             # numpy's OpenBLAS starts a thread per visible CPU, not per CPU of quota, and all count towards pids_limit.
             os.environ.update(RAYON_NUM_THREADS="1", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
+            # ONNX Runtime 1.31 posts telemetry to Microsoft's collector from import on unless this is set.
+            os.environ["ORT_DISABLE_TELEMETRY"] = "1"
             process = self._context.Process(
                 target=_serve, args=(child, self.settings.backend, self.settings.model_dir), daemon=True)
             process.start()
