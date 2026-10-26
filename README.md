@@ -121,6 +121,11 @@ docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 
+# mypy --strict and ruff over the Python code, after acquiring the pinned wheels once (network);
+# py-analysis also installs the MCP server's wheels from mcp-fetcher, so it runs after that:
+docker compose -f docker/compose.yaml run --rm --no-deps py-dev-fetcher
+docker compose -f docker/compose.yaml run --rm --no-deps py-analysis
+
 # PHP syntax validation inside the container:
 docker compose -f docker/compose.yaml run --rm --no-deps php-tests sh -ec \
   'find src examples tests/php -name "*.php" -print0 | xargs -0 -n1 php -l'
@@ -137,7 +142,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-analysis
 
 Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only in the test service with `BRIDGE_TEST_TASKS=1`.
 
-CI runs deterministic tests for pushes to main and for pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. Every job runs on GitHub's hosted runners (`ubuntu-latest`), because the repository is public: GitHub does not meter Actions minutes for public repositories, and a fork's pull request runs its own code on a disposable runner of GitHub's, not on a machine of the maintainer's; see [the runner notes](docs/testing.md#ci-runners) and [security](docs/security.md). The stable `deterministic` check succeeds only if every PHP matrix job and the MCP server job, which runs the offline MCP suite, the consumer install and PHPStan, succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
+CI runs deterministic tests for pushes to main and for pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. Every job runs on GitHub's hosted runners (`ubuntu-latest`), because the repository is public: GitHub does not meter Actions minutes for public repositories, and a fork's pull request runs its own code on a disposable runner of GitHub's, not on a machine of the maintainer's; see [the runner notes](docs/testing.md#ci-runners) and [security](docs/security.md). The stable `deterministic` check succeeds only if every PHP matrix job and the MCP server job, which runs the offline MCP suite, mypy and ruff, the consumer install and PHPStan, succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
 
 ## Important limits
 

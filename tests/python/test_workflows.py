@@ -93,7 +93,7 @@ def inputs(step: list) -> list:
     for line in lines:
         key = re.match(r"^(\s*)with:\s*$", line)
         if key:
-            deeper = itertools.takewhile(lambda below: len(below) - len(below.lstrip()) > len(key.group(1)), lines)
+            deeper = itertools.takewhile(lambda below: len(below) - len(below.lstrip()) > len(key.group(1)), lines)  # noqa: B023  (called only within this iteration)
             return [below.strip() for below in deeper]
     return []
 

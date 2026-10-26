@@ -76,7 +76,7 @@ def redact(base: str, text: str, threshold: float) -> dict:
             if error.code != 429:
                 raise
             if attempt == CAPACITY_RETRIES:
-                raise SystemExit(f"the worker stayed at capacity for {CAPACITY_RETRIES * CAPACITY_WAIT_S} s")
+                raise SystemExit(f"the worker stayed at capacity for {CAPACITY_RETRIES * CAPACITY_WAIT_S} s") from None
             time.sleep(CAPACITY_WAIT_S)
     while job["status"] not in TERMINAL:
         time.sleep(POLL_S)

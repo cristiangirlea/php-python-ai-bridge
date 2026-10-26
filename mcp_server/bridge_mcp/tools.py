@@ -1,13 +1,14 @@
 """One MCP tool per allowlisted task. The tool list is a literal in this file: nothing is read from
 the worker, and the test-only tasks cannot appear whatever BRIDGE_TEST_TASKS says."""
 
+import functools
 import json
 import math
 import random
 import re
 import time
 from pathlib import Path
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict, cast
 
 import anyio
 from mcp.server import MCPServer
@@ -184,20 +185,21 @@ def _explain(error: BridgeError) -> str:
     return hints.get(error.code, f"The worker reported {error.code}; internal details are not exposed.")
 
 
-def _number(value) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
+def _number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(cast(float, value))
 
 
-def _name(value) -> bool:
+def _name(value: object) -> bool:
     return isinstance(value, str) and value != ""
 
 
-def _rankings(result: dict, count: int, top_k: int) -> list:
+def _rankings(result: dict[str, Any], count: int, top_k: int) -> list[dict[str, Any]]:
     # The same rules as RerankResult in the PHP client: exact count, unique indexes, stable descending order.
     rankings = result.get("rankings")
     if not _name(result.get("model")) or not isinstance(rankings, list) or len(rankings) != min(top_k, count):
         raise ToolError("The worker returned an invalid ranking.")
-    seen, previous = set(), None
+    seen: set[int] = set()
+    previous: tuple[int, float] | None = None
     for item in rankings:
         if (not isinstance(item, dict) or type(item.get("index")) is not int or not 0 <= item["index"] < count
                 or item["index"] in seen or not _number(item.get("score"))
@@ -206,10 +208,10 @@ def _rankings(result: dict, count: int, top_k: int) -> list:
             raise ToolError("The worker returned an invalid ranking.")
         seen.add(item["index"])
         previous = (item["index"], item["score"])
-    return rankings
+    return cast(list[dict[str, Any]], rankings)
 
 
-def _vectors(result: dict, count: int) -> list:
+def _vectors(result: dict[str, Any], count: int) -> list[list[float]]:
     # The same rules as EmbedResult: one vector of the declared dimension per text, finite, unit length.
     vectors, dimensions = result.get("vectors"), result.get("dimensions")
     if (not _name(result.get("model")) or type(dimensions) is not int or dimensions < 1
@@ -219,10 +221,10 @@ def _vectors(result: dict, count: int) -> list:
         if (not isinstance(vector, list) or len(vector) != dimensions or not all(_number(value) for value in vector)
                 or abs(math.sqrt(sum(value * value for value in vector)) - 1.0) > 1e-3):
             raise ToolError("The worker returned invalid embeddings.")
-    return vectors
+    return cast(list[list[float]], vectors)
 
 
-def _spans(result: dict, text: str) -> list:
+def _spans(result: dict[str, Any], text: str) -> list[Span]:
     # The same rules as RedactResult: spans sorted, disjoint and inside the original text.
     spans = result.get("spans")
     if (not _name(result.get("model")) or not isinstance(result.get("text"), str) or not result["text"]
@@ -237,10 +239,10 @@ def _spans(result: dict, text: str) -> list:
                 or not _number(span.get("score")) or not 0 <= span["score"] <= 1):
             raise ToolError("The worker returned an invalid redaction.")
         cursor = span["end"]
-    return spans
+    return cast(list[Span], spans)
 
 
-def _check_texts(texts: list, singular: str, limit: int, extra: int = 0) -> None:
+def _check_texts(texts: list[str], singular: str, limit: int, extra: int = 0) -> None:
     if not 1 <= len(texts) <= limit:
         raise ToolError(f"Give between 1 and {limit} {singular}s.")
     total = extra
@@ -298,7 +300,7 @@ def _documents_from(root: Path | None, path_text: str) -> list[str]:
     return documents
 
 
-def _index_from(root: Path | None, path_text: str, cache) -> index_files.LoadedIndex:
+def _index_from(root: Path | None, path_text: str, cache: index_files.IndexCache) -> index_files.LoadedIndex:
     resolved = _confine(root, path_text, "index_path")
     sidecar = resolved
     try:
@@ -368,7 +370,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     mcp = MCPServer("bridge_mcp", title="PHP-Python AI bridge", version="0.1",
                     instructions=INSTRUCTIONS.format(backend=backend, **described))
 
-    async def run(task: str, payload: dict, ctx: Context, deadline: float | None = None) -> dict:
+    async def run(task: str, payload: dict[str, Any], ctx: Context, deadline: float | None = None) -> dict[str, Any]:
         """Run one job within the call's time budget; a tool that runs several jobs passes one deadline to all."""
         def on_progress(completed: int, total: int) -> None:
             # The SDK sends nothing when the host gave no progress token, so this is unconditional.
@@ -382,7 +384,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             remaining = deadline - time.monotonic()
             try:
                 return await anyio.to_thread.run_sync(
-                    lambda remaining=remaining: bridge.run(task, payload, remaining, on_progress, 0.1))
+                    functools.partial(bridge.run, task, payload, remaining, on_progress, 0.1))
             except BridgeError as error:
                 if error.code != "capacity_exceeded":
                     raise ToolError(_explain(error)) from None
@@ -443,7 +445,11 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             raise ToolError("query is empty.")
         if (documents is None) == (documents_path is None):
             raise ToolError("Give exactly one of documents or documents_path.")
-        chosen = documents if documents is not None else _documents_from(root, documents_path)
+        if documents is None:
+            assert documents_path is not None  # exactly one of the two, as checked above
+            chosen = _documents_from(root, documents_path)
+        else:
+            chosen = documents
         _check_texts(chosen, "document", BY_VALUE_DOCUMENTS if documents is not None else BY_REFERENCE_DOCUMENTS,
                      extra=len(query))
         result = await run("rerank", {"query": query, "documents": chosen, "top_k": min(top_k, len(chosen))}, ctx)
@@ -469,7 +475,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         result = await run("embed", {"texts": texts}, ctx)
         vectors = _vectors(result, len(texts))
         matrix = [[round(sum(x * y for x, y in zip(a, b)), 4) for b in vectors] for a in vectors]
-        pairs = sorted(({"a": a, "b": b, "similarity": matrix[a][b]}
+        pairs = sorted((Pair(a=a, b=b, similarity=matrix[a][b])
                         for a in range(len(texts)) for b in range(a + 1, len(texts))),
                        key=lambda pair: (-pair["similarity"], pair["a"], pair["b"]))[:PAIRS]
         return {"model": result["model"], "matrix": matrix, "pairs": pairs}
@@ -486,7 +492,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         text: Annotated[str, Field(description="The text to mask.", min_length=1, max_length=MAX_TEXT_CHARACTERS)],
         ctx: Context,
         entities: Annotated[list[Literal["PER", "ORG", "LOC"]], Field(
-            description="Entity kinds the model pass masks; rules always run.", max_length=3)] = ("PER",),
+            description="Entity kinds the model pass masks; rules always run.", max_length=3)] = ("PER",),  # type: ignore[assignment]  # a tuple, since a list default would be shared by every call
         min_score: Annotated[float, Field(description="Minimum model confidence to mask.", ge=0, le=1)] = 0.85,
     ) -> Redaction:
         if not text.strip():
@@ -518,6 +524,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     ) -> Search:
         _check_texts([query], "query", 1)
         loaded = await anyio.to_thread.run_sync(lambda: _index_from(root, index_path, cache))
+        assert root is not None  # _index_from refuses every path without one
         # Vectors from different models are not comparable, so the gate comes before any job is spent.
         if loaded.model != names["embed"]:
             raise ToolError(f"The index at {index_path!r} was built with {loaded.model!r}; this worker embeds with "
@@ -531,7 +538,8 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
                             f"{loaded.model!r}. The worker changed since start-up; check bridge_health.")
         wanted = min(loaded.count, max(CANDIDATE_FACTOR * top_k, MIN_CANDIDATES))
         candidates = await anyio.to_thread.run_sync(lambda: index_files.search(loaded, query_vector, wanted))
-        rerank_model, ordered = None, [(number, similarity, None) for number, similarity in candidates]
+        rerank_model = None
+        ordered: list[tuple[int, float, float | None]] = [(number, similarity, None) for number, similarity in candidates]
         if rerank:
             # Keep the query and the candidates inside the worker's character budget and the request's byte
             # limit; multi-byte text reaches the bytes first.
@@ -550,7 +558,7 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             rerank_model = reranked["model"]
             ordered = [(candidates[item["index"]][0], candidates[item["index"]][1], item["score"])
                        for item in _rankings(reranked, len(texts), wanted_k)]
-        results = []
+        results: list[SearchHit] = []
         for number, similarity, score in ordered[:top_k]:
             chunk = loaded.chunks[number]
             results.append({"source": _source(loaded, root, chunk["source"]), "chunk": number,

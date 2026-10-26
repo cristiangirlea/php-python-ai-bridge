@@ -3,7 +3,6 @@
 from integration import finished, request, wait_ready
 from model_cases import REDACT_TEXT, RERANK_CASES, SIMILAR_TEXTS, UNCASED_MASKED, UNCASED_TEXT
 
-
 FRANCE = ["Bananas are yellow fruit.", "Paris is the capital of France.", "A car has four wheels."]
 
 
@@ -51,7 +50,10 @@ def main():
     assert status == 202
     result = finished(job["id"])["result"]
     assert result["model"] == "sentence-transformers/all-MiniLM-L6-v2" and result["dimensions"] == 384
-    dot = lambda a, b: sum(x * y for x, y in zip(a, b))
+
+    def dot(a, b):
+        return sum(x * y for x, y in zip(a, b))
+
     assert dot(result["vectors"][0], result["vectors"][1]) > dot(result["vectors"][0], result["vectors"][2])
     status, job, _ = request("/redact", {"text": REDACT_TEXT, "entities": ["PER", "LOC"]})
     assert status == 202

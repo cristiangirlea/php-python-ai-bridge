@@ -4,12 +4,13 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from .protocol import Bridge, BridgeError
 from .tools import build_server
 
 
-def wait_for_worker(bridge: Bridge, window_s: float) -> dict:
+def wait_for_worker(bridge: Bridge, window_s: float) -> dict[str, Any]:
     """Compose starts the worker beside this server with no readiness gate, so a refused connection
     is waited out for a bounded window; a rejected token or a bad contract is not."""
     deadline = time.monotonic() + window_s

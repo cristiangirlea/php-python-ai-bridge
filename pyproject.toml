@@ -1,0 +1,27 @@
+# Tool configuration only: this repository ships a PHP library and builds no Python package.
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = ["worker", "mcp_server"]
+files = ["worker", "mcp_server"]
+
+# The ONNX backend imports these inside its functions only, and they are not installed where mypy runs.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*", "onnxruntime", "onnxruntime.*", "tokenizers", "tokenizers.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["worker", "mcp_server", "scripts", "tests", "tests/mcp", "tests/python"]
+
+[tool.ruff.lint]
+# pycodestyle errors and warnings, pyflakes, bugbear and import order. E501 is left out: tests and scripts hold
+# long literal data and messages that wrapping would restyle without making anything safer.
+select = ["E", "W", "F", "B", "I"]
+ignore = ["B905", "E501"]
+
+[tool.ruff.lint.isort]
+# The MCP SDK, not the tests/mcp directory that src lists for the test helpers' imports.
+known-third-party = ["mcp"]

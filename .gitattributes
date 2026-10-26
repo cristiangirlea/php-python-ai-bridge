@@ -16,6 +16,9 @@
 /mcp_server export-ignore
 /phpstan-baseline.neon export-ignore
 /phpstan.neon export-ignore
+/pyproject.toml export-ignore
+/requirements-dev.lock export-ignore
+/requirements-dev.txt export-ignore
 /requirements-mcp.lock export-ignore
 /requirements-mcp.txt export-ignore
 /requirements-model.lock export-ignore
