@@ -20,7 +20,8 @@ from unittest.mock import MagicMock, patch
 from ai_bridge import jobs, log, metrics, server, tasks
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
-from test_log import BlockedStream, BrokenStream, parse as parse_log
+from test_log import BlockedStream, BrokenStream
+from test_log import parse as parse_log
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
 
@@ -707,11 +708,11 @@ class EnvironmentTests(unittest.TestCase):
             settings = self.main({
                 "BRIDGE_CONCURRENCY": "3", "BRIDGE_CAPACITY": "9", "BRIDGE_RETENTION_SECONDS": "1.5",
                 "BRIDGE_BACKEND": "lexical", "BRIDGE_MODEL_DIR": "/elsewhere", "BRIDGE_TEST_TASKS": "1",
-                "BRIDGE_WORKER_MAX_JOBS": "7", "BRIDGE_STATE_DIR": state_dir,
+                "BRIDGE_WORKER_MAX_JOBS": "7", "BRIDGE_STATE_DIR": state_dir, "BRIDGE_OWNER_CAPACITY": "4",
             })
             self.assertEqual(settings, Settings(concurrency=3, capacity=9, retention_seconds=1.5, backend="lexical",
                                                 model_dir="/elsewhere", test_tasks=True, max_jobs=7,
-                                                state_dir=state_dir))
+                                                state_dir=state_dir, owner_capacity=4))
 
     def test_an_empty_state_dir_is_unset(self):
         self.assertIsNone(self.main({"BRIDGE_STATE_DIR": ""}).state_dir)
@@ -749,6 +750,19 @@ class EnvironmentTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:
                     self.main({name: value})
                 self.assertEqual(raised.exception.code, expected)
+
+    def test_an_owner_cap_outside_1_to_the_capacity_or_not_an_integer_names_its_variable(self):
+        for capacity, value in (("9", "0"), ("9", "10"), (None, "129"), ("9", "-1"), ("9", "many"), ("9", "1.5"),
+                                ("9", "")):
+            environment = {"BRIDGE_OWNER_CAPACITY": value, **({"BRIDGE_CAPACITY": capacity} if capacity else {})}
+            with self.subTest(environment=environment):
+                with self.assertRaises(SystemExit) as raised:
+                    self.main(environment)
+                self.assertIn("BRIDGE_OWNER_CAPACITY", str(raised.exception.code))
+        for value in ("1", "9"):
+            with self.subTest(value=value):
+                self.assertEqual(self.main({"BRIDGE_CAPACITY": "9", "BRIDGE_OWNER_CAPACITY": value}).owner_capacity,
+                                 int(value))
 
     def test_an_out_of_range_job_limit_is_refused_by_the_store(self):
         # The real server: the store checks its limits before it starts any child or binds the port.
@@ -1346,6 +1360,39 @@ class OwnerHttpTests(unittest.TestCase):
         # The families without an owner label are unchanged.
         self.assertEqual(sample(families, "bridge_job_duration_seconds_count", task="test.delay"), 1)
 
+    def test_a_token_at_its_cap_gets_the_full_store_s_429_and_the_other_still_submits(self):
+        self.stop()
+        self.start(Settings(concurrency=1, capacity=3, owner_capacity=2, retention_seconds=300, test_tasks=True))
+
+        def submit(token):
+            connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+            try:
+                connection.request("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {"seconds": 0}}),
+                                   {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+                response = connection.getresponse()
+                return response.status, response.getheader("Retry-After"), json.loads(response.read())
+            finally:
+                connection.close()
+
+        for _ in range(2):
+            status, _, job = submit(APP)
+            self.assertEqual(status, 202)
+            self.finished(job["id"], "app")
+        status, retry_after, capped = submit(APP)
+        self.assertEqual((status, capped["error"]["code"]), (429, "capacity_exceeded"))
+        # The capped token's own jobs hold its slots for the 300 s retention.
+        self.assertRegex(retry_after, r"\A[1-9][0-9]*\Z")
+        self.assertIn(int(retry_after), (299, 300))
+        self.assertEqual(submit(OTHER)[0], 202)
+        # The store is now full as a whole, and its 429 is the same answer.
+        status, retry_after, full = submit(OTHER)
+        self.assertEqual(status, 429)
+        self.assertIn(int(retry_after), (299, 300))
+        self.assertEqual(capped, full)
+        families = parse_metrics(self.call("GET", "/metrics", APP)[1])
+        self.assertEqual(sample(families, "bridge_submissions_rejected_total", owner="app", reason="capacity"), 1)
+        self.assertEqual(sample(families, "bridge_submissions_rejected_total", owner="other", reason="capacity"), 1)
+
     def test_no_token_value_reaches_the_job_table_and_a_restored_job_keeps_its_owner(self):
         status, job = self.submit(APP, "table-key")
         self.assertEqual(status, 202)
@@ -1646,15 +1693,19 @@ class LoggingStartTests(unittest.TestCase):
 
     def test_json_writes_start_and_stop_with_safe_settings_only(self):
         text = self.main({"BRIDGE_LOG": "json", "BRIDGE_TOKENS": f"app={APP},{SENTINEL}={OTHER}",
-                          "BRIDGE_CAPACITY": "9", "BRIDGE_DRAIN_SECONDS": "7"})
+                          "BRIDGE_CAPACITY": "9", "BRIDGE_OWNER_CAPACITY": "3", "BRIDGE_DRAIN_SECONDS": "7"})
         lines = parse_log(text)
         self.assertEqual([line["event"] for line in lines], ["start", "stop"])
         self.assertEqual({key: lines[0][key] for key in log.EVENTS["start"]},
-                         {"backend": "lexical", "concurrency": 2, "capacity": 9, "retention_seconds": 300.0,
-                          "max_jobs": 1000, "drain_seconds": 7, "tokens": 2})
+                         {"backend": "lexical", "concurrency": 2, "capacity": 9, "owner_capacity": 3,
+                          "retention_seconds": 300.0, "max_jobs": 1000, "drain_seconds": 7, "tokens": 2})
         self.assertEqual((lines[1]["cancelled"], lines[1]["level"]), (0, "info"))
         for value in (APP, OTHER, SENTINEL, "app"):
             self.assertNotIn(value, text)
+
+    def test_without_an_owner_cap_the_start_line_gives_the_capacity(self):
+        lines = parse_log(self.main({"BRIDGE_LOG": "json", "BRIDGE_CAPACITY": "9", "BRIDGE_TOKEN": TOKEN}))
+        self.assertEqual((lines[0]["capacity"], lines[0]["owner_capacity"]), (9, 9))
 
     def serve_with_a_running_job(self, signals):
         """A serve_forever that first starts a long job, then signals the server and serves until it stops."""

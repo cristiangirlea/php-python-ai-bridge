@@ -1,0 +1,4 @@
+# Static analysis of the worker, the MCP server, the scripts and the tests. Never installed at runtime: the
+# py-analysis service installs these wheels offline into a tmpfs, hash-checked against requirements-dev.lock.
+mypy==2.4.0
+ruff==0.17.2

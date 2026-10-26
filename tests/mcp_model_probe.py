@@ -22,8 +22,8 @@ sys.path.insert(0, str(REPO / "tests"))
 sys.path.insert(0, str(REPO / "tests" / "mcp"))
 sys.path.insert(0, str(REPO / "scripts"))
 from ai_bridge.tasks import MODEL_NAMES  # noqa: E402  (standard library only at import)
-from model_cases import REDACT_TEXT, RERANK_CASES, SIMILAR_TEXTS  # noqa: E402
 from mcp_evaluate import load_pairs  # noqa: E402  (the runner's rule for which answer a backend expects)
+from model_cases import REDACT_TEXT, RERANK_CASES, SIMILAR_TEXTS  # noqa: E402
 from semantic_reach import SEMANTIC_REACH  # noqa: E402
 
 SEMANTIC = REPO / "tests" / "mcp" / "evaluation-semantic.xml"
