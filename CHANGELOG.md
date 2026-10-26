@@ -20,6 +20,10 @@ All notable changes to this project are documented in this file. The format foll
 
 - Locks moved past published advisories: `certifi` 2026.10.19 and `filelock` 4.2.1 in `requirements-model.lock`, `opentelemetry-api` 1.45.1 and `pyjwt` 2.15.0 in `requirements-mcp.lock`.
 
+### Fixed
+
+- The JSON log writes a `request` line only for a reply that was written in full: a peer gone mid-reply, or a busy 503 that could not be sent, no longer logs a status it never received. The `drain` line is no longer lost when a second signal stops the worker while the drain thread is held; it is written once, before `stop`. With `BRIDGE_LOG=off` requests, jobs and the drain no longer time or build lines that are never written.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added

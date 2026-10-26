@@ -422,6 +422,8 @@ class JobStore:
         # A job read back from the table finished in an earlier process and never ends here.
         self._ended[job["_owner"], job["task"], status] += 1
         metrics.observe(self._durations[job["task"]], job["_finished"] - job["_submitted_at"])
+        if not log.enabled():
+            return
         started = job.get("_started_at")
         log.event("job", warning=status in ("failed", "timed_out"), job_id=job["id"], task=job["task"],
                   owner=job["_owner"], job_status=status,

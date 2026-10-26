@@ -25,6 +25,8 @@ from .tasks import missing_models
 MAX_BODY = 262144
 MAX_REQUEST_LINE = 8192
 MAX_HEADER_BLOCK = 16384
+# How long a stop waits for a held drain thread's line: past it, the stop goes ahead without one.
+DRAIN_LINE_WAIT = 5
 # What a request line names as the route: the template a path matches, never the path itself.
 _ROUTES = {"/healthz": "/healthz", "/readyz": "/readyz", "/metrics": "/metrics", "/v1/jobs": "/v1/jobs"}
 _JOB_ROUTES = ((re.compile(r"/v1/jobs/[a-f0-9]{32}"), "/v1/jobs/{id}"),
@@ -171,6 +173,10 @@ class BridgeServer(ThreadingHTTPServer):
         self._signalled_at: float | None = None
         self._interrupted = threading.Event()
         self._drainer: threading.Thread | None = None
+        self._drained = threading.Event()  # the drain thread is done with its line: fields published, or none to write
+        self._drain_lock = threading.Lock()
+        self._drain_line: dict[str, Any] | None = None  # those fields until the line is written
+        self._drain_closed = False  # set by server_close: no drain line after it, since stop's follows
         self.slots = threading.BoundedSemaphore(32)
         # The children the store starts inherit this process's environment block as it is at that moment, and
         # removing a variable later leaves it in /proc/<pid>/environ; so the tokens leave before any child exists.
@@ -188,11 +194,13 @@ class BridgeServer(ThreadingHTTPServer):
             # One non-blocking send that fits any socket buffer, nothing read: a client cannot hold the accept loop.
             try:
                 request.setblocking(False)
-                request.send(BUSY)
+                sent = request.send(BUSY) == len(BUSY)
             except OSError:
-                pass
+                sent = False
             self.shutdown_request(request)
-            log.event("request", warning=True, method=None, route="other", status=503, duration_ms=0, owner=None)
+            # A reply that did not go out is no reply, as for a connection that ends before one.
+            if sent:
+                log.event("request", warning=True, method=None, route="other", status=503, duration_ms=0, owner=None)
             return
         try:
             super().process_request(request, address)
@@ -213,8 +221,9 @@ class BridgeServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         super().server_close()
         if self._drainer is not None:
-            # A second signal stops serving before the drain thread has written its line, which goes before stop's.
-            self._drainer.join(1)
+            # A second signal can stop serving while the drain thread is still held; its line still goes before stop's.
+            self._drained.wait(DRAIN_LINE_WAIT)
+            self._write_drain(last=True)
         self.cancelled = self.jobs.close()
 
     def stop(self) -> None:
@@ -237,10 +246,24 @@ class BridgeServer(ThreadingHTTPServer):
             left = deadline - time.monotonic()
             if left <= 0 or self._interrupted.wait(min(left, 0.05)):
                 break
-        running = self.jobs.snapshot()["running"]
-        log.event("drain", warning=running > 0, duration_ms=round((time.monotonic() - self._signalled_at) * 1000, 3),
-                  running=running, interrupted=self._interrupted.is_set())
+        if log.enabled():
+            running = self.jobs.snapshot()["running"]
+            with self._drain_lock:
+                self._drain_line = {"duration_ms": round((time.monotonic() - self._signalled_at) * 1000, 3),
+                                    "running": running, "interrupted": self._interrupted.is_set()}
+        self._drained.set()
+        self._write_drain()
         self.shutdown()
+
+    def _write_drain(self, last: bool = False) -> None:
+        """The drain line from the published fields, once, by the drain thread or server_close, whichever is first;
+        last is server_close's call, after which a drain thread published too late writes nothing."""
+        with self._drain_lock:
+            fields, self._drain_line = self._drain_line, None
+            # Queued under the lock, so server_close cannot pass this and write stop's line first.
+            if fields is not None and not self._drain_closed:
+                log.event("drain", warning=fields["running"] > 0, **fields)
+            self._drain_closed = self._drain_closed or last
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -257,7 +280,8 @@ class Handler(BaseHTTPRequestHandler):
         self.rfile = _Head(self.rfile)  # type: ignore[assignment]
 
     def handle_one_request(self) -> None:
-        started = time.monotonic()
+        logged = log.enabled()
+        started = time.monotonic() if logged else 0.0
         # The standard library types command and path as str; they are None until a request line parses.
         self.command = self.path = self._owner = self._status = None  # type: ignore[assignment]
         try:
@@ -267,8 +291,8 @@ class Handler(BaseHTTPRequestHandler):
             self.requestline, self.request_version = "", "HTTP/1.0"
             self._error(431, "headers_too_large", "Request line or header block exceeds its limit")
         finally:
-            # After the reply is written; a connection that ended before any reply has no line.
-            if self._status is not None:
+            # After the reply is written; a connection that ended before any reply was written has no line.
+            if logged and self._status is not None:
                 log.event("request", warning=self._status >= 500, method=self._method(), route=self._route(),
                           status=self._status, duration_ms=round((time.monotonic() - started) * 1000, 3),
                           owner=self._owner)
@@ -287,10 +311,10 @@ class Handler(BaseHTTPRequestHandler):
                     return route
         return "other"
 
-    def send_response(self, code: int, message: str | None = None) -> None:
-        # The standard library's own refusals pass an HTTPStatus.
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        super().send_error(code, message, explain)
+        # The standard library's own refusals write their whole reply here, and pass an HTTPStatus.
         self._status = int(code)
-        super().send_response(code, message)
 
     def log_message(self, *_: Any) -> None:
         # Do not log URLs, credentials, inputs or model results.
@@ -314,6 +338,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         self.wfile.write(body)
+        # Only now sent: a peer gone mid-reply raises above and gets no request line.
+        self._status = status
 
     def _error(self, status: int, code: str, message: str, headers: Iterable[tuple[str, str]] = ()) -> None:
         self._reply(status, {"error": {"code": code, "message": message}}, headers)
