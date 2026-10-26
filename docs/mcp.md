@@ -143,4 +143,4 @@ docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
 ```
 
-Dependencies are pinned in `requirements-mcp.lock` with SHA-256 hashes for CPython 3.12 on Linux x86_64, like the model wheels. The SDK hard-depends on its HTTP transport stack (uvicorn, starlette, sse-starlette, cryptography, pyjwt), so those are installed and pinned too although nothing exercises them over stdio; they are part of the supply-chain surface all the same. The MCP SDK is the one third-party dependency of this repository's own code, and it stays out of `worker/`, which remains standard library only.
+Dependencies are pinned in `requirements-mcp.lock` with SHA-256 hashes for CPython 3.12 on Linux x86_64 and aarch64. The SDK hard-depends on its HTTP transport stack (uvicorn, starlette, sse-starlette, cryptography, pyjwt), so those are installed and pinned too although nothing exercises them over stdio; they are part of the supply-chain surface all the same. The MCP SDK is the one third-party dependency of this repository's own code, and it stays out of `worker/`, which remains standard library only.
