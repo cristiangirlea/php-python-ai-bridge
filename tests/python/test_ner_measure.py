@@ -117,6 +117,14 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(counts["PER"], {"gold": 2, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
         self.assertEqual(counts["informal"]["masked"], 1)
 
+    def test_one_predicted_span_masks_one_gold_span_across_the_label_rows(self):
+        # One ORG span over "Ada Acme" hides both names but is counted for one, in the label rows as in the register's.
+        items = [{"register": "news", "text": "Ada Acme", "entities": [["PER", "Ada"], ["ORG", "Acme"]]}]
+        found = [{"start": 0, "end": 8, "label": "ORG", "source": "model:ORG", "score": 0.9}]
+        counts = {name: value for _, name, value in measure.tally(items, {0.85: [found]})}
+        self.assertEqual(counts["news"]["masked"], 1)
+        self.assertEqual(sum(counts[label]["masked"] for label in measure.LABELS), 1)
+
     def test_only_the_model_s_spans_are_predictions(self):
         spans = [{"start": 0, "end": 3, "label": "PER", "source": "model:PER", "score": 0.9},
                  {"start": 4, "end": 7, "label": "LOC", "source": "model:LOC", "score": 0.6},
@@ -145,6 +153,9 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(counts[(0.85, "ORG")], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
         self.assertEqual(counts[(0.85, "LOC")], {"gold": 1, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts[(0.85, "PER")], {"gold": 2, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
+        for threshold in spans:
+            self.assertEqual(sum(counts[(threshold, label)]["masked"] for label in measure.LABELS),
+                             sum(counts[(threshold, register)]["masked"] for register in ("informal", "news")))
 
     def test_a_full_worker_is_waited_out(self):
         # Two thresholds over the sample and a development-set run within five minutes exceed the worker's 128 slots.
@@ -216,6 +227,7 @@ class Wnut17Tests(unittest.TestCase):
         self.assertEqual(counts["LOC"], {"gold": 1, "predicted": 0, "exact": 0, "overlapping": 0, "masked": 1})
         self.assertEqual(counts["ORG"], {"gold": 0, "predicted": 1, "exact": 0, "overlapping": 0, "masked": 0})
         self.assertEqual(counts["PER"], {"gold": 1, "predicted": 1, "exact": 1, "overlapping": 1, "masked": 1})
+        self.assertEqual(sum(counts[label]["masked"] for label in measure.LABELS), counts["all labels"]["masked"])
 
     def test_f1_is_the_harmonic_mean_of_precision_and_recall(self):
         self.assertEqual(measure.f1(3, 4, 6), "0.60")  # precision 0.5, recall 0.75

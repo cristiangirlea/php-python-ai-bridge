@@ -95,24 +95,24 @@ def predictions(spans: list) -> list:
     return [(span["start"], span["end"], span["label"]) for span in spans if span["source"].startswith("model:")]
 
 
-def matched(gold: list, predicted: list, same_label: bool) -> int:
+def matched(gold: list, predicted: list, same_label: bool) -> list:
     """Gold spans overlapped by a predicted span, each predicted span matching one gold span at most."""
-    unused, count = list(predicted), 0
+    unused, found = list(predicted), []
     for start, end, label in gold:
         match = next((p for p in unused if (p[2] == label or not same_label) and p[0] < end and start < p[1]), None)
         if match is not None:
             unused.remove(match)
-            count += 1
-    return count
+            found.append((start, end, label))
+    return found
 
 
-def score(gold: list, predicted: list, masking: list | None = None) -> dict:
+def score(gold: list, predicted: list, masked: list | None = None) -> dict:
     """Exact: same label and boundaries. Overlapping: same label and a shared character, one gold span per predicted
-    span, so one span over two names finds one of them. Masked: a shared character with a span of masking (by default
-    the predicted spans) under any label, which is what a redaction hides."""
+    span, so one span over two names finds one of them. Masked: a shared character under any label, which is what a
+    redaction hides; masked, when given, is that match already made over the whole sentence."""
     return {"gold": len(gold), "predicted": len(predicted), "exact": len(set(gold) & set(predicted)),
-            "overlapping": matched(gold, predicted, True),
-            "masked": matched(gold, predicted if masking is None else masking, False)}
+            "overlapping": len(matched(gold, predicted, True)),
+            "masked": len(matched(gold, predicted, False) if masked is None else masked)}
 
 
 def rate(part: int, whole: int) -> str:
@@ -172,18 +172,19 @@ def add(total: dict, counts: dict) -> None:
 
 def tally(items: list, spans: dict) -> list:
     """Rows of (threshold, register or label, counts) from each threshold's spans per item: each register in the
-    sample's order, then each label, whose rows count only that label's gold and predicted spans, except that any
-    predicted span masks."""
+    sample's order, then each label, whose rows count only that label's gold and predicted spans, except that the
+    sentence's masked gold spans, matched once under any label, are each counted in their own label's row."""
     registers = list(dict.fromkeys(item["register"] for item in items))
     rows = []
     for threshold, found_per_item in spans.items():
         totals = {name: {} for name in registers + list(LABELS)}
         for item, found in zip(items, found_per_item):
             gold, predicted = gold_spans(item), predictions(found)
-            add(totals[item["register"]], score(gold, predicted))
+            hidden = matched(gold, predicted, False)
+            add(totals[item["register"]], score(gold, predicted, hidden))
             for label in LABELS:
                 add(totals[label], score([g for g in gold if g[2] == label], [p for p in predicted if p[2] == label],
-                                         predicted))
+                                         [g for g in hidden if g[2] == label]))
         rows += [(threshold, name, counts) for name, counts in totals.items()]
     return rows
 
