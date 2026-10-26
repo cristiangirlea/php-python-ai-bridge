@@ -24,8 +24,10 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO, Any
 
 from .protocol import Bridge, BridgeError
 
@@ -63,14 +65,14 @@ class LoadedIndex:
     backend: str
     dimensions: int
     count: int
-    chunking: dict
-    sources: list
-    chunks: list
-    vectors: array.array
+    chunking: dict[str, Any]
+    sources: list[str]
+    chunks: list[dict[str, Any]]
+    vectors: array.array[float]
     directory: Path
     vectors_path: Path = field(repr=False)
     # (device, inode, mtime, size) of the sidecar and vectors files exactly as read.
-    stamps: tuple = field(repr=False, default=())
+    stamps: tuple[tuple[int, int, int, int], ...] = field(repr=False, default=())
 
     @property
     def size(self) -> int:
@@ -84,7 +86,7 @@ def _skip_space(text: str, i: int) -> int:
     return word.start() if word else len(text)
 
 
-def _last_space(text: str, low: int, high: int):
+def _last_space(text: str, low: int, high: int) -> int | None:
     """The index of the last whitespace character in text[low:high + 1], or None. Unicode whitespace counts,
     as it does everywhere else in the chunker."""
     last = None
@@ -104,7 +106,7 @@ def _next_word(text: str, i: int) -> int:
     return _skip_space(text, i)
 
 
-def chunk_text(text: str, chars: int = 1000, overlap: int = 200) -> list:
+def chunk_text(text: str, chars: int = 1000, overlap: int = 200) -> list[tuple[int, int]]:
     """Character windows of at most `chars`, cut at whitespace where one exists in the second half of the
     window, each starting on a word and overlapping the previous one by about `overlap` characters.
 
@@ -144,8 +146,8 @@ def _check(condition: bool, message: str) -> None:
         raise InvalidIndex(message)
 
 
-def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunking: dict, sources: list,
-                chunks: list, rows) -> dict:
+def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunking: dict[str, Any], sources: list[str],
+                chunks: list[dict[str, Any]], rows: Iterable[Iterable[float]]) -> dict[str, Any]:
     """Stream `rows` into vectors.f32, then write index.json. Nothing is replaced unless both were written; the
     two renames are separate, so a reader between them sees a checksum mismatch and must retry."""
     out = Path(out)
@@ -241,7 +243,7 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
                        sidecar.parent, vectors_path, (sidecar_stamp, vectors_stamp))
 
 
-def search(loaded: LoadedIndex, query_vector, n: int) -> list:
+def search(loaded: LoadedIndex, query_vector: Iterable[float], n: int) -> list[tuple[int, float]]:
     """The n chunks with the highest dot product, as (chunk, score); ties keep the lower chunk number."""
     # A memoryview slices rows without copying them.
     width, vectors = loaded.dimensions, memoryview(loaded.vectors)
@@ -250,16 +252,16 @@ def search(loaded: LoadedIndex, query_vector, n: int) -> list:
     return [(-negative, score) for score, negative in heapq.nlargest(n, scores)]
 
 
-def _identity(status) -> tuple:
+def _identity(status: os.stat_result) -> tuple[int, int, int, int]:
     # Every rebuild replaces both files by rename, so the inode changes even when size and time do not.
     return status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size
 
 
-def _fstamp(handle) -> tuple:
+def _fstamp(handle: IO[bytes]) -> tuple[int, int, int, int]:
     return _identity(os.fstat(handle.fileno()))
 
 
-def _stamp(path: Path) -> tuple:
+def _stamp(path: Path) -> tuple[int, int, int, int]:
     return _identity(path.stat())
 
 
@@ -269,7 +271,7 @@ class IndexCache:
 
     def __init__(self, limit_bytes: int = CACHE_BYTES):
         self.limit_bytes = limit_bytes
-        self._items = OrderedDict()
+        self._items: OrderedDict[tuple[Path, Path | None], LoadedIndex] = OrderedDict()
         self._lock = threading.Lock()
 
     def get(self, sidecar: Path, within: Path | None = None) -> LoadedIndex:
@@ -307,7 +309,7 @@ def _pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def collect(inputs: list, suffixes=DEFAULT_SUFFIXES) -> list:
+def collect(inputs: Sequence[str | Path], suffixes: tuple[str, ...] = DEFAULT_SUFFIXES) -> list[Path]:
     """Every file named, and every file with one of `suffixes` under every directory named, sorted."""
     files = []
     for item in inputs:
@@ -324,8 +326,9 @@ def collect(inputs: list, suffixes=DEFAULT_SUFFIXES) -> list:
     return unique
 
 
-def _batches(texts: list):
-    batch, size = [], 0
+def _batches(texts: list[str]) -> Iterator[list[int]]:
+    batch: list[int] = []
+    size = 0
     for number, text in enumerate(texts):
         encoded = len(json.dumps(text, ensure_ascii=False).encode("utf-8")) + 1
         if batch and (len(batch) == EMBED_BATCH or size + encoded > BATCH_BYTES):
@@ -337,7 +340,7 @@ def _batches(texts: list):
         yield batch
 
 
-def _embed(bridge, texts: list, timeout_s: float, identity: dict) -> list:
+def _embed(bridge: Bridge, texts: list[str], timeout_s: float, identity: dict[str, Any]) -> list[list[float]]:
     for attempt in range(CAPACITY_RETRIES + 1):
         try:
             result = bridge.run("embed", {"texts": texts}, timeout_s)
@@ -362,15 +365,17 @@ def _embed(bridge, texts: list, timeout_s: float, identity: dict) -> list:
     return vectors
 
 
-def build(bridge, inputs: list, out: Path, chars: int = 1000, overlap: int = 200,
-          suffixes=DEFAULT_SUFFIXES, timeout_s: float = 60.0, log=None) -> dict:
+def build(bridge: Bridge, inputs: Sequence[str | Path], out: Path, chars: int = 1000, overlap: int = 200,
+          suffixes: tuple[str, ...] = DEFAULT_SUFFIXES, timeout_s: float = 60.0,
+          log: Callable[[str], None] | None = None) -> dict[str, Any]:
     """Chunk every input file, embed the chunks through the worker, and write the index into `out`."""
     out = Path(out)
     if out.exists() and not out.is_dir():
         raise BuildError(f"--out is an existing file: {out}")
     files = collect(inputs, suffixes)
     backend = bridge.health()["backend"]
-    sources, chunks = [], []
+    sources: list[str] = []
+    chunks: list[dict[str, Any]] = []
     for number, path in enumerate(files):
         if path.stat().st_size > MAX_SOURCE_BYTES:
             raise BuildError(f"{path} is larger than {MAX_SOURCE_BYTES // (1024 * 1024)} MiB")
@@ -388,9 +393,9 @@ def build(bridge, inputs: list, out: Path, chars: int = 1000, overlap: int = 200
     if len(chunks) > MAX_INDEX_CHUNKS:
         raise BuildError(f"{len(chunks)} chunks exceed the {MAX_INDEX_CHUNKS}-chunk limit; index fewer files")
     texts = [chunk["text"] for chunk in chunks]
-    identity = {}
+    identity: dict[str, Any] = {}
 
-    def rows():
+    def rows() -> Iterator[list[float]]:
         done = 0
         for batch in _batches(texts):
             yield from _embed(bridge, [texts[number] for number in batch], timeout_s, identity)
@@ -407,12 +412,12 @@ def build(bridge, inputs: list, out: Path, chars: int = 1000, overlap: int = 200
     return meta
 
 
-def _prepend(first, rest):
+def _prepend(first: list[float], rest: Iterator[list[float]]) -> Iterator[list[float]]:
     yield first
     yield from rest
 
 
-def main(argv=None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m bridge_mcp.index")
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("build", help="build an index from UTF-8 text files")

@@ -20,7 +20,8 @@ from unittest.mock import MagicMock, patch
 from ai_bridge import jobs, log, metrics, server, tasks
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
-from test_log import BlockedStream, BrokenStream, parse as parse_log
+from test_log import BlockedStream, BrokenStream
+from test_log import parse as parse_log
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
 

@@ -23,8 +23,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from benchmark import POLL_S, TERMINAL, call, cpu_model, wait_ready  # noqa: E402  (the same protocol helpers)
 import public_data  # noqa: E402
+from benchmark import POLL_S, TERMINAL, call, cpu_model, wait_ready  # noqa: E402  (the same protocol helpers)
 
 REPO = Path(__file__).resolve().parents[1]
 SAMPLE = REPO / "tests" / "fixtures" / "ner-sample.json"
@@ -146,7 +146,7 @@ def finish(base: str, body: dict) -> dict:
             if error.code != 429:
                 raise
             if attempt == CAPACITY_RETRIES:
-                raise SystemExit(f"the worker stayed at capacity for {CAPACITY_RETRIES * CAPACITY_WAIT_S} s")
+                raise SystemExit(f"the worker stayed at capacity for {CAPACITY_RETRIES * CAPACITY_WAIT_S} s") from None
             time.sleep(CAPACITY_WAIT_S)
     while job["status"] not in TERMINAL:
         time.sleep(POLL_S)

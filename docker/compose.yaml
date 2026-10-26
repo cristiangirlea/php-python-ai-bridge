@@ -618,6 +618,48 @@ services:
       - -ec
       - 'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python -m unittest discover -s tests/mcp -v'
 
+  # The pinned mypy and ruff wheels into .cache: the only static-analysis step with network.
+  py-dev-fetcher:
+    <<: *python
+    profiles: [py-dev]
+    network_mode: bridge
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "1"
+    command:
+      - sh
+      - -ec
+      - 'python -m pip download --require-hashes --only-binary=:all: --dest /cache/wheels -r requirements-dev.lock'
+
+  # mypy --strict and ruff, offline. The MCP server's wheels (from mcp-fetcher) are installed beside the tools so
+  # mypy reads the SDK's own types; both tools keep their caches in the tmpfs, since the checkout is read-only.
+  py-analysis:
+    <<: *python
+    profiles: [py-dev]
+    network_mode: none
+    mem_limit: 768m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m,uid=65532,gid=65532
+      - /deps:rw,exec,nosuid,size=384m,uid=65532,gid=65532
+    volumes:
+      - ..:/work:ro
+      - ../.cache:/cache:ro
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: /deps/tools:/deps/mcp
+      MYPY_CACHE_DIR: /tmp/mypy
+      RUFF_CACHE_DIR: /tmp/ruff
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "1"
+    command:
+      - sh
+      - -ec
+      - 'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps/tools -r requirements-dev.lock && python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps/mcp -r requirements-mcp.lock && python -m ruff check worker mcp_server scripts tests && python -m mypy'
+
 networks:
   isolated:
     internal: true

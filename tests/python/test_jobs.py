@@ -19,7 +19,7 @@ from unittest.mock import Mock, patch
 
 from ai_bridge import jobs, log, tasks
 from ai_bridge import server as service
-from ai_bridge.jobs import CapacityError, JobStore, Settings, TERMINAL
+from ai_bridge.jobs import TERMINAL, CapacityError, JobStore, Settings
 from ai_bridge.server import BridgeServer
 from ai_bridge.tasks import EMBED_DIMENSIONS, MAX_TEXTS, InvalidInput, _entities, _merge, execute, validate
 from test_log import parse as parse_log
@@ -688,10 +688,10 @@ class ModelNameTests(unittest.TestCase):
         from ai_bridge.tasks import MODEL_NAMES
 
         self.assertEqual(set(MODEL_NAMES), {"lexical", "onnx"})
-        for backend, tasks in MODEL_NAMES.items():
+        for backend, names in MODEL_NAMES.items():
             with self.subTest(backend=backend):
-                self.assertEqual(set(tasks), {"rerank", "embed", "redact"})
-                self.assertTrue(all(isinstance(name, str) and name for name in tasks.values()))
+                self.assertEqual(set(names), {"rerank", "embed", "redact"})
+                self.assertTrue(all(isinstance(name, str) and name for name in names.values()))
 
     def test_lexical_results_report_the_names_in_the_table(self):
         from ai_bridge.tasks import MODEL_NAMES
@@ -718,7 +718,7 @@ class ProgressTests(unittest.TestCase):
         for total in [1, 3, 64, 65, 127, 128, 512]:
             events = []
             execute("rerank", {"query": "x", "documents": ["x"] * total}, "lexical", "",
-                    lambda completed, _: events.append(completed))
+                    lambda completed, _: events.append(completed))  # noqa: B023  (called only within this iteration)
             with self.subTest(total=total):
                 self.assertLessEqual(len(events), 66)
                 self.assertEqual(events[0], 0)
@@ -781,7 +781,10 @@ class JobsTests(unittest.TestCase):
             self.assertAlmostEqual(math.sqrt(sum(x * x for x in vector)), 1.0, places=4)
         self.assertEqual(vectors[0], vectors[3])
         self.assertEqual(vectors[0], vectors[1])
-        dot = lambda a, b: sum(x * y for x, y in zip(a, b))
+
+        def dot(a, b):
+            return sum(x * y for x, y in zip(a, b))
+
         self.assertGreater(dot(vectors[0], vectors[1]), dot(vectors[0], vectors[2]))
         self.assertEqual(done["progress"], {"completed": 4, "total": 4})
 
@@ -1417,7 +1420,7 @@ class WarmPoolTests(unittest.TestCase):
 
                     def serve(bridge, **_):
                         self.store = bridge.jobs
-                        reports.append(self.inspect(value))
+                        reports.append(self.inspect(value))  # noqa: B023  (called only within this iteration)
 
                     with patch.dict(os.environ, {"BRIDGE_TEST_TASKS": "1", "BRIDGE_CONCURRENCY": "1", **environment}), \
                             patch.object(sys, "argv", ["ai_bridge.server", "--port", "0"]), \

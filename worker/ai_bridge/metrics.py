@@ -4,58 +4,62 @@ backend name), never from a job, so nothing a client sent can reach the body and
 
 import bisect
 import math
+from collections.abc import Iterable
+from typing import Any
+
+Labels = dict[str, str]
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 # Upper bounds in seconds; a job longer than the last falls only into +Inf.
 BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300)
 
 
-def new_histogram():
+def new_histogram() -> dict[str, Any]:
     """Counts per bucket, not cumulative, the last for +Inf only; render() adds them up."""
     return {"buckets": [0] * (len(BUCKETS) + 1), "sum": 0.0, "count": 0}
 
 
-def observe(histogram, seconds):
+def observe(histogram: dict[str, Any], seconds: float) -> None:
     # bisect_left puts a value equal to a bound in that bound's bucket, as le (less or equal) means.
     histogram["buckets"][bisect.bisect_left(BUCKETS, seconds)] += 1
     histogram["sum"] += seconds
     histogram["count"] += 1
 
 
-def escape(value):
+def escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def number(value):
+def number(value: float) -> str:
     if isinstance(value, float):
         return "+Inf" if value == math.inf else repr(value)
     return str(value)
 
 
-def _labels(labels):
+def _labels(labels: Labels) -> str:
     if not labels:
         return ""
     return "{" + ",".join(f'{key}="{escape(value)}"' for key, value in labels.items()) + "}"
 
 
-def _family(name, kind, help_text, lines):
+def _family(name: str, kind: str, help_text: str, lines: Iterable[str]) -> str:
     return f"# HELP {name} {help_text}\n# TYPE {name} {kind}\n" + "".join(line + "\n" for line in lines)
 
 
-def _simple(name, kind, help_text, samples):
+def _simple(name: str, kind: str, help_text: str, samples: Iterable[tuple[Labels, float]]) -> str:
     return _family(name, kind, help_text, [f"{name}{_labels(labels)} {number(value)}" for labels, value in samples])
 
 
-def counter(name, help_text, samples):
+def counter(name: str, help_text: str, samples: Iterable[tuple[Labels, float]]) -> str:
     return _simple(name, "counter", help_text, samples)
 
 
-def gauge(name, help_text, samples):
+def gauge(name: str, help_text: str, samples: Iterable[tuple[Labels, float]]) -> str:
     return _simple(name, "gauge", help_text, samples)
 
 
-def histogram(name, help_text, series):
-    lines = []
+def histogram(name: str, help_text: str, series: Iterable[tuple[Labels, dict[str, Any]]]) -> str:
+    lines: list[str] = []
     for labels, values in series:
         total = 0
         for bound, count in zip(BUCKETS + (math.inf,), values["buckets"]):
@@ -66,7 +70,7 @@ def histogram(name, help_text, series):
     return _family(name, "histogram", help_text, lines)
 
 
-def render(snapshot):
+def render(snapshot: dict[str, Any]) -> str:
     """The whole body from JobStore.snapshot(), which is a copy: nothing here holds the store's lock."""
     tasks = snapshot["tasks"]
     return "".join([

@@ -4,6 +4,8 @@ import http.client
 import json
 import re
 import time
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 MAX_BYTES = 262144
@@ -39,13 +41,13 @@ class Bridge:
         self._token = token
         self._timeout = request_timeout_s
 
-    def health(self) -> dict:
+    def health(self) -> dict[str, Any]:
         body = self._request("GET", "/healthz")
         if body.get("protocol") != 1 or not isinstance(body.get("backend"), str):
             raise BridgeError("Unexpected health response", "invalid_response")
         return body
 
-    def submit(self, task: str, payload: dict, timeout_ms: int) -> dict:
+    def submit(self, task: str, payload: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
         if not 100 <= timeout_ms <= 300000:
             raise ValueError("timeout_ms must be between 100 and 300000")
         job = self._job(self._request("POST", "/v1/jobs", {"task": task, "input": payload, "timeout_ms": timeout_ms}))
@@ -53,13 +55,14 @@ class Bridge:
             raise BridgeError("Submission response does not match the request", "invalid_response")
         return job
 
-    def get(self, job_id: str) -> dict:
+    def get(self, job_id: str) -> dict[str, Any]:
         return self._job(self._request("GET", "/v1/jobs/" + self._id(job_id)), job_id)
 
-    def cancel(self, job_id: str) -> dict:
+    def cancel(self, job_id: str) -> dict[str, Any]:
         return self._job(self._request("POST", "/v1/jobs/" + self._id(job_id) + "/cancel", {}), job_id)
 
-    def run(self, task: str, payload: dict, deadline_s: float, on_progress=None, poll_s: float = 0.1) -> dict:
+    def run(self, task: str, payload: dict[str, Any], deadline_s: float,
+            on_progress: Callable[[int, int], object] | None = None, poll_s: float = 0.1) -> dict[str, Any]:
         """Submit, poll to a terminal state and return the result.
 
         A local deadline cancels the remote job, unlike the PHP client's wait(): a web request can
@@ -91,7 +94,8 @@ class Bridge:
                 pass
             raise
         if job["status"] == "succeeded":
-            return job["result"]
+            result: dict[str, Any] = job["result"]
+            return result
         code = (job.get("error") or {}).get("code", job["status"])
         raise BridgeError(f"Job {job['status']}: {code}", code, job_id=job["id"])
 
@@ -102,7 +106,7 @@ class Bridge:
         return job_id
 
     @staticmethod
-    def _job(body: dict, expected_id: str | None = None) -> dict:
+    def _job(body: dict[str, Any], expected_id: str | None = None) -> dict[str, Any]:
         keys = ("id", "task", "status", "result", "error", "progress", "timeout_ms")
         if any(key not in body for key in keys):
             raise BridgeError("Incomplete job response", "invalid_response")
@@ -122,7 +126,7 @@ class Bridge:
             raise BridgeError("Job ID does not match the request", "invalid_response")
         return body
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         data = None
         if body is not None:
             data = json.dumps(body, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
