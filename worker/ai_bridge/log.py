@@ -178,6 +178,11 @@ def close() -> None:
     writer.join(1)
 
 
+def enabled() -> bool:
+    """Whether a line would be written, so a caller can skip measuring and building one when not."""
+    return _active is not None
+
+
 def event(name: str, warning: bool = False, **fields: object) -> None:
     """Write one line of this event; a key outside its schema is dropped and a value of the wrong kind is null."""
     if _active is None:

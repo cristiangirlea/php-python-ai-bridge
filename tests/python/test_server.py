@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import socket
+import socketserver
 import sqlite3
 import struct
 import subprocess
@@ -1572,6 +1573,82 @@ class LoggingHttpTests(unittest.TestCase):
                          [(None, "other", None, "warning")])
         self.assertNotIn(SENTINEL, self.text)
 
+    def test_a_busy_503_that_was_not_sent_writes_no_line(self):
+        for _ in range(32):
+            self.server.slots.acquire()
+        try:
+            for sent in (BlockingIOError(), ConnectionResetError(), len(server.BUSY) - 1, len(server.BUSY)):
+                refused = MagicMock()
+                refused.send.side_effect = sent if isinstance(sent, OSError) else None
+                refused.send.return_value = sent
+                with patch.object(self.server, "shutdown_request") as shut:
+                    self.server.process_request(refused, ("127.0.0.1", 1))
+                shut.assert_called_once_with(refused)
+        finally:
+            for _ in range(32):
+                self.server.slots.release()
+        # Only the last one, sent whole, was a reply.
+        self.assertEqual([(line["status"], line["route"]) for line in self.lines()], [(503, "other")])
+
+    def test_a_reply_that_was_not_written_writes_no_line(self):
+        heads = (b"GET /healthz HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + APP.encode() + b"\r\n\r\n",
+                 b"GET /" + SENTINEL.encode() * 300 + b" HTTP/1.1\r\n\r\n",
+                 b"DELETE /v1/jobs HTTP/1.1\r\nHost: x\r\n\r\n")
+        # Refused with headers only, so only a failing head leaves it unsent.
+        head_only = b"HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n"
+        def every_write(data):
+            raise ConnectionResetError
+
+        def the_body(data):
+            if data.startswith(b"HTTP/"):
+                return len(data)
+            raise ConnectionResetError
+
+        # The peer gone before the status line, and gone after the head but before the body.
+        for name, write, sent in (("every write", every_write, heads + (head_only,)), ("the body", the_body, heads)):
+            with self.subTest(failing=name), patch.object(socketserver._SocketWriter, "write", side_effect=write):
+                for head in sent:
+                    with socket.create_connection(self.server.server_address, timeout=2) as connection:
+                        connection.sendall(head)
+                        try:
+                            while connection.recv(65536):
+                                pass
+                        except ConnectionResetError:
+                            pass
+                settle(self.server)
+        self.assertEqual(self.lines(), [])
+
+    def test_a_head_refused_without_a_body_is_logged(self):
+        self.assertEqual(exchange(self.server.server_address, b"HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n")[0], 501)
+        self.assertEqual([(line["method"], line["route"], line["status"]) for line in self.lines()],
+                         [("other", "/healthz", 501)])
+
+    def test_a_drain_thread_held_past_the_stop_s_wait_writes_no_line_after_it(self):
+        snapshot = self.server.jobs.snapshot
+        with patch.object(server, "DRAIN_LINE_WAIT", 0.1), \
+                patch.object(self.server.jobs, "snapshot", side_effect=lambda: (time.sleep(0.5), snapshot())[1]):
+            self.server.stop()
+            self.server.stop()
+            self.thread.join(5)
+            self.server.server_close()
+            self.server._drainer.join(5)
+        self.assertEqual([line for line in self.lines() if line["event"] == "drain"], [])
+
+    def test_a_429_and_a_draining_503_are_logged_with_their_owner(self):
+        for _ in range(16):
+            self.server.jobs.submit("test.delay", {"seconds": 5}, owner="other")
+        body = json.dumps({"task": "test.inspect", "input": {"value": [SENTINEL]}, "idempotency_key": SENTINEL})
+        self.assertEqual(self.call("POST", "/v1/jobs", body)[0], 429)
+        self.server.jobs.drain()
+        self.assertEqual(self.call("POST", "/v1/jobs", body, token=OTHER)[0], 503)
+        requests = [line for line in self.lines() if line["event"] == "request"]
+        for line in requests:
+            self.assertEqual(set(line), {"ts", "level", "event", *log.EVENTS["request"]})
+        self.assertEqual([(line["method"], line["route"], line["status"], line["owner"], line["level"])
+                          for line in requests],
+                         [("POST", "/v1/jobs", 429, "app", "info"), ("POST", "/v1/jobs", 503, "other", "warning")])
+        self.assertNotIn(SENTINEL, self.text)
+
     def test_the_drain_says_how_many_jobs_the_deadline_cut_short(self):
         job = self.call("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {"seconds": 5}}))[1]
         deadline = time.monotonic() + 5
@@ -1605,6 +1682,50 @@ class LoggingHttpTests(unittest.TestCase):
             silent.close()
             half.close()
         self.assertEqual(self.lines(), [])
+
+
+class LoggingOffTests(unittest.TestCase):
+    """With logging off nothing is measured or built for a line that is never written."""
+
+    def setUp(self):
+        log.configure("off")
+        self.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(concurrency=1, test_tasks=True), drain_seconds=0)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.thread.join)
+        self.addCleanup(self.server.shutdown)
+
+    def test_requests_and_jobs_build_no_line(self):
+        with patch.object(server.Handler, "_method") as method, patch.object(server.Handler, "_route") as route, \
+                patch.object(log, "event") as event, patch.object(server, "time", MagicMock(wraps=time)) as clock:
+            connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+            try:
+                connection.request("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {"seconds": 0}}),
+                                   {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 202)
+                job_id = json.loads(response.read())["id"]
+            finally:
+                connection.close()
+            deadline = time.monotonic() + 5
+            while self.server.jobs.get(job_id)["status"] not in jobs.TERMINAL:
+                self.assertLess(time.monotonic(), deadline, "the job never ended")
+                time.sleep(0.01)
+            settle(self.server)
+        method.assert_not_called()
+        route.assert_not_called()
+        event.assert_not_called()
+        clock.monotonic.assert_not_called()
+
+    def test_the_drain_takes_no_snapshot(self):
+        with patch.object(self.server.jobs, "snapshot") as snapshot, patch.object(log, "event") as event:
+            self.server.stop()
+            self.thread.join(5)
+            self.assertFalse(self.thread.is_alive())
+            self.server.server_close()
+        snapshot.assert_not_called()
+        event.assert_not_called()
 
 
 class PeerResetTests(unittest.TestCase):
@@ -1736,8 +1857,8 @@ class LoggingStartTests(unittest.TestCase):
         snapshot = jobs.JobStore.snapshot
 
         def slow_snapshot(store):
-            # Widens the moment between the interruption and the drain line, which the stop must wait out.
-            time.sleep(0.3)
+            # Holds the drain thread past the moment the stop waits for it to end.
+            time.sleep(1.5)
             return snapshot(store)
 
         with patch.object(jobs.JobStore, "snapshot", slow_snapshot):
