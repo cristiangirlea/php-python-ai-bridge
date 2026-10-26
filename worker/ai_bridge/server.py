@@ -439,7 +439,10 @@ def main():
         test_tasks=os.environ.get("BRIDGE_TEST_TASKS") == "1",
         max_jobs=_number("BRIDGE_WORKER_MAX_JOBS", "1000", int),
         state_dir=os.environ.get("BRIDGE_STATE_DIR") or None,
+        owner_capacity=_number("BRIDGE_OWNER_CAPACITY", None, int) if "BRIDGE_OWNER_CAPACITY" in os.environ else None,
     )
+    if settings.owner_capacity is not None and not 1 <= settings.owner_capacity <= settings.capacity:
+        raise SystemExit(f"BRIDGE_OWNER_CAPACITY must be an integer from 1 to BRIDGE_CAPACITY ({settings.capacity})")
     drain_seconds = _number("BRIDGE_DRAIN_SECONDS", "30", int)
     if not 0 <= drain_seconds <= 300:
         raise SystemExit("BRIDGE_DRAIN_SECONDS must be an integer from 0 to 300")
@@ -460,6 +463,7 @@ def main():
     log.configure(log_mode)
     try:
         log.event("start", backend=settings.backend, concurrency=settings.concurrency, capacity=settings.capacity,
+                  owner_capacity=settings.capacity if settings.owner_capacity is None else settings.owner_capacity,
                   retention_seconds=settings.retention_seconds, max_jobs=settings.max_jobs,
                   drain_seconds=drain_seconds, tokens=len(tokens))
         with bridge as server:

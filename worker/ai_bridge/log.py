@@ -20,7 +20,8 @@ MODES = ("off", "json")
 EVENTS = {
     "request": ("method", "route", "status", "duration_ms", "owner"),
     "job": ("job_id", "task", "owner", "job_status", "queue_ms", "run_ms"),
-    "start": ("backend", "concurrency", "capacity", "retention_seconds", "max_jobs", "drain_seconds", "tokens"),
+    "start": ("backend", "concurrency", "capacity", "owner_capacity", "retention_seconds", "max_jobs", "drain_seconds",
+              "tokens"),
     "stop": ("cancelled",),
     "drain": ("duration_ms", "running", "interrupted"),
 }
@@ -57,7 +58,8 @@ _VALID = {
     "duration_ms": _duration, "queue_ms": _duration, "run_ms": _duration,
     "owner": _matches(_NAME), "job_id": _matches(_JOB_ID), "task": _among(TASKS), "job_status": _among(STATUSES),
     "backend": _among(MODEL_NAMES), "retention_seconds": _duration,
-    "concurrency": _count, "capacity": _count, "max_jobs": _count, "drain_seconds": _count, "tokens": _count,
+    "concurrency": _count, "capacity": _count, "owner_capacity": _count, "max_jobs": _count, "drain_seconds": _count,
+    "tokens": _count,
     "cancelled": _count, "running": _count, "interrupted": lambda value: type(value) is bool,
 }
 
