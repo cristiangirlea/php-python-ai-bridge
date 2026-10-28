@@ -1,0 +1,47 @@
+# Internal HTTP only; put the operator's TLS boundary in front for cross-host clients.
+{
+    admin off
+    auto_https off
+    servers {
+        max_header_size 16384
+        timeouts {
+            read_header 5s
+            read_body 5s
+            write 10s
+            idle 5s
+        }
+    }
+}
+
+:8080 {
+    request_body {
+        max_size 262144
+    }
+    @submit {
+        method POST
+        path /v1/jobs
+    }
+    handle @submit {
+        reverse_proxy worker-a:8090 worker-b:8090 {
+            lb_policy round_robin
+            request_buffers 262145
+        }
+    }
+    @a path_regexp a "^/v1/jobs/a-[a-f0-9]{32}(/cancel)?$"
+    handle @a {
+        reverse_proxy worker-a:8090 {
+            request_buffers 262145
+        }
+    }
+    @b path_regexp b "^/v1/jobs/b-[a-f0-9]{32}(/cancel)?$"
+    handle @b {
+        reverse_proxy worker-b:8090 {
+            request_buffers 262145
+        }
+    }
+    handle {
+        reverse_proxy worker-a:8090 worker-b:8090 {
+            lb_policy round_robin
+        }
+    }
+}

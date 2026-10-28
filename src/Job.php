@@ -31,7 +31,7 @@ final readonly class Job
                 throw new BridgeException('Incomplete job response', 'invalid_response');
             }
         }
-        if (!is_string($data['id']) || !preg_match('/\A[a-f0-9]{32}\z/', $data['id'])
+        if (!is_string($data['id']) || !preg_match('/\A(?:[a-z0-9][a-z0-9-]{0,15}-)?[a-f0-9]{32}\z/', $data['id'])
             || !is_string($data['task']) || $data['task'] === ''
             || !in_array($data['status'], self::STATUSES, true)
             || !is_int($data['timeout_ms']) || $data['timeout_ms'] < 100 || $data['timeout_ms'] > 300000

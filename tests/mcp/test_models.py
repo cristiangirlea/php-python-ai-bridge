@@ -2,11 +2,16 @@
 
 import unittest
 
+from ai_bridge.jobs import JOB_ID
 from ai_bridge.tasks import MODEL_NAMES
+from bridge_mcp import protocol
 from bridge_mcp.tools import BACKENDS
 
 
 class ModelNameTests(unittest.TestCase):
+    def test_job_id_pattern_matches_the_worker(self):
+        self.assertEqual(protocol.JOB_ID.pattern, JOB_ID)
+
     def test_every_backend_names_exactly_what_the_worker_reports(self):
         self.assertEqual(set(BACKENDS), set(MODEL_NAMES))
         for backend, tasks in MODEL_NAMES.items():

@@ -79,6 +79,48 @@ rejects(fn () => new Client('http://localhost', 'short'), InvalidArgumentExcepti
 rejects(fn () => new Client('http://localhost', $token . "\r\nInjected: yes"), InvalidArgumentException::class);
 rejects(fn () => new Client('http://localhost', $token, 0), InvalidArgumentException::class);
 $client = new Client('http://localhost:8090', $token);
+foreach (['a', '9', 'az-09', str_repeat('a', 16), 'a-'] as $instance) {
+    $data = sample();
+    $data['id'] = $instance . '-' . str_repeat('f', 32);
+    check(Job::fromArray($data)->id === $data['id'], 'instance job ID round trip');
+}
+foreach (['', '-a', 'A', 'a_b', 'a.b', 'a/', str_repeat('a', 17)] as $instance) {
+    $id = $instance . '-' . str_repeat('a', 32);
+    $data = sample();
+    $data['id'] = $id;
+    rejects(fn () => Job::fromArray($data), BridgeException::class);
+    rejects(fn () => $client->get($id), InvalidArgumentException::class);
+    rejects(fn () => $client->cancel($id), InvalidArgumentException::class);
+    rejects(fn () => $client->wait($id), InvalidArgumentException::class);
+}
+foreach (['a-' . str_repeat('a', 31), 'a-' . str_repeat('a', 33), 'a-' . str_repeat('A', 32),
+          'a-' . str_repeat('a', 32) . "\n", 'a-' . str_repeat('a', 32) . '/cancel'] as $id) {
+    $data = sample();
+    $data['id'] = $id;
+    rejects(fn () => Job::fromArray($data), BridgeException::class);
+    rejects(fn () => $client->get($id), InvalidArgumentException::class);
+    rejects(fn () => $client->cancel($id), InvalidArgumentException::class);
+    rejects(fn () => $client->wait($id), InvalidArgumentException::class);
+}
+// A canned terminal response proves every client entry point preserves either ID form.
+$routedTransport = new class () implements Transport {
+    public string $id = '';
+
+    public function send(string $method, string $url, array $headers, ?string $body, int $timeoutMs): TransportResponse
+    {
+        $data = sample();
+        $data['id'] = $this->id;
+        $data['status'] = 'cancelled';
+        return new TransportResponse(200, 'application/json', json_encode($data, JSON_THROW_ON_ERROR));
+    }
+};
+$routedClient = new Client('http://worker:8090', $token, transport: $routedTransport);
+foreach ([str_repeat('a', 32), 'a-' . str_repeat('f', 32), str_repeat('z', 16) . '-' . str_repeat('0', 32)] as $id) {
+    $routedTransport->id = $id;
+    check($routedClient->get($id)->id === $id, 'get accepts either job ID form');
+    check($routedClient->cancel($id)->id === $id, 'cancel accepts either job ID form');
+    check($routedClient->wait($id)->id === $id, 'wait accepts either job ID form');
+}
 foreach (['../healthz', str_repeat('b', 31), str_repeat('B', 32), str_repeat('a', 32) . '/cancel'] as $id) {
     rejects(fn () => $client->get($id), InvalidArgumentException::class);
 }

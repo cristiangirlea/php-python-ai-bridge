@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from . import log
-from .jobs import DEFAULT_OWNER, CapacityError, DrainingError, JobStore, Settings
+from .jobs import DEFAULT_OWNER, INSTANCE_ID, JOB_ID, CapacityError, DrainingError, JobStore, Settings
 from .metrics import CONTENT_TYPE, render
 from .tasks import missing_models
 
@@ -32,8 +32,8 @@ READ_SECONDS = 5
 DRAIN_LINE_WAIT = 5
 # What a request line names as the route: the template a path matches, never the path itself.
 _ROUTES = {"/healthz": "/healthz", "/readyz": "/readyz", "/metrics": "/metrics", "/v1/jobs": "/v1/jobs"}
-_JOB_ROUTES = ((re.compile(r"/v1/jobs/[a-f0-9]{32}"), "/v1/jobs/{id}"),
-               (re.compile(r"/v1/jobs/[a-f0-9]{32}/cancel"), "/v1/jobs/{id}/cancel"))
+_JOB_ROUTES = ((re.compile(rf"/v1/jobs/{JOB_ID}"), "/v1/jobs/{id}"),
+               (re.compile(rf"/v1/jobs/{JOB_ID}/cancel"), "/v1/jobs/{id}/cancel"))
 _BUSY_BODY = b'{"error":{"code":"service_busy","message":"Every connection slot is taken"}}'
 BUSY = (b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
         b"Cache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\n\r\n%s" % (len(_BUSY_BODY), _BUSY_BODY))
@@ -477,7 +477,7 @@ class Handler(BaseHTTPRequestHandler):
             # The snapshot is taken under the store's lock; the formatting is not.
             self._text(200, render(self.server.jobs.snapshot()))
             return
-        match = re.fullmatch(r"/v1/jobs/([a-f0-9]{32})", self.path)
+        match = re.fullmatch(rf"/v1/jobs/({JOB_ID})", self.path)
         job = self.server.jobs.get(match[1], owner) if match else None
         if job is None:
             self._error(404, "not_found", "Job or route not found")
@@ -503,7 +503,7 @@ class Handler(BaseHTTPRequestHandler):
                                               body.get("idempotency_key"), owner)
                 self._reply(202, job)
                 return
-            match = re.fullmatch(r"/v1/jobs/([a-f0-9]{32})/cancel", self.path)
+            match = re.fullmatch(rf"/v1/jobs/({JOB_ID})/cancel", self.path)
             if body:
                 raise ValueError("Cancel body must be an empty object")
             job = self.server.jobs.cancel(match[1], owner) if match else None
@@ -549,7 +549,10 @@ def main() -> None:
         max_jobs=_number("BRIDGE_WORKER_MAX_JOBS", "1000", int),
         state_dir=os.environ.get("BRIDGE_STATE_DIR") or None,
         owner_capacity=_number("BRIDGE_OWNER_CAPACITY", "", int) if "BRIDGE_OWNER_CAPACITY" in os.environ else None,
+        instance_id=os.environ.get("BRIDGE_INSTANCE_ID"),
     )
+    if settings.instance_id is not None and not INSTANCE_ID.fullmatch(settings.instance_id):
+        raise SystemExit("BRIDGE_INSTANCE_ID must be 1-16 lowercase letters, digits or hyphens, starting with a letter or digit")
     if not 1 <= settings.result_capacity <= 65536:
         raise SystemExit("BRIDGE_RESULT_CAPACITY must be an integer from 1 to 65536")
     if settings.owner_capacity is not None and not 1 <= settings.owner_capacity <= settings.capacity + settings.result_capacity:

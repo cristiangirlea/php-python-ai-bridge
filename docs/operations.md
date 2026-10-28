@@ -27,7 +27,40 @@ Compose's worker enables JSON logging for these checks. The oversized POST leave
 
 Give each client its own token through `BRIDGE_TOKENS_FILE` or `BRIDGE_TOKENS` (section 4), each under its own name, and the MCP server a token of its own. Better still, give the MCP server a dedicated worker, as compose's `mcp-worker` is: an agent can be prompt-injected into filling a worker's capacity ([security](security.md)).
 
-**N instances behind a load balancer.** Instances share nothing: each holds its own jobs, results, idempotency keys and capacity, and nothing routes a request to another instance. A job ID is answered only by the instance that holds it; any other instance answers 404, exactly as for an unknown job. So `GET /v1/jobs/{id}` and the cancel must reach the instance that took the `POST`. A job ID is 32 random hex characters (`uuid.uuid4().hex` in `jobs.py`) with no instance mark, so a balancer cannot route by it: either the client keeps the instance it submitted to (store its address beside the job ID and address it directly for polls), or the balancer pins each client to one instance by something the client sends on every request. An idempotency key is scoped to one instance too: a resubmission that lands elsewhere creates a second job.
+**N instances behind a load balancer.** Set a unique `BRIDGE_INSTANCE_ID` on each worker (1-16 characters
+of `[a-z0-9-]`, starting with a letter or digit). New IDs are `<instance-id>-<32 lowercase hex>`; unset,
+they remain 32 lowercase hex. Each instance answers only jobs in its own table, including restored jobs
+with an old prefix after an instance-name change. Preserve routes for those old prefixes until retention.
+An absent job, including one with another instance's prefix, is the same 404 as an unknown job.
+Turning on `BRIDGE_INSTANCE_ID` where retained jobs exist leaves their unprefixed IDs needing a route, or sticky polling, until retention ends.
+
+Compose's `ha` profile is the worked example: `worker-a` and `worker-b` share one token but have separate
+state volumes and limits, under the same hardening block as the other workers. `ha-proxy`, Caddy in the
+pinned FrankenPHP image with `examples/ha/Caddyfile`, sends `POST /v1/jobs` round robin to both workers;
+`path_regexp` matchers route GET and cancel with `a-` to worker-a and `b-` to worker-b. Health and readiness
+can reach either. There are no published ports; HTTP stays on the internal network. Use the operator's
+TLS proxy for cross-host clients, as the TLS example shows. Test-only `test.delay` is enabled on these
+two workers for cancellation and the crash drill; leave it disabled in a deployment.
+
+There is **no shared job store and no failover of a running job**. An instance that dies loses execution
+of the jobs it held. With its state directory surviving, unfinished jobs become `failed/service_restarted`
+on startup, and retained results and keys remain; if the directory is lost, the IDs return 404. The
+[client recovery recipe](integration.md#clients-behind-an-instance-router) resubmits with a new key and
+capped attempts. Idempotency keys are instance-local too: round robin can send an uncertain POST retry
+elsewhere and create duplicate work, so use submission affinity when that guarantee is needed.
+
+```sh
+sh scripts/ha_check.sh
+```
+
+The driver uses only the disposable `bridge-instances` Compose project: it starts the HA services,
+runs the PHP client's routing checks through `http://ha-proxy:8080`, prepares a running keyed job on
+worker-a, runs `docker compose ... kill -s SIGKILL worker-a` and `start worker-a`, then checks the
+failure, retained key and successful recovery through the same URL. Its exit trap runs `down -v`,
+including on failure. Both state directories are distinct named tmpfs volumes; the networkless
+`ha-state` keeper holds their mounts across individual worker stops (a tmpfs with no mounts would be
+emptied). This is restart-drill state, not host-crash durability: use separate persistent volumes for
+real retained results, and do not use this project's name for another deployment.
 
 **Published images.** A `v*` tag publishes `ghcr.io/cristiangirlea/php-python-ai-bridge-worker` (demo backends, standard library only) and `ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx` (the hash-locked model wheels, no models), for linux/amd64 and linux/arm64 (`.github/workflows/publish.yml`). Both run as UID 65532 on port 8090. The ONNX image never holds models: its `fetch` entrypoint downloads the pinned, hash-checked files into a volume mounted at `/cache`, once, with network; the worker then reads them without network:
 

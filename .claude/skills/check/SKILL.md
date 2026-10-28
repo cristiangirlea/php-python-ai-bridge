@@ -44,6 +44,8 @@ docker compose -f docker/compose.yaml run --rm --no-deps laravel-tests
 docker compose -f docker/compose.yaml run --rm --no-deps symfony-tests
 docker compose -f docker/compose.yaml up -d tls-proxy
 docker compose -f docker/compose.yaml run --rm --no-deps tls-check
+docker compose -p bridge-instances -f docker/compose.yaml --profile ha config -q
+sh scripts/ha_check.sh
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile py-dev --profile php-frameworks --profile tls down
 ```
 
@@ -81,6 +83,13 @@ The `python-tests` step also runs both hooks' tests (`tests/python/test_repo_rul
 `tests/python/test_push_guard_hook.py`, which runs `.claude/hooks/push-guard.test.sh`); the containers
 mount `/tmp` noexec, so the guard's killed-git case is skipped there, with its skip line printed in the
 `python-tests` output, and runs only on a host.
+
+`ha_check.sh` uses the disposable `bridge-instances` project: start `worker-a`, `worker-b` and `ha-proxy`,
+then `ha-check` roundtrip and prepare, hard-kill worker-a with SIGKILL, start it and run recover. PHP's
+`wait()` must see `failed/service_restarted`, the old key on worker-a must return that failed job, and
+a new key must succeed within two recovery submissions, excluding preparation submissions and old-key probes. The networkless `ha-state` keeper holds the separate
+named tmpfs state mounts across worker kill/start;
+the driver's exit trap runs `down -v` even on failure. Do not use that project for another deployment.
 
 This runs the PHP steps on compose's default image, PHP 8.5. CI runs them on 8.2, 8.3, 8.4 and 8.5
 and first checks that the image's PHP minor is the one the matrix expects; to reproduce another branch,

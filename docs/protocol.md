@@ -11,6 +11,23 @@ Every route requires `Authorization: Bearer <service token>`. JSON requests requ
 | `GET /v1/jobs/{id}` | 200 with a snapshot, or 404 |
 | `POST /v1/jobs/{id}/cancel` | Send `{}`; returns the terminal/current snapshot, or 404 |
 
+## Job IDs and instance routing
+
+With `BRIDGE_INSTANCE_ID` unset, a new job ID is exactly 32 lowercase hex characters (`uuid.uuid4().hex`).
+When set, it is `<instance-id>-<32 lowercase hex characters>`. The instance ID must be 1-16 characters
+of `[a-z0-9-]`, starting with a letter or digit; an empty or invalid value stops startup with a message
+naming `BRIDGE_INSTANCE_ID`. Both job routes and both clients accept either form.
+
+Give each instance a distinct ID and route GET and cancel by that prefix to the instance that accepted
+the submission. The [HA example](operations.md#1-deployment-topologies) load-balances submissions and
+uses Caddy `path_regexp` matchers for `a-` and `b-`. Keep the full returned ID and the same client base
+URL. An instance looks up the full ID in its own table, with the authenticated owner: another instance's
+prefix that is absent from that table gives the byte-identical 404 body used for any unknown job.
+Restored jobs keep their IDs and idempotency keys, even after restarting under a different instance ID;
+route their old prefix to that same table until retention expires. There is no shared table or running-job
+failover. Idempotency keys also remain instance-local, so an uncertain POST retried through round robin
+can create a second job on another instance; use submission affinity if that must be prevented.
+
 ## Tokens
 
 The worker takes its tokens from exactly one of three variables, read once at start:
@@ -33,7 +50,7 @@ Submit:
 
 An optional `idempotency_key` is a string of 1–128 printable ASCII characters (0x21–0x7e); any other value, `null` included, is 400 `invalid_request`. While the job first submitted with a key is retained, submitting the same key again starts nothing and returns 202 with that job's current snapshot, so its status may be `queued`, `running` or terminal; the repeat is answered even when capacity is full, and its `task`, `input` and `timeout_ms` are validated but not compared with the first. Once that job has expired, the key submits a new job. Keys are scoped to the submitting token within one service instance: the same key from two tokens is two jobs, and a repeat returns only the job its own token submitted. With a single token this is the behaviour it always had.
 
-A job contains `id`, `task`, `status`, `timeout_ms`, `result`, `error`, and `progress`. IDs are 32 lowercase hex characters. Result/error/progress are null until applicable. Input documents are not echoed in status responses.
+A job contains `id`, `task`, `status`, `timeout_ms`, `result`, `error`, and `progress`. IDs are 32 lowercase hex characters, or `<instance-id>-` followed by them ([Job IDs and instance routing](#job-ids-and-instance-routing)). Result/error/progress are null until applicable. Input documents are not echoed in status responses.
 
 States: `queued` → `running` → `succeeded` or `failed`. A job is `running` once a worker process has taken it; if that process dies before taking it, the job stays `queued` and is tried once more, and a second such death, or any death after it started, fails it as `worker_crashed`. A queued/running job may also become `timed_out` or `cancelled`. Terminal states do not change. Cancelling an already completed job returns its unchanged state. Progress contains integer `completed` and `total`; it may be null before execution.
 

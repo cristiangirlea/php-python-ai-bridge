@@ -290,6 +290,12 @@ jobs:  # the jobs
         self.assertIn("needs: [php, mcp, images, drills]", found["deterministic"])
         self.assertTrue(any('"$IMAGES_RESULT" = success' in line for line in found["deterministic"]))
 
+    def test_the_required_mcp_job_runs_instance_routing_and_hard_crash_recovery(self):
+        found = jobs((REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"))
+        self.assertIn("needs: [php, mcp, images, drills]", found["deterministic"])
+        self.assertIn("run: sh scripts/ha_check.sh", found["mcp"])
+        self.assertTrue(any("--profile ha config -q" in line for line in found["mcp"]))
+
     def test_the_gate_requires_failure_drills_and_promtool(self):
         found = jobs((REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8"), "tests.yml")
         gate = "\n".join(found["deterministic"])
