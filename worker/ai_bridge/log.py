@@ -36,7 +36,7 @@ STATUSES = ("succeeded", "failed", "timed_out", "cancelled")
 TASKS = frozenset(task for names in MODEL_NAMES.values() for task in names) | frozenset(TEST_TASKS)
 # server.TOKEN_NAME, which this module cannot import; a test keeps the two equal.
 _NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
-_JOB_ID = re.compile(r"[a-f0-9]{32}")
+_JOB_ID = re.compile(r"(?:[a-z0-9][a-z0-9-]{0,15}-)?[a-f0-9]{32}")
 QUEUE_LINES = 1024
 
 

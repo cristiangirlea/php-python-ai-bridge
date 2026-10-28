@@ -54,13 +54,19 @@ docker compose -f docker/compose.yaml run --rm --no-deps laravel-tests   # offli
 docker compose -f docker/compose.yaml run --rm --no-deps symfony-tests   # offline: the bundle in a bare Symfony kernel
 docker compose -f docker/compose.yaml up -d tls-proxy
 docker compose -f docker/compose.yaml run --rm --no-deps tls-check   # the client over HTTPS through Caddy, example CA only
+docker compose -p bridge-instances -f docker/compose.yaml --profile ha config -q
+sh scripts/ha_check.sh   # two instances through Caddy, SIGKILL worker-a, start, wait failure, fresh-key recovery; downs ha with -v
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile py-dev --profile php-frameworks --profile tls down
 ```
 
 CI runs the PHP steps on each of PHP 8.2, 8.3, 8.4 and 8.5 with `BRIDGE_PHP_IMAGE` set to the matrix's
 pinned image, after first checking that the image really is `EXPECTED_PHP`; the stable `deterministic`
 check requires every matrix job and the MCP job, which runs the Laravel and Symfony tests and the TLS example once, on PHP 8.5
-(their locked majors need 8.3 and 8.4 or later). Locally the default image is PHP 8.5; `docs/testing.md`
+(their locked majors need 8.3 and 8.4 or later). That required MCP job also runs `scripts/ha_check.sh` in the
+isolated `bridge-instances` project: `ha-check` roundtrip, prepare a running keyed job on worker-a through
+the proxy, `kill -s SIGKILL worker-a`, `start worker-a`, then `ha-check` recover. Its separate named tmpfs
+state volumes stay mounted by the networkless `ha-state` keeper across kill/start; the driver removes them
+with `down -v` on exit. Locally the default image is PHP 8.5; `docs/testing.md`
 says how to pick another, what each layer establishes, and where CI runs. `model-smoke.yml` downloads
 about 330 MB of models and wheels and is not a required check: run it only for a change on its `paths:` list.
 

@@ -101,6 +101,13 @@ jobs:
           docker compose -f docker/compose.yaml up -d tls-proxy
           docker compose -f docker/compose.yaml run --rm --no-deps tls-check
           docker compose -f docker/compose.yaml logs --no-log-prefix --no-color worker | docker compose -f docker/compose.yaml run --rm --no-deps -T tls-check php tests/php/tls.php request-log
+      - name: Inspect instance routing configuration
+        run: docker compose -p bridge-instances -f docker/compose.yaml --profile ha config -q
+      - name: Instance routing and hard-crash recovery through the PHP client
+        run: sh scripts/ha_check.sh
+      - name: Stop instance routing containers and disposable state
+        if: always()
+        run: docker compose -p bridge-instances -f docker/compose.yaml --profile ha down -v
       - name: Stop test containers
         if: always()
         run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile py-dev --profile php-frameworks --profile tls down

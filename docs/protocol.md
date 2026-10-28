@@ -11,6 +11,23 @@ Every route requires `Authorization: Bearer <service token>`. JSON requests requ
 | `GET /v1/jobs/{id}` | 200 with a snapshot, or 404 |
 | `POST /v1/jobs/{id}/cancel` | Send `{}`; returns the terminal/current snapshot, or 404 |
 
+## Job IDs and instance routing
+
+With `BRIDGE_INSTANCE_ID` unset, a new job ID is exactly 32 lowercase hex characters (`uuid.uuid4().hex`).
+When set, it is `<instance-id>-<32 lowercase hex characters>`. The instance ID must be 1-16 characters
+of `[a-z0-9-]`, starting with a letter or digit; an empty or invalid value stops startup with a message
+naming `BRIDGE_INSTANCE_ID`. Both job routes and both clients accept either form.
+
+Give each instance a distinct ID and route GET and cancel by that prefix to the instance that accepted
+the submission. The [HA example](operations.md#1-deployment-topologies) load-balances submissions and
+uses Caddy `path_regexp` matchers for `a-` and `b-`. Keep the full returned ID and the same client base
+URL. An instance looks up the full ID in its own table, with the authenticated owner: another instance's
+prefix that is absent from that table gives the byte-identical 404 body used for any unknown job.
+Restored jobs keep their IDs and idempotency keys, even after restarting under a different instance ID;
+route their old prefix to that same table until retention expires. There is no shared table or running-job
+failover. Idempotency keys also remain instance-local, so an uncertain POST retried through round robin
+can create a second job on another instance; use submission affinity if that must be prevented.
+
 ## Tokens
 
 The worker takes its tokens from exactly one of three variables, read once at start:

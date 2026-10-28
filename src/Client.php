@@ -193,7 +193,7 @@ final class Client
 
     private function validateId(string $id): void
     {
-        if (!preg_match('/\A[a-f0-9]{32}\z/', $id)) {
+        if (!preg_match('/\A(?:[a-z0-9][a-z0-9-]{0,15}-)?[a-f0-9]{32}\z/', $id)) {
             throw new \InvalidArgumentException('Invalid job ID');
         }
     }

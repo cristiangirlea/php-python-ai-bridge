@@ -71,7 +71,7 @@ class FormatterTests(unittest.TestCase):
     def test_each_event_writes_exactly_its_keys_with_null_for_a_missing_one(self):
         with capture() as lines:
             log.event("request", method="GET", route="/healthz", status=200, duration_ms=1.5, owner="default")
-            log.event("job", job_id="a" * 32, task="rerank", owner="default", job_status="succeeded")
+            log.event("job", job_id="instance-1-" + "a" * 32, task="rerank", owner="default", job_status="succeeded")
             log.event("start", backend="lexical", concurrency=2, capacity=128, owner_capacity=64,
                       retention_seconds=300.0, max_jobs=1000, drain_seconds=30, tokens=1)
             log.event("drain", duration_ms=0.0, running=0, interrupted=False)
@@ -80,6 +80,7 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(lines[0], {**lines[0], "method": "GET", "route": "/healthz", "status": 200,
                                     "duration_ms": 1.5, "owner": "default", "level": "info"})
         self.assertEqual((lines[1]["queue_ms"], lines[1]["run_ms"]), (None, None))
+        self.assertEqual(lines[1]["job_id"], "instance-1-" + "a" * 32)
         self.assertEqual((lines[2]["owner_capacity"], lines[2]["tokens"]), (64, 1))
 
     def test_the_schema_is_the_documented_one(self):

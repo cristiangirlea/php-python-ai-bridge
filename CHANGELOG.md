@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
+- Optional `BRIDGE_INSTANCE_ID` prefixes on job IDs, accepted by the worker, PHP client and MCP client, with restored IDs preserved across instance-name changes. A two-instance `ha` Compose profile routes reads and cancels by prefix; its required CI drill verifies hard-crash failure, retained idempotency keys and bounded recovery with a new key.
 - A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.
 - Reproducible raw-socket request fuzzing: a fixed corpus followed by fresh seeded multi-byte flips, inserts, deletes and splices, with `BRIDGE_FUZZ_SECONDS` for longer runs and distinct-input counts; slow-client connection-budget recovery tests.
 - Body and header limits and read/write timeouts in the Caddy TLS example; oversized bodies are rejected before contacting the worker.

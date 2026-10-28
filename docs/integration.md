@@ -273,6 +273,27 @@ try {
 
 With a key, `submit()` accepts any valid status in the response, since a repeat can return a running or finished job. A key only covers the job's retention: once it expires, the same key runs the task again. A job that failed with `service_restarted` is also retained, so the same key returns that failure until retention ends: resubmit it with a new key.
 
+### Clients behind an instance router
+
+Keep the job ID exactly as returned (including its instance prefix), store it with the application's work
+record, and always use the same base URL for submit, get, wait and cancel. The proxy routes the ID back
+to its instance; clients do not strip prefixes or switch to a surviving instance to poll an old job.
+
+For a terminal `failed` with `error.code` `service_restarted`, or a 404 for a job you know you submitted,
+resubmit the original task/input with a **new idempotency key**, then follow the new returned ID. Cap this
+recovery policy at three submissions total, including the original, and report failure when exhausted.
+Keep the attempt number and key in the application's work record before each submission; never retry
+other failures indiscriminately. A 404 can also mean retention expired: if the task has external effects,
+reconcile them before rerunning it. `wait()` returns the failed `Job`; inspect its status and error code.
+
+The old key on its original instance continues returning the failed job until retention, as above.
+Keys are local to each instance: the round-robin [HA example](operations.md#1-deployment-topologies)
+does not deduplicate uncertain submissions across instances. Retrying an uncertain POST with the same
+key needs submission affinity to the original instance to retain that guarantee; the instance prefix
+routes reads and cancels, not a POST whose response was lost. `scripts/ha_check.sh` demonstrates a
+hard kill, `wait()` reporting `service_restarted`, the retained old key on worker-a and a successful
+fresh-key recovery through the same URL with a capped attempt count.
+
 PHP objects reused by a long-lived worker must not retain per-user inputs, authentication state or results. The supplied FrankenPHP test checks the standalone demo's request isolation; it is not a Symfony Runtime or Laravel Octane test.
 
 ## Timeouts and failures

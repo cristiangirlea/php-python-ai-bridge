@@ -290,6 +290,12 @@ jobs:  # the jobs
         self.assertIn("needs: [php, mcp, images]", found["deterministic"])
         self.assertTrue(any('"$IMAGES_RESULT" = success' in line for line in found["deterministic"]))
 
+    def test_the_required_mcp_job_runs_instance_routing_and_hard_crash_recovery(self):
+        found = jobs((REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"))
+        self.assertIn("needs: [php, mcp, images]", found["deterministic"])
+        self.assertIn("run: sh scripts/ha_check.sh", found["mcp"])
+        self.assertTrue(any("--profile ha config -q" in line for line in found["mcp"]))
+
     def test_images_are_published_from_tags_with_the_job_token_only(self):
         # A pull request or a branch push must never reach a step that can write packages or releases.
         text = (REPO / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
