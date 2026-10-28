@@ -136,12 +136,12 @@ try {
 } catch (BridgeException $error) {
     check($error->httpStatus === 401, 'a token the worker does not hold is 401');
 }
-// Last, since the fault-worker then stays full for its 300 s retention: its default capacity is 128 jobs, and the
-// jobs above have finished, so the earliest of them to expire says when a slot returns.
+// Last, since the fault-worker then stays full for its 300 s retention: its result capacity is 128 jobs.
 $refusal = null;
 for ($submitted = 0; $submitted <= 128 && $refusal === null; ++$submitted) {
     try {
-        $client->submit('test.delay', ['seconds' => 0]);
+        $job = $client->submit('test.delay', ['seconds' => 0]);
+        $client->wait($job->id);
     } catch (BridgeException $error) {
         $refusal = $error;
     }

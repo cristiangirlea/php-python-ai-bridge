@@ -6,8 +6,16 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- The start log line includes `result_capacity`.
+- `BRIDGE_RESULT_CAPACITY` limits retained results at admission (default 384, giving 384 / 300 s = 1.28 jobs/s at default retention, three times the old combined limit's 0.43 jobs/s); `bridge_result_capacity` and `bridge_results_retained` expose the limit and current count.
+
 ### Changed
 
+- At the active limit, `Retry-After` estimates queue drain time from the median run time (start to finish) of the 100 most recent jobs that started.
+- `BRIDGE_OWNER_CAPACITY` now permits values up to the sum of active and result capacities. When unset, the start log line reports that sum as `owner_capacity`.
+- `BRIDGE_CAPACITY` now limits queued and running jobs. Deployments that tuned it to bound memory should also set `BRIDGE_RESULT_CAPACITY`.
 - The model wheels move to `numpy` 2.5.4, `onnxruntime` 1.31.0 and `tokenizers` 0.23.3 in `requirements-model.txt` and `requirements-model.lock`, which brings `huggingface-hub` 2.3.0 with `httpx2` in place of `requests` and drops `coloredlogs` and `sympy`. ONNX Runtime 1.31 sends telemetry to Microsoft's collector from import on, so every worker child now starts with `ORT_DISABLE_TELEMETRY=1`, whatever the service's environment says.
 - The MCP server's dependencies moved to `mcp` 2.3.0 (`mcp-types` 2.3.0, `cryptography` 50.0.2, `httpcore2` and `httpx2` 2.16.0, `pycparser` 3.12, `pydantic` 2.14.1, `pydantic-core` 2.50.1, `pyjwt` 2.15.1, `rpds-py` 2026.9.1, `sse-starlette` 3.6.0, `starlette` 1.10.0, `truststore` 0.10.5, `uvicorn` 0.54.0); `requirements-mcp.lock` now also holds the hashes of the Linux aarch64 wheels.
 

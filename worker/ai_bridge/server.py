@@ -469,6 +469,7 @@ def main() -> None:
     settings = Settings(
         concurrency=_number("BRIDGE_CONCURRENCY", "2", int),
         capacity=_number("BRIDGE_CAPACITY", "128", int),
+        result_capacity=_number("BRIDGE_RESULT_CAPACITY", "384", int),
         retention_seconds=_number("BRIDGE_RETENTION_SECONDS", "300", float),
         backend=os.environ.get("BRIDGE_BACKEND", "lexical"),
         model_dir=os.environ.get("BRIDGE_MODEL_DIR", "/models"),
@@ -477,8 +478,10 @@ def main() -> None:
         state_dir=os.environ.get("BRIDGE_STATE_DIR") or None,
         owner_capacity=_number("BRIDGE_OWNER_CAPACITY", "", int) if "BRIDGE_OWNER_CAPACITY" in os.environ else None,
     )
-    if settings.owner_capacity is not None and not 1 <= settings.owner_capacity <= settings.capacity:
-        raise SystemExit(f"BRIDGE_OWNER_CAPACITY must be an integer from 1 to BRIDGE_CAPACITY ({settings.capacity})")
+    if not 1 <= settings.result_capacity <= 65536:
+        raise SystemExit("BRIDGE_RESULT_CAPACITY must be an integer from 1 to 65536")
+    if settings.owner_capacity is not None and not 1 <= settings.owner_capacity <= settings.capacity + settings.result_capacity:
+        raise SystemExit("BRIDGE_OWNER_CAPACITY must be an integer from 1 to the sum of BRIDGE_CAPACITY and BRIDGE_RESULT_CAPACITY")
     drain_seconds = _number("BRIDGE_DRAIN_SECONDS", "30", int)
     if not 0 <= drain_seconds <= 300:
         raise SystemExit("BRIDGE_DRAIN_SECONDS must be an integer from 0 to 300")
@@ -499,7 +502,8 @@ def main() -> None:
     log.configure(log_mode)
     try:
         log.event("start", backend=settings.backend, concurrency=settings.concurrency, capacity=settings.capacity,
-                  owner_capacity=settings.capacity if settings.owner_capacity is None else settings.owner_capacity,
+                  result_capacity=settings.result_capacity,
+                  owner_capacity=settings.capacity + settings.result_capacity if settings.owner_capacity is None else settings.owner_capacity,
                   retention_seconds=settings.retention_seconds, max_jobs=settings.max_jobs,
                   drain_seconds=drain_seconds, tokens=len(tokens))
         with bridge as server:

@@ -26,7 +26,8 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
     def worker(self, retention_seconds, capacity=1):
         """A worker with room for one job by default; test tasks let the test fill it."""
         server = BridgeServer(("127.0.0.1", 0), TOKEN,
-                              Settings(capacity=capacity, retention_seconds=retention_seconds, test_tasks=True))
+                              Settings(capacity=capacity, result_capacity=capacity,
+                                       retention_seconds=retention_seconds, test_tasks=True))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
@@ -75,6 +76,7 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         text = result.content[0].text
         self.assertIn("at capacity", text)
         self.assertIn("waited", text)
+        self.assertIn("The worker's active or retained-result limit was full", text)
         # The last retry comes with one second of the three left, so it gives up after about two.
         self.assertGreater(elapsed, 1.8, "it gives up only once the call's time is nearly spent")
         self.assertLess(elapsed, 5)

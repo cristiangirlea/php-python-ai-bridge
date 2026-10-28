@@ -399,8 +399,8 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
             wait = min(wanted, deadline - time.monotonic() - CAPACITY_LAST_S)
             if wait <= 0:
                 raise ToolError(f"The worker stayed at capacity (HTTP 429) for the whole call; the tool waited "
-                                f"{time.monotonic() - started:.1f} s of its {seconds:g} s. Finished jobs hold capacity "
-                                f"until the worker's retention expires; try again shortly.")
+                                f"{time.monotonic() - started:.1f} s of its {seconds:g} s. "
+                                "The worker's active or retained-result limit was full; try again shortly.")
             # Nothing is sent to the host meanwhile: MCP logging is deprecated as of the 2026-07-28 specification,
             # and progress must only increase while each job's own starts at zero.
             await anyio.sleep(wait)
