@@ -18,13 +18,13 @@ Three normal tasks are implemented. Reranking: given a query and up to 512 candi
 
 ## Install through Composer
 
-The latest tagged release is `v0.4.0`; see [the changelog](../CHANGELOG.md). Once the package is on Packagist, this is the normal path, run inside your application's dependency-acquisition container:
+The latest tagged release is `v0.4.0`; see [the changelog](../CHANGELOG.md). The package is on Packagist; run this inside your application's dependency-acquisition container:
 
 ```sh
 composer require cristiangirlea/php-python-ai-bridge:^0.4 --no-scripts --no-plugins
 ```
 
-Until the Packagist listing exists, install the same tag from the repository instead. In your application's root `composer.json`, add this repository and requirement, preserving existing entries:
+To pin an unreleased commit instead, add this repository and requirement to your application's root `composer.json`, preserving existing entries and replacing the example hash with the commit you want:
 
 ```json
 {
@@ -35,12 +35,12 @@ Until the Packagist listing exists, install the same tag from the repository ins
     }
   ],
   "require": {
-    "cristiangirlea/php-python-ai-bridge": "0.4.0"
+    "cristiangirlea/php-python-ai-bridge": "dev-main#<commit-hash>"
   }
 }
 ```
 
-Then run `composer update cristiangirlea/php-python-ai-bridge --no-scripts --no-plugins`. Either way, review and commit the resulting `composer.lock` to pin the installed revision. These commands deliberately skip application hooks/plugins; perform any reviewed framework setup separately in your isolated application environment. A tagged version needs no `minimum-stability` change. See [Composer's VCS repository documentation](https://getcomposer.org/doc/05-repositories.md#vcs).
+Then run `composer update cristiangirlea/php-python-ai-bridge --no-scripts --no-plugins`. Either way, review and commit the resulting `composer.lock` to pin the installed revision. These commands deliberately skip application hooks/plugins; perform any reviewed framework setup separately in your isolated application environment. A tagged version needs no `minimum-stability` change; the `dev-main` requirement permits this development version explicitly. See [Composer's VCS repository documentation](https://getcomposer.org/doc/05-repositories.md#vcs).
 
 A clean Composer installation of the library is checked on every push to `main` and every pull request: CI's `composer-install` service validates `composer.json` strictly, then installs the library's `git archive` zip into a throwaway consumer project from an `artifact` repository (or from a path repository in a git worktree whose git directory is outside the mount), offline, checks what shipped in `vendor/`, and autoloads the client; see [testing](testing.md#what-the-tests-establish). That proves the package installs and autoloads, not that any framework boots with it.
 
