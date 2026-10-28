@@ -285,7 +285,7 @@ PHP objects reused by a long-lived worker must not retain per-user inputs, authe
 | `transport_error` during submission | Response unknown; a job may have been created | Resubmit with the same `idempotencyKey` while the job would still be retained; never retry without one |
 | `http_error`, status 401 | Service credentials rejected | Fix server-side configuration, do not forward service secrets |
 | `http_error`, status 400/413 | Invalid or oversized request | Reject/correct input |
-| `http_error`, status 429 | Total queued/running/retained capacity exhausted; no job was created | Apply backpressure; resubmit no sooner than `retryAfterSeconds` (below). Completed retained jobs also occupy capacity |
+| `http_error`, status 429 | Active job capacity, retained-result capacity, or the per-owner limit exhausted; no job was created | Apply backpressure; resubmit no sooner than `retryAfterSeconds` (below) |
 | `invalid_response` | Peer violated the client contract | Treat as an integration failure, not a valid task result |
 | Terminal `failed` or `timed_out` | Task did not succeed | Report a safe failure; retries require an application policy |
 

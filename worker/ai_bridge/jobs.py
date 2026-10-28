@@ -15,9 +15,11 @@ import os
 import re
 import signal
 import sqlite3
+import statistics
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
@@ -65,6 +67,7 @@ class DrainingError(Exception):
 class Settings:
     concurrency: int = 2
     capacity: int = 128
+    result_capacity: int = 384
     retention_seconds: float = 300
     backend: str = "lexical"
     model_dir: str = "/models"
@@ -75,7 +78,7 @@ class Settings:
     state_dir: str | None = None
     # The names of the service's tokens: a job belongs to one, and each has its own metrics series.
     owners: tuple[str, ...] = (DEFAULT_OWNER,)
-    # The most queued, running and retained jobs one owner may hold; BRIDGE_OWNER_CAPACITY. None is the capacity.
+    # The most queued, running and retained jobs one owner may hold; None means no per-owner cap.
     owner_capacity: int | None = None
 
 
@@ -161,12 +164,13 @@ class JobStore:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
         if (type(self.settings.concurrency) is not int or type(self.settings.capacity) is not int
-                or type(self.settings.max_jobs) is not int
+                or type(self.settings.max_jobs) is not int or type(self.settings.result_capacity) is not int
                 or not 1 <= self.settings.concurrency <= 8 or not 1 <= self.settings.capacity <= 1024
+                or not 1 <= self.settings.result_capacity <= 65536
                 or not 1 <= self.settings.max_jobs <= 1000000):
             raise ValueError("invalid worker limits")
         cap = self.settings.owner_capacity
-        if cap is not None and (type(cap) is not int or not 1 <= cap <= self.settings.capacity):
+        if cap is not None and (type(cap) is not int or not 1 <= cap <= self.settings.capacity + self.settings.result_capacity):
             raise ValueError("invalid worker limits")
         if (self.settings.backend not in MODEL_NAMES
                 or not math.isfinite(self.settings.retention_seconds)
@@ -184,6 +188,7 @@ class JobStore:
         self._submitted = {(owner, task): 0 for owner in owners for task in tasks}
         self._rejected = {(owner, "capacity"): 0 for owner in owners}
         self._durations = {task: metrics.new_histogram() for task in tasks}
+        self._recent_durations: deque[float] = deque(maxlen=100)
         self._waits = {task: metrics.new_histogram() for task in tasks}
         self._jobs: dict[str, Job] = {}
         self._keys: dict[tuple[str, str | None], str] = {}  # (owner, idempotency key) -> job id, for retained jobs only
@@ -304,8 +309,12 @@ class JobStore:
         if cap is not None and sum(job["_owner"] == owner for job in self._jobs.values()) >= cap:
             raise CapacityError("owner job capacity reached; wait for its retained jobs to expire",
                                 self._retry_after(owner))
-        if len(self._jobs) >= self.settings.capacity:
-            raise CapacityError("job capacity reached; wait for retained jobs to expire", self._retry_after())
+        active = sum(job["status"] not in TERMINAL for job in self._jobs.values())
+        if active >= self.settings.capacity:
+            retry = math.ceil(active / self.settings.concurrency * statistics.median(self._recent_durations)) if self._recent_durations else 1
+            raise CapacityError("active job capacity reached", min(300, max(1, retry)))
+        if len(self._jobs) - active >= self.settings.result_capacity:
+            raise CapacityError("result capacity reached", self._retry_after())
         now = time.monotonic()
         job_id = uuid.uuid4().hex
         job = {
@@ -379,7 +388,9 @@ class JobStore:
             statuses = [job["status"] for job in self._jobs.values()]
             return {
                 "backend": self.settings.backend, "concurrency": self.settings.concurrency,
-                "capacity": self.settings.capacity, "tasks": self._tasks, "owners": self.settings.owners,
+                "capacity": self.settings.capacity, "result_capacity": self.settings.result_capacity,
+                "results_retained": sum(status in TERMINAL for status in statuses),
+                "tasks": self._tasks, "owners": self.settings.owners,
                 "jobs": dict(self._ended), "submitted": dict(self._submitted), "rejected": dict(self._rejected),
                 "queued": statuses.count("queued"), "running": statuses.count("running"),
                 "pool_size": len(self._pool), "pool_ready": sum(worker.ready for worker in self._pool),
@@ -422,9 +433,11 @@ class JobStore:
         # A job read back from the table finished in an earlier process and never ends here.
         self._ended[job["_owner"], job["task"], status] += 1
         metrics.observe(self._durations[job["task"]], job["_finished"] - job["_submitted_at"])
+        started = job.get("_started_at")
+        if started is not None:
+            self._recent_durations.append(job["_finished"] - started)
         if not log.enabled():
             return
-        started = job.get("_started_at")
         log.event("job", warning=status in ("failed", "timed_out"), job_id=job["id"], task=job["task"],
                   owner=job["_owner"], job_status=status,
                   queue_ms=None if started is None else round((started - job["_submitted_at"]) * 1000, 3),

@@ -268,6 +268,7 @@ services:
       <<: *python-env
       BRIDGE_TEST_TASKS: "1"
       BRIDGE_CONCURRENCY: "1"
+      BRIDGE_RESULT_CAPACITY: "128"
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
 
   # Two clients of one worker, each with its own test-only literal token, independent of the run's BRIDGE_TOKEN.
@@ -280,8 +281,9 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: /work/worker
       BRIDGE_TOKENS: app=test-only-app-client-token-never-use-in-production,other=test-only-other-client-token-never-use-in-production
-      # Small enough for tests/integration.py, which repeats both numbers, to fill one token's cap and then the worker.
+      # tests/integration.py fills one token's cap and then the retained-result limit.
       BRIDGE_CAPACITY: "12"
+      BRIDGE_RESULT_CAPACITY: "12"
       BRIDGE_OWNER_CAPACITY: "8"
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
 
