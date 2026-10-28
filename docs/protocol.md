@@ -95,6 +95,12 @@ On SIGTERM or SIGINT the worker drains: every `POST /v1/jobs` is answered 503 `d
 
 Both histograms have the buckets 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60 and 300 seconds and `+Inf`, cumulative as the format requires, with `_sum` and `_count`. A scrape copies the numbers under the store's lock and formats them without it, so it never waits for a job. An invalid submission (400) creates no job and counts nothing.
 
+Prometheus adds the scrape target labels `job` and `instance` to these series; histogram `_bucket` series also have `le`, the bucket's upper bound. Prometheus supplies this separate scrape metric (the worker does not emit it):
+
+| Family | Type | Labels | What it holds |
+| --- | --- | --- | --- |
+| `up` | gauge | `job`, `instance` | 1 for a successful scrape, 0 for a failed scrape |
+
 ## Logging
 
 The worker writes no log by default: `BRIDGE_LOG` unset, empty or `off` writes no request/job/lifecycle log; the non-loopback startup warning still goes to stderr. With `BRIDGE_LOG=json` it writes one JSON object per line on stderr; any other value stops the worker at start with a message naming the variable. Every line has `ts` (UTC, ISO 8601 with milliseconds and `Z`), `level` (`info` or `warning`) and `event`, then exactly the keys of its event, `null` where a value is unknown or does not apply. Values come only from fixed sets, numbers, a job ID or a token's name: no input, result, header, query string, path, idempotency key, token, error message or exception text is ever written, and a key outside the table is dropped by the formatter whatever a caller passes. Lines are written by a thread of their own behind a queue of 1024: a stderr that blocks or fails never holds or fails a request or a job, and lines that do not fit are dropped. Logging is best effort: lines may be dropped when the queue is full or at exit. A stop waits about 2 s at most for the queued lines to be written, and a process that ends without that stop (killed, for instance) loses what was still queued.

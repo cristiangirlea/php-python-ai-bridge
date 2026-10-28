@@ -11,6 +11,8 @@ All notable changes to this project are documented in this file. The format foll
 - A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.
 - Reproducible raw-socket request fuzzing: a fixed corpus followed by fresh seeded multi-byte flips, inserts, deletes and splices, with `BRIDGE_FUZZ_SECONDS` for longer runs and distinct-input counts; slow-client connection-budget recovery tests.
 - Body and header limits and read/write timeouts in the Caddy TLS example; oversized bodies are rejected before contacting the worker.
+- Seven no-model failure drills on dedicated compose peers, with bounded standard-library HTTP probes, offline verdict tests and an explicit start-crash-loop skip. CI's required deterministic gate includes the drills and digest-pinned promtool syntax and behavior checks of the seven example alert rules.
+- Example Prometheus alert rules and a Grafana dashboard, with starting targets and import instructions in the operations guide.
 - The start log line includes `result_capacity`.
 - `BRIDGE_RESULT_CAPACITY` limits retained results at admission (default 384, giving 384 / 300 s = 1.28 jobs/s at default retention, three times the old combined limit's 0.43 jobs/s); `bridge_result_capacity` and `bridge_results_retained` expose the limit and current count.
 
