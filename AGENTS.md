@@ -39,6 +39,11 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml --profile test down
+
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills config -q
+sh scripts/failure_drills.sh
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills run --rm --no-deps promtool
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills down -v
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile py-dev --profile php-frameworks --profile tls config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher   # network once: wheels into .cache/
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
@@ -59,7 +64,7 @@ docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profil
 
 CI runs the PHP steps on each of PHP 8.2, 8.3, 8.4 and 8.5 with `BRIDGE_PHP_IMAGE` set to the matrix's
 pinned image, after first checking that the image really is `EXPECTED_PHP`; the stable `deterministic`
-check requires every matrix job and the MCP job, which runs the Laravel and Symfony tests and the TLS example once, on PHP 8.5
+check requires every matrix job, the image builds, the no-model drills and promtool job, and the MCP job, which runs the Laravel and Symfony tests and the TLS example once, on PHP 8.5
 (their locked majors need 8.3 and 8.4 or later). Locally the default image is PHP 8.5; `docs/testing.md`
 says how to pick another, what each layer establishes, and where CI runs. `model-smoke.yml` downloads
 about 330 MB of models and wheels and is not a required check: run it only for a change on its `paths:` list.

@@ -105,6 +105,74 @@ Images are tagged with the version without its `v` (`0.3.0`). A stable release a
 
 `bridge_job_queue_seconds` separates waiting from running, and `bridge_jobs_total{status="timed_out"}` counts deadlines. Structured logs (since 0.4.0): `BRIDGE_LOG=json` writes one JSON line on stderr per request and per finished job, plus start, drain and stop, with a fixed schema that never holds inputs, results, headers, tokens or exception text; off by default. Logging is best effort: lines are written behind a bounded queue and are dropped when it is full or at exit, so a log is no audit record and no substitute for `/metrics`. [The protocol](protocol.md#logging) has the schema.
 
+## Targets
+
+These are initial operator targets for the measured workload, not a service guarantee. Measure readiness with an authenticated `/readyz` probe: target 99.9% of probes over 30 days, excluding planned drains. A busy single child is not ready, so probe results depend on offered load. Scrape availability has the same target; `up` measures the scrape, not readiness. Investigate no ready child or a failed scrape lasting two minutes.
+
+At the measured ONNX load of four client threads, one CPU and one child, aim for p95 job duration under 5 seconds for each of rerank, embed and redact. From "With the limits in force" in [docs/testing.md](testing.md#measured-throughput-and-latency-under-load-informational), the measured p95 values were 1.97, 2.34 and 2.90 seconds respectively, with default admission and 1.29 jobs/s across the mix; 5 seconds is a real histogram bucket bound and provides headroom. The one-thread run completed 768 jobs in 600.0 seconds at 1.28 jobs/s with 3 refusals; the four-thread run completed 774 at 1.29 jobs/s with 159 refusals. Both reach the retained-result limit at the defaults: result capacity 384 and retention 300 s give a sustained admission budget of 1.28 jobs/s. These measurements include client polling, whereas the server histogram measures job duration; validate the target with the actual workload and hardware. Keep queue depth at or below three over five minutes, allowing the other three of those four client threads to wait for the single child, from the same "With the limits in force" workload in docs/testing.md. This queue target concerns active jobs, which `BRIDGE_CAPACITY` now bounds separately from retained results.
+
+Investigate an owner rejection rate above 0.5/s for five minutes. This is above the 159 refusals in 600.0 seconds from one owner in the four-thread ONNX run, from "With the limits in force" in [docs/testing.md](testing.md#measured-throughput-and-latency-under-load-informational), so the measured admission-limited workload does not itself cross the threshold.
+
+Keep retained results below 90% of `bridge_result_capacity`. Investigate `bridge_results_retained` at 90% or more of that capacity for ten minutes: reaching the result limit refuses new submissions even with an empty queue. `BridgeResultsNearCapacity` uses this target; the dashboard plots retained results against their configured capacity. Adjust retention or result capacity to the deployment's admission needs (section 2).
+
+The "Measured latency (informational)" section in [docs/testing.md](testing.md#measured-latency-informational) gives the workload's service-time context: medians of 0.05 s for 32-document rerank, 0.16 s for 32-text embed and 0.68 s for 2000-character redact. The p95 targets above come from "With the limits in force" in docs/testing.md; they allow headroom above its slowest per-task p95. That run's admission refusals mean the latency target is for accepted jobs and is not a promise to accept every request.
+
+Set a 30-day error budget of 0.1% of terminal jobs for `failed`, including `worker_crashed`. The metrics group failures by status, not error code; inspect client results for `worker_crashed`. Investigate each failed or timed-out job; the alert is an early warning, not a calculation of the budget. The targets are starting points, not measurements of deployed availability.
+
+## Alerts and dashboard
+
+Configure Prometheus to scrape `/metrics` on each private worker with a bearer token, and add `deploy/prometheus/alerts.yml` to its `rule_files`. Name the scrape job `bridge` for the target-down rule. Supply credentials through the operator's secret mechanism, never in a committed configuration. Reload Prometheus and verify the targets and rules pages. Import `deploy/grafana/bridge.json` through Grafana's dashboard import and select the Prometheus data source. The alerts and dashboard are examples: tune their targets to the deployment and separately probe authenticated `/readyz`.
+
+For example, in the operator's Prometheus configuration (paths are inside its container):
+
+```yaml
+rule_files:
+  - /etc/prometheus/bridge-alerts.yml
+scrape_configs:
+  - job_name: bridge
+    metrics_path: /metrics
+    authorization:
+      credentials_file: /run/secrets/bridge-token
+    static_configs:
+      - targets: ['worker:8090']
+```
+
+Mount `deploy/prometheus/alerts.yml` read-only at `/etc/prometheus/bridge-alerts.yml` and provide the token file through the operator's secret store. Keep this scraper on the worker's private network; for a remote scrape, use the operator's TLS endpoint and certificate verification. Validate the example rules without running a Prometheus server:
+
+```sh
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills run --rm --no-deps promtool
+```
+
+This runs `promtool check rules deploy/prometheus/alerts.yml` and `promtool test rules deploy/prometheus/alerts.test.yml` in the digest-pinned `prom/prometheus` image. The rule tests cover healthy idle histograms and every alert's threshold and hold time. `bridge_pool_ready` counts loaded children even while busy: `BridgeNoReadyChild` detects no loaded children, not the absence of an idle child, and does not measure `/readyz` availability.
+
+## Drills
+
+From the repository root, with Docker Linux containers and a disposable `BRIDGE_TOKEN` of at least 32 characters (see the README), run:
+
+```sh
+sh scripts/failure_drills.sh
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills down -v
+```
+
+On Windows run the script with Git Bash (`C:/Program Files/Git/bin/bash.exe`); it sets `MSYS_NO_PATHCONV=1`. Every compose command uses project `bridge-drills`. The `drills` profile has dedicated services on its own internal network, no published ports and no model or dependency downloads; it never kills or fills a test-profile peer. The script prints one `PASS <name>` or `FAIL <name>: <why>` per implemented drill, continues after a failure, and exits non-zero if any fail. It removes the disposable project's containers and drill state volume before starting and on exit, clearing leftovers from an interrupted run; the final `down -v` removes the project's networks too. Use this disposable project only for checks.
+
+| Drill | What it proves |
+| --- | --- |
+| `child-killed-mid-job` | On a one-child test worker, submit `test.delay`, observe `running`, find the spawn child's PID through `/proc/*/cmdline` (no `ps`), then `kill -9` it. The job must fail as `worker_crashed`, a different PID must become ready within 15 s, and it must finish another job. |
+| `missing-model-directory` | An ONNX-configured worker with an empty `/empty-models` exits 1 with `lacks the model files for ...; acquire them with the fetcher:`; no ONNX wheels or models are needed for this preflight refusal. |
+| `state-directory-full` | Start with a writable 1 MiB state tmpfs, finish a baseline job, then fill it with real pages. A new submission must return 429 `capacity_exceeded` with exactly `Retry-After: 1`, while the retained job and `/healthz` still answer 200. This exercises the protocol's unwritable-table rule after startup; an initially read-only directory instead refuses startup naming `BRIDGE_STATE_DIR` (covered by worker unit tests). |
+| `open-token-file` | Create a mode-0644 token file inside Linux. Startup must exit 1 naming `BRIDGE_TOKENS_FILE` and requiring mode 0600 or stricter; conflicting token variables are removed first. |
+| `drain-past-deadline` | A running 10 s `test.delay`, `BRIDGE_DRAIN_SECONDS=1`, `BRIDGE_LOG=json`, then compose `kill -s TERM`. An independent poller reads until terminal or unreachable. Logs must contain `drain` with `running: 1`, then `stop` with `cancelled: 1`, and the container must exit cleanly within 15 s. |
+| `connection-flood` | Hold 32 connections with incomplete headers and require none was answered or closed, then open a 33rd and require 503 `service_busy`, `Retry-After: 1`. Close every socket and require a normal health request to succeed. Retry the whole flood within 15 s to allow a readiness probe's slot to close. |
+| `sigterm-under-load` | Accept 20 delay jobs, observe two running and 18 queued, send TERM and poll every accepted ID until terminal or unreachable. Logs must show two running at the deadline and two cancelled at stop. Restart with the same state volume: every accepted ID must be terminal, queued/unfinished work must be `failed` with `service_restarted`, and already observed terminal results stay unchanged (a shutdown cancellation becomes `service_restarted` on recovery, as documented). The independent client keeps the disposable tmpfs-backed volume mounted across the restart. |
+
+Not drillable from outside without changing or injecting worker code:
+
+- `start-crash-loop`: no runtime control makes a spawn child die before readiness on the dependency-free backend. Killing a PID from `/proc` races its ready message and cannot establish a pre-ready death. The driver prints `SKIP start-crash-loop: ...`; injected start failures and backoff are covered by `tests/python/test_jobs.py`.
+- Native model crashes and corrupt model execution are not exercised: these no-model drills establish process-death recovery and missing-file refusal, not native inference correctness. The optional model smoke suite checks real-model execution separately.
+
+HTTP assertions and bounded polling live in `scripts/failure_drills.py` (standard library only); `tests/python/test_failure_drills.py` exercises their success/failure logic against fakes without Docker. Docker lifecycle and signal injection live in the shell driver. Do not use these drills as an availability benchmark; the targets above need observations from the actual deployment.
+
 ## 7. Failure modes
 
 | Symptom | Cause | What the service does | What the operator does |
