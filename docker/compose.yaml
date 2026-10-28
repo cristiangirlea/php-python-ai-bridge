@@ -20,6 +20,7 @@ x-python: &python
   <<: *limits
   image: python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970
   environment: &python-env
+    BRIDGE_TRUST_NETWORK: "1"
     PYTHONDONTWRITEBYTECODE: "1"
     PYTHONPATH: /work/worker
     BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN to a random service token of at least 32 characters}
@@ -50,6 +51,7 @@ services:
     environment:
       <<: *python-env
       BRIDGE_STATE_DIR: /state
+      BRIDGE_LOG: json
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
       - /state:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700
@@ -88,6 +90,9 @@ services:
     <<: *python
     profiles: [test]
     network_mode: none
+    environment:
+      <<: *python-env
+      BRIDGE_FUZZ_SECONDS: ${BRIDGE_FUZZ_SECONDS:-30}
     command: [python, -m, unittest, discover, -s, tests/python, -v]
 
   php-tests:
@@ -280,6 +285,7 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: /work/worker
+      BRIDGE_TRUST_NETWORK: "1"
       BRIDGE_TOKENS: app=test-only-app-client-token-never-use-in-production,other=test-only-other-client-token-never-use-in-production
       # tests/integration.py fills one token's cap and then the retained-result limit.
       BRIDGE_CAPACITY: "12"
@@ -370,6 +376,7 @@ services:
     environment:
       BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN}
       BRIDGE_STATE_DIR: /state
+      BRIDGE_TRUST_NETWORK: "1"
 
   # Reads the models the `fetcher` put in .cache, or `docker run -v <volume>:/cache <image> fetch` with a volume.
   model-worker-image:

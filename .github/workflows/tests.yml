@@ -100,6 +100,7 @@ jobs:
         run: |
           docker compose -f docker/compose.yaml up -d tls-proxy
           docker compose -f docker/compose.yaml run --rm --no-deps tls-check
+          docker compose -f docker/compose.yaml logs --no-log-prefix --no-color worker | docker compose -f docker/compose.yaml run --rm --no-deps -T tls-check php tests/php/tls.php request-log
       - name: Stop test containers
         if: always()
         run: docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile php-dev --profile py-dev --profile php-frameworks --profile tls down

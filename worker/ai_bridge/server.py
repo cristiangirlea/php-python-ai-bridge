@@ -3,6 +3,7 @@
 import argparse
 import hmac
 import io
+import ipaddress
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import signal
 import socket
 import sqlite3
 import stat
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -25,6 +27,7 @@ from .tasks import missing_models
 MAX_BODY = 262144
 MAX_REQUEST_LINE = 8192
 MAX_HEADER_BLOCK = 16384
+READ_SECONDS = 5
 # How long a stop waits for a held drain thread's line: past it, the stop goes ahead without one.
 DRAIN_LINE_WAIT = 5
 # What a request line names as the route: the template a path matches, never the path itself.
@@ -40,34 +43,81 @@ class HeadTooLarge(Exception):
     pass
 
 
+class BadHead(Exception):
+    pass
+
+
 class _Head:
     """The connection's reader, which refuses a request line or header block over its limit before reading it all;
     the body is read through it unchanged."""
 
-    def __init__(self, rfile: io.BufferedIOBase) -> None:
+    def __init__(self, rfile: io.BufferedIOBase, connection: socket.socket) -> None:
         self._rfile = rfile
+        self._connection = connection
+        self._pending = bytearray()
+        self.start_body()
         self._left: int | None = None  # bytes the header block may still take; None until the request line is read
         self._done = False
 
+    def start_body(self) -> None:
+        self._deadline = time.monotonic() + READ_SECONDS
+
+    def _pull(self, size: int) -> bytes:
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError
+        self._connection.settimeout(left)
+        return self._rfile.read1(size)
+
+    def _line(self, limit: int) -> bytes:
+        while True:
+            end = self._pending.find(b"\n") + 1
+            if end or (limit >= 0 and len(self._pending) >= limit):
+                if limit >= 0:
+                    end = min(end or limit, limit)
+                line = bytes(self._pending[:end])
+                del self._pending[:end]
+                return line
+            part = self._pull(limit - len(self._pending) if limit >= 0 else 8192)
+            if not part:
+                line = bytes(self._pending)
+                self._pending.clear()
+                return line
+            self._pending.extend(part)
+
+    def read(self, size: int) -> bytes:
+        raw = bytearray(self._pending[:size])
+        del self._pending[:size]
+        while len(raw) < size:
+            part = self._pull(size - len(raw))
+            if not part:
+                break
+            raw.extend(part)
+        return bytes(raw)
+
     def readline(self, limit: int = -1) -> bytes:
         if self._done:
-            return self._rfile.readline(limit)
+            return self._line(limit)
         if self._left is None:
-            line = self._rfile.readline(MAX_REQUEST_LINE + 3)
+            line = self._line(MAX_REQUEST_LINE + 3)
             # One line end is not counted, so a run of carriage returns or a truncated read is over the limit.
             content = line[:-2] if line.endswith(b"\r\n") else line[:-1] if line.endswith(b"\n") else line
             if len(content) > MAX_REQUEST_LINE:
                 raise HeadTooLarge
+            if line and (not line.endswith(b"\r\n") or any(byte < 32 or byte > 126 for byte in content)):
+                raise BadHead
             self._left = MAX_HEADER_BLOCK
             return line
         # Read past the budget by a little, so a line that ends exactly on it can be told from a longer one.
-        line = self._rfile.readline(self._left + 3)
-        if line in (b"\r\n", b"\n", b""):
+        line = self._line(self._left + 3)
+        if line == b"\r\n":
             self._done = True
             return line
         self._left -= len(line)
         if self._left < 0:
             raise HeadTooLarge
+        if (not line.endswith(b"\r\n") or not re.fullmatch(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+:[\t\x20-\x7e\x80-\xff]*\r\n", line)):
+            raise BadHead
         return line
 
     def __getattr__(self, name: str) -> Any:
@@ -275,9 +325,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def setup(self) -> None:
         super().setup()
-        self.connection.settimeout(5)
+        self.connection.settimeout(READ_SECONDS)
         # _Head is not a BufferedIOBase: it forwards every other attribute to the stream it wraps.
-        self.rfile = _Head(self.rfile)  # type: ignore[assignment]
+        self._reader = _Head(self.rfile, self.connection)
+        self.rfile = self._reader  # type: ignore[assignment]
 
     def handle_one_request(self) -> None:
         logged = log.enabled()
@@ -290,6 +341,8 @@ class Handler(BaseHTTPRequestHandler):
             # A long request line is refused before the request is parsed, so these may not be set yet.
             self.requestline, self.request_version = "", "HTTP/1.0"
             self._error(431, "headers_too_large", "Request line or header block exceeds its limit")
+        except BadHead:
+            self.send_error(400)
         finally:
             # After the reply is written; a connection that ended before any reply was written has no line.
             if logged and self._status is not None:
@@ -312,9 +365,26 @@ class Handler(BaseHTTPRequestHandler):
         return "other"
 
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
-        super().send_error(code, message, explain)
-        # The standard library's own refusals write their whole reply here, and pass an HTTPStatus.
-        self._status = int(code)
+        # Parser diagnostics contain request bytes; only fixed JSON errors may cross this boundary.
+        self.requestline = ""
+        self.request_version = "HTTP/1.0"
+        if code == 431:
+            self._error(431, "headers_too_large", "Request line or header block exceeds its limit")
+        elif code == 501:
+            self._error(405, "method_not_allowed", "Only GET and POST are supported")
+        else:
+            self._error(400, "invalid_request", "Request does not match the task contract")
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        lengths = self.headers.get_all("Content-Length", [])
+        if (self.request_version not in ("HTTP/1.0", "HTTP/1.1")
+                or "Transfer-Encoding" in self.headers or len(lengths) > 1
+                or (lengths and not re.fullmatch(r"[0-9]{1,7}", lengths[0]))):
+            self.send_error(400)
+            return False
+        return True
 
     def log_message(self, *_: Any) -> None:
         # Do not log URLs, credentials, inputs or model results.
@@ -328,6 +398,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, text.encode("utf-8"), CONTENT_TYPE)
 
     def _send(self, status: int, body: bytes, content_type: str, headers: Iterable[tuple[str, str]] = ()) -> None:
+        self.connection.settimeout(READ_SECONDS)
         self.send_response(status)
         for name, header in headers:
             self.send_header(name, header)
@@ -360,13 +431,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict[str, Any]:
         lengths = self.headers.get_all("Content-Length", [])
-        if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,7}", lengths[0]):
+        if "Transfer-Encoding" in self.headers or len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,7}", lengths[0]):
             raise ValueError("A single Content-Length is required; chunked bodies are unsupported")
         size = int(lengths[0])
         if size > MAX_BODY:
             raise OverflowError("Request exceeds 262144 bytes")
         if self.headers.get_content_type() != "application/json":
             raise ValueError("Content-Type must be application/json")
+        self._reader.start_body()
         raw = self.rfile.read(size)
         if len(raw) != size:
             raise ValueError("Incomplete request body")
@@ -488,6 +560,14 @@ def main() -> None:
     log_mode = os.environ.get("BRIDGE_LOG") or "off"
     if log_mode not in log.MODES:
         raise SystemExit("BRIDGE_LOG must be off or json")
+    trust = os.environ.get("BRIDGE_TRUST_NETWORK", "")
+    if trust not in ("", "0", "1"):
+        raise SystemExit("BRIDGE_TRUST_NETWORK must be unset, empty, 0 or 1")
+    try:
+        loopback = ipaddress.ip_address(args.host).is_loopback
+    except ValueError:
+        loopback = False
+    network_warning = not loopback and trust != "1"
     # Without its files every job needing a model would fail as task_failed, which cannot say why: a cache fetched
     # before a model was added has no directory for it.
     missing = missing_models(settings.model_dir) if settings.backend == "onnx" else []
@@ -501,7 +581,10 @@ def main() -> None:
                          "jobs.sqlite in") from None
     log.configure(log_mode)
     try:
-        log.event("start", backend=settings.backend, concurrency=settings.concurrency, capacity=settings.capacity,
+        if network_warning and log_mode == "off":
+            print(log.NETWORK_WARNING, file=sys.stderr)
+        log.event("start", warning=network_warning, network_warning=log.NETWORK_WARNING if network_warning else None,
+                  backend=settings.backend, concurrency=settings.concurrency, capacity=settings.capacity,
                   result_capacity=settings.result_capacity,
                   owner_capacity=settings.capacity + settings.result_capacity if settings.owner_capacity is None else settings.owner_capacity,
                   retention_seconds=settings.retention_seconds, max_jobs=settings.max_jobs,
