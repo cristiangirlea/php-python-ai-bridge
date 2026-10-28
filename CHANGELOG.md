@@ -8,7 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
-- Seven no-model failure drills on dedicated compose peers, with bounded standard-library HTTP probes, offline verdict tests and an explicit start-crash-loop skip. CI's required deterministic gate includes the drills and digest-pinned promtool syntax and behavior checks of the six example alert rules.
+- Seven no-model failure drills on dedicated compose peers, with bounded standard-library HTTP probes, offline verdict tests and an explicit start-crash-loop skip. CI's required deterministic gate includes the drills and digest-pinned promtool syntax and behavior checks of the seven example alert rules.
 - Example Prometheus alert rules and a Grafana dashboard, with starting targets and import instructions in the operations guide.
 - The start log line includes `result_capacity`.
 - `BRIDGE_RESULT_CAPACITY` limits retained results at admission (default 384, giving 384 / 300 s = 1.28 jobs/s at default retention, three times the old combined limit's 0.43 jobs/s); `bridge_result_capacity` and `bridge_results_retained` expose the limit and current count.

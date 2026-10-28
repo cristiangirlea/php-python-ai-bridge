@@ -1,29 +1,35 @@
 groups:
   - name: bridge
     rules:
-      # Target: queue depth at most three for five minutes.
+      # The four-thread workload leaves at most three jobs waiting behind its one child.
       - alert: BridgeQueueHigh
         expr: bridge_queue_depth > 3
         for: 5m
         labels: {severity: warning}
         annotations: {summary: "Bridge queue exceeds three jobs"}
-      # Allow headroom above the measured 58 refusals in 600 seconds from one owner.
+      # Allow headroom above 159 refusals in 600 seconds in docs/testing.md's "With the limits in force".
       - alert: BridgeOwnerRejected
-        expr: sum by (instance, owner) (rate(bridge_submissions_rejected_total[5m])) > 0.2
+        expr: sum by (instance, owner) (rate(bridge_submissions_rejected_total[5m])) > 0.5
         for: 5m
         labels: {severity: warning}
         annotations: {summary: "Bridge owner is receiving sustained 429 responses"}
+      # Target: keep retained results below 90 percent; a full result store refuses admission even with an empty queue.
+      - alert: BridgeResultsNearCapacity
+        expr: bridge_results_retained >= 0.9 * bridge_result_capacity
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Bridge retained results are near the admission limit"}
       # Target: investigate each failed or timed-out job against the error budget.
       - alert: BridgeJobsFailed
         expr: sum by (instance, task, status) (increase(bridge_jobs_total{status=~"failed|timed_out"}[5m])) > 0
         labels: {severity: warning}
         annotations: {summary: "Bridge jobs failed or timed out"}
-      # Use the 2.5-second histogram bound above the measured per-task p95 values.
+      # Use the 5-second histogram bound above the 2.90-second p95 in docs/testing.md's "With the limits in force".
       - alert: BridgeJobLatencyHigh
-        expr: histogram_quantile(0.95, sum by (instance, task, le) (rate(bridge_job_duration_seconds_bucket[5m]))) > 2.5
+        expr: histogram_quantile(0.95, sum by (instance, task, le) (rate(bridge_job_duration_seconds_bucket[5m]))) > 5
         for: 5m
         labels: {severity: warning}
-        annotations: {summary: "Bridge p95 job latency exceeds 2.5 seconds"}
+        annotations: {summary: "Bridge p95 job latency exceeds 5 seconds"}
       # Target: scrape availability at least 99.9 percent.
       - alert: BridgeTargetDown
         expr: up{job="bridge"} == 0
