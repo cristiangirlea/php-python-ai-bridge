@@ -87,7 +87,7 @@ class FormatterTests(unittest.TestCase):
         expected = {
             "request": ["method", "route", "status", "duration_ms", "owner"],
             "job": ["job_id", "task", "owner", "job_status", "queue_ms", "run_ms"],
-            "start": ["backend", "concurrency", "capacity", "owner_capacity", "retention_seconds", "max_jobs",
+            "start": ["backend", "concurrency", "capacity", "result_capacity", "owner_capacity", "retention_seconds", "max_jobs",
                       "drain_seconds", "tokens"],
             "stop": ["cancelled"],
             "drain": ["duration_ms", "running", "interrupted"],

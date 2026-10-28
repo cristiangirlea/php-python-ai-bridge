@@ -153,7 +153,7 @@ def summarise(case: str, concurrency: int, elapsed: float, records: list) -> lis
 
 
 def render(header: dict, rows: list) -> str:
-    limits = (LIMITS[header["backend"]] + "; capacity 128 jobs and retention 300 s, the defaults"
+    limits = (LIMITS[header["backend"]] + "; active capacity 128 jobs, result capacity 384 jobs and retention 300 s, the defaults"
               if header["backend"] else "as configured at that worker, not read by this script")
     lines = [
         f"Measured {header['date']} UTC, commit `{header['commit']}`, runner: {header['runner']}, CPU: {header['cpu']}.",
