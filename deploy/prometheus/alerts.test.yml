@@ -1,0 +1,110 @@
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+tests:
+  - name: healthy idle worker
+    interval: 1m
+    input_series:
+      - series: 'bridge_queue_depth{job="bridge",instance="worker:8090"}'
+        values: '0+0x10'
+      - series: 'bridge_submissions_rejected_total{instance="worker:8090",owner="default",reason="capacity"}'
+        values: '0+0x10'
+      - series: 'bridge_jobs_total{instance="worker:8090",task="rerank",status="failed"}'
+        values: '0+0x10'
+      - series: 'bridge_job_duration_seconds_bucket{instance="worker:8090",task="rerank",le="2.5"}'
+        values: '0+0x10'
+      - series: 'bridge_job_duration_seconds_bucket{instance="worker:8090",task="rerank",le="5"}'
+        values: '0+0x10'
+      - series: 'bridge_job_duration_seconds_bucket{instance="worker:8090",task="rerank",le="+Inf"}'
+        values: '0+0x10'
+      - series: 'bridge_pool_ready{job="bridge",instance="worker:8090"}'
+        values: '1+0x10'
+      - series: 'up{job="bridge",instance="worker:8090"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - {eval_time: 10m, alertname: BridgeQueueHigh, exp_alerts: []}
+      - {eval_time: 10m, alertname: BridgeOwnerRejected, exp_alerts: []}
+      - {eval_time: 10m, alertname: BridgeJobsFailed, exp_alerts: []}
+      - {eval_time: 10m, alertname: BridgeJobLatencyHigh, exp_alerts: []}
+      - {eval_time: 10m, alertname: BridgeTargetDown, exp_alerts: []}
+      - {eval_time: 10m, alertname: BridgeNoReadyChild, exp_alerts: []}
+  - name: queue above three for five minutes
+    interval: 1m
+    input_series:
+      - series: 'bridge_queue_depth{job="bridge",instance="worker:8090"}'
+        values: '4+0x5'
+    alert_rule_test:
+      - {eval_time: 4m, alertname: BridgeQueueHigh, exp_alerts: []}
+      - eval_time: 5m
+        alertname: BridgeQueueHigh
+        exp_alerts:
+          - exp_labels: {job: bridge, instance: 'worker:8090', severity: warning}
+            exp_annotations: {summary: "Bridge queue exceeds three jobs"}
+  - name: owner rejection above measured rate for five minutes
+    interval: 1m
+    input_series:
+      - series: 'bridge_submissions_rejected_total{instance="worker:8090",owner="default",reason="capacity"}'
+        values: '0+90x6'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: BridgeOwnerRejected, exp_alerts: []}
+      - eval_time: 6m
+        alertname: BridgeOwnerRejected
+        exp_alerts:
+          - exp_labels: {instance: 'worker:8090', owner: default, severity: warning}
+            exp_annotations: {summary: "Bridge owner is receiving sustained 429 responses"}
+  - name: failed and timed out jobs fire immediately
+    interval: 1m
+    input_series:
+      - series: 'bridge_jobs_total{instance="worker:8090",task="rerank",status="failed"}'
+        values: '0 1'
+      - series: 'bridge_jobs_total{instance="worker:8090",task="embed",status="timed_out"}'
+        values: '0 1'
+    alert_rule_test:
+      - {eval_time: 0m, alertname: BridgeJobsFailed, exp_alerts: []}
+      - eval_time: 1m
+        alertname: BridgeJobsFailed
+        exp_alerts:
+          - exp_labels: {instance: 'worker:8090', task: rerank, status: failed, severity: warning}
+            exp_annotations: {summary: "Bridge jobs failed or timed out"}
+          - exp_labels: {instance: 'worker:8090', task: embed, status: timed_out, severity: warning}
+            exp_annotations: {summary: "Bridge jobs failed or timed out"}
+  - name: latency above the histogram bound for five minutes
+    interval: 1m
+    input_series:
+      - series: 'bridge_job_duration_seconds_bucket{instance="worker:8090",task="rerank",le="2.5"}'
+        values: '0+0x6'
+      - series: 'bridge_job_duration_seconds_bucket{instance="worker:8090",task="rerank",le="5"}'
+        values: '0+60x6'
+      - series: 'bridge_job_duration_seconds_bucket{instance="worker:8090",task="rerank",le="+Inf"}'
+        values: '0+60x6'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: BridgeJobLatencyHigh, exp_alerts: []}
+      - eval_time: 6m
+        alertname: BridgeJobLatencyHigh
+        exp_alerts:
+          - exp_labels: {instance: 'worker:8090', task: rerank, severity: warning}
+            exp_annotations: {summary: "Bridge p95 job latency exceeds 2.5 seconds"}
+  - name: scrape down for two minutes
+    interval: 1m
+    input_series:
+      - series: 'up{job="bridge",instance="worker:8090"}'
+        values: '0+0x2'
+    alert_rule_test:
+      - {eval_time: 1m, alertname: BridgeTargetDown, exp_alerts: []}
+      - eval_time: 2m
+        alertname: BridgeTargetDown
+        exp_alerts:
+          - exp_labels: {job: bridge, instance: 'worker:8090', severity: critical}
+            exp_annotations: {summary: "Bridge scrape target is down"}
+  - name: no loaded child for two minutes
+    interval: 1m
+    input_series:
+      - series: 'bridge_pool_ready{job="bridge",instance="worker:8090"}'
+        values: '0+0x2'
+    alert_rule_test:
+      - {eval_time: 1m, alertname: BridgeNoReadyChild, exp_alerts: []}
+      - eval_time: 2m
+        alertname: BridgeNoReadyChild
+        exp_alerts:
+          - exp_labels: {job: bridge, instance: 'worker:8090', severity: critical}
+            exp_annotations: {summary: "Bridge has no ready child"}

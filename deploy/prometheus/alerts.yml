@@ -1,0 +1,38 @@
+groups:
+  - name: bridge
+    rules:
+      # Target: queue depth at most three for five minutes.
+      - alert: BridgeQueueHigh
+        expr: bridge_queue_depth > 3
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Bridge queue exceeds three jobs"}
+      # Allow headroom above the measured 58 refusals in 600 seconds from one owner.
+      - alert: BridgeOwnerRejected
+        expr: sum by (instance, owner) (rate(bridge_submissions_rejected_total[5m])) > 0.2
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Bridge owner is receiving sustained 429 responses"}
+      # Target: investigate each failed or timed-out job against the error budget.
+      - alert: BridgeJobsFailed
+        expr: sum by (instance, task, status) (increase(bridge_jobs_total{status=~"failed|timed_out"}[5m])) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Bridge jobs failed or timed out"}
+      # Use the 2.5-second histogram bound above the measured per-task p95 values.
+      - alert: BridgeJobLatencyHigh
+        expr: histogram_quantile(0.95, sum by (instance, task, le) (rate(bridge_job_duration_seconds_bucket[5m]))) > 2.5
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Bridge p95 job latency exceeds 2.5 seconds"}
+      # Target: scrape availability at least 99.9 percent.
+      - alert: BridgeTargetDown
+        expr: up{job="bridge"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Bridge scrape target is down"}
+      # Target: investigate no loaded child for two minutes; probe /readyz separately for availability.
+      - alert: BridgeNoReadyChild
+        expr: bridge_pool_ready == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Bridge has no ready child"}

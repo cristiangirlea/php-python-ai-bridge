@@ -180,6 +180,11 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 
+# Failure injection on dedicated no-model peers, and alert-rule syntax and behavior checks:
+sh scripts/failure_drills.sh
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills run --rm --no-deps promtool
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills down -v
+
 # MCP server, after acquiring its hash-pinned wheels once (network):
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
@@ -203,9 +208,9 @@ docker compose -f docker/compose.yaml run --rm --no-deps php-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps php-analysis
 ```
 
-Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only in the test service with `BRIDGE_TEST_TASKS=1`.
+Coverage includes invalid contracts, duplicate/non-finite JSON, authentication, oversized bodies, queue deadlines, queued/running cancellation, hard process crashes, retention, malformed/oversized HTTP responses, redirect refusal, and reused-worker request isolation. Fault tasks are enabled only on dedicated test and drill peers with `BRIDGE_TEST_TASKS=1`. The [operations guide](docs/operations.md#drills) describes each drill and its explicit skip.
 
-CI runs deterministic tests for pushes to main and for pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. Every job runs on GitHub's hosted runners (`ubuntu-latest`), because the repository is public: GitHub does not meter Actions minutes for public repositories, and a fork's pull request runs its own code on a disposable runner of GitHub's, not on a machine of the maintainer's; see [the runner notes](docs/testing.md#ci-runners) and [security](docs/security.md). The stable `deterministic` check succeeds only if every PHP matrix job and the MCP server job, which runs the offline MCP suite, mypy and ruff, the consumer install and PHPStan, succeed. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
+CI runs deterministic tests for pushes to main and for pull requests across PHP 8.2–8.5, treating PHP warnings and deprecations as test failures. Every job runs on GitHub's hosted runners (`ubuntu-latest`), because the repository is public: GitHub does not meter Actions minutes for public repositories, and a fork's pull request runs its own code on a disposable runner of GitHub's, not on a machine of the maintainer's; see [the runner notes](docs/testing.md#ci-runners) and [security](docs/security.md). The stable `deterministic` check succeeds only if every PHP matrix job and the MCP server job, which runs the offline MCP suite, mypy and ruff, the consumer install and PHPStan, and the worker-image and failure-drill jobs all succeed. The drill job also checks and tests the Prometheus rules with digest-pinned promtool. A separate workflow performs model acquisition and the real-model smoke tests on the default PHP 8.5 image: weekly, on pull requests that touch the model path, and on demand. It is not a required check, it does not use paid APIs or GPUs, and it also prints an informational latency table: its jobs must succeed, but its times never gate the run.
 
 ## Important limits
 

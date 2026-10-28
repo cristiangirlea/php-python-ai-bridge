@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- Seven no-model failure drills on dedicated compose peers, with bounded standard-library HTTP probes, offline verdict tests and an explicit start-crash-loop skip. CI's required deterministic gate includes the drills and digest-pinned promtool syntax and behavior checks of the six example alert rules.
+- Example Prometheus alert rules and a Grafana dashboard, with starting targets and import instructions in the operations guide.
+
 ### Changed
 
 - The model wheels move to `numpy` 2.5.4, `onnxruntime` 1.31.0 and `tokenizers` 0.23.3 in `requirements-model.txt` and `requirements-model.lock`, which brings `huggingface-hub` 2.3.0 with `httpx2` in place of `requests` and drops `coloredlogs` and `sympy`. ONNX Runtime 1.31 sends telemetry to Microsoft's collector from import on, so every worker child now starts with `ORT_DISABLE_TELEMETRY=1`, whatever the service's environment says.
