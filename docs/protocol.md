@@ -50,7 +50,7 @@ Submit:
 
 An optional `idempotency_key` is a string of 1–128 printable ASCII characters (0x21–0x7e); any other value, `null` included, is 400 `invalid_request`. While the job first submitted with a key is retained, submitting the same key again starts nothing and returns 202 with that job's current snapshot, so its status may be `queued`, `running` or terminal; the repeat is answered even when capacity is full, and its `task`, `input` and `timeout_ms` are validated but not compared with the first. Once that job has expired, the key submits a new job. Keys are scoped to the submitting token within one service instance: the same key from two tokens is two jobs, and a repeat returns only the job its own token submitted. With a single token this is the behaviour it always had.
 
-A job contains `id`, `task`, `status`, `timeout_ms`, `result`, `error`, and `progress`. IDs are 32 lowercase hex characters. Result/error/progress are null until applicable. Input documents are not echoed in status responses.
+A job contains `id`, `task`, `status`, `timeout_ms`, `result`, `error`, and `progress`. IDs are 32 lowercase hex characters, or `<instance-id>-` followed by them ([Job IDs and instance routing](#job-ids-and-instance-routing)). Result/error/progress are null until applicable. Input documents are not echoed in status responses.
 
 States: `queued` → `running` → `succeeded` or `failed`. A job is `running` once a worker process has taken it; if that process dies before taking it, the job stays `queued` and is tried once more, and a second such death, or any death after it started, fails it as `worker_crashed`. A queued/running job may also become `timed_out` or `cancelled`. Terminal states do not change. Cancelling an already completed job returns its unchanged state. Progress contains integer `completed` and `total`; it may be null before execution.
 
@@ -111,6 +111,12 @@ On SIGTERM or SIGINT the worker drains: every `POST /v1/jobs` is answered 503 `d
 | `bridge_info` | gauge | `protocol="1"`, `backend` | Always 1 |
 
 Both histograms have the buckets 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60 and 300 seconds and `+Inf`, cumulative as the format requires, with `_sum` and `_count`. A scrape copies the numbers under the store's lock and formats them without it, so it never waits for a job. An invalid submission (400) creates no job and counts nothing.
+
+Prometheus adds the scrape target labels `job` and `instance` to these series; histogram `_bucket` series also have `le`, the bucket's upper bound. Prometheus supplies this separate scrape metric (the worker does not emit it):
+
+| Family | Type | Labels | What it holds |
+| --- | --- | --- | --- |
+| `up` | gauge | `job`, `instance` | 1 for a successful scrape, 0 for a failed scrape |
 
 ## Logging
 

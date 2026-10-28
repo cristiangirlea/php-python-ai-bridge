@@ -39,17 +39,9 @@
             request_buffers 262145
         }
     }
-    @health {
-        method GET
-        path /healthz /readyz
-    }
-    handle @health {
+    handle {
         reverse_proxy worker-a:8090 worker-b:8090 {
             lb_policy round_robin
         }
-    }
-    handle {
-        header Content-Type application/json
-        respond `{"error":{"code":"not_found","message":"Job or route not found"}}` 404
     }
 }

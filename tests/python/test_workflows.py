@@ -287,14 +287,29 @@ jobs:  # the jobs
 
     def test_the_gate_requires_the_image_builds(self):
         found = jobs((REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"), "tests.yml")
-        self.assertIn("needs: [php, mcp, images]", found["deterministic"])
+        self.assertIn("needs: [php, mcp, images, drills]", found["deterministic"])
         self.assertTrue(any('"$IMAGES_RESULT" = success' in line for line in found["deterministic"]))
 
     def test_the_required_mcp_job_runs_instance_routing_and_hard_crash_recovery(self):
         found = jobs((REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"))
-        self.assertIn("needs: [php, mcp, images]", found["deterministic"])
+        self.assertIn("needs: [php, mcp, images, drills]", found["deterministic"])
         self.assertIn("run: sh scripts/ha_check.sh", found["mcp"])
         self.assertTrue(any("--profile ha config -q" in line for line in found["mcp"]))
+
+    def test_the_gate_requires_failure_drills_and_promtool(self):
+        found = jobs((REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8"), "tests.yml")
+        gate = "\n".join(found["deterministic"])
+        self.assertIn("DRILLS_RESULT: ${{ needs.drills.result }}", gate)
+        self.assertIn('"$DRILLS_RESULT" = success', gate)
+        drill = "\n".join(found["drills"])
+        self.assertIn("run: sh scripts/failure_drills.sh", drill)
+        self.assertIn("run --rm --no-deps promtool", drill)
+        self.assertIn("if: always()", drill)
+        self.assertIn("--profile drills down -v", drill)
+        compose = (REPO / "docker/compose.yaml").read_text(encoding="utf-8")
+        self.assertRegex(compose, r"image: prom/prometheus:v[0-9.]+@sha256:[a-f0-9]{64}\n")
+        self.assertIn("promtool check rules deploy/prometheus/alerts.yml", compose)
+        self.assertIn("promtool test rules deploy/prometheus/alerts.test.yml", compose)
 
     def test_images_are_published_from_tags_with_the_job_token_only(self):
         # A pull request or a branch push must never reach a step that can write packages or releases.

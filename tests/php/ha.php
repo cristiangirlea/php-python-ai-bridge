@@ -14,6 +14,7 @@ require dirname(__DIR__, 2) . '/examples/bootstrap.php';
 
 use PhpAiBridge\BridgeException;
 use PhpAiBridge\Client;
+use PhpAiBridge\CurlTransport;
 use PhpAiBridge\Job;
 use PhpAiBridge\RerankResult;
 
@@ -39,6 +40,27 @@ $client = new Client(getenv('BRIDGE_URL') ?: throw new RuntimeException('Set BRI
 $mode = $argv[1] ?? 'roundtrip';
 
 if ($mode === 'roundtrip') {
+    foreach (['c-' . str_repeat('f', 32), 'a-' . str_repeat('f', 32),
+              'b-' . str_repeat('f', 32), str_repeat('f', 32)] as $id) {
+        $reply = (new CurlTransport())->send('GET', getenv('BRIDGE_URL') . '/v1/jobs/' . $id, [], null, 5000);
+        $body = json_decode($reply->body, true, 32, JSON_THROW_ON_ERROR);
+        check($reply->status === 401 && is_array($body) && is_array($body['error'] ?? null)
+            && ($body['error']['code'] ?? null) === 'unauthorized',
+            'every unknown ID requires a token through the proxy');
+        $reply = (new CurlTransport())->send('GET', getenv('BRIDGE_URL') . '/v1/jobs/' . $id,
+            ['Authorization' => 'Bearer ' . getenv('BRIDGE_TOKEN')], null, 5000);
+        $body = json_decode($reply->body, true, 32, JSON_THROW_ON_ERROR);
+        check($reply->status === 404 && is_array($body) && is_array($body['error'] ?? null)
+            && ($body['error']['code'] ?? null) === 'not_found',
+            'every unknown ID returns the worker not_found response');
+        try {
+            $client->get($id);
+            throw new RuntimeException('An unknown ID must fail');
+        } catch (BridgeException $error) {
+            check($error->httpStatus === 404 && $error->errorCode === 'http_error',
+                'every unknown ID returns the same client HTTP exception');
+        }
+    }
     $jobs = [];
     $prefixes = [];
     for ($i = 0; $i < 8; ++$i) {
@@ -136,7 +158,7 @@ if ($mode === 'roundtrip') {
         $recovered = true;
         break;
     }
-    check($recovered, 'recovery succeeded within three total submissions including the original');
+    check($recovered, 'recovery succeeded within two fresh-key submissions, excluding preparation and old-key probes');
     echo "PASS: HA new-key recovery succeeds through the same URL with a capped attempt count\n";
 } else {
     throw new RuntimeException('Usage: php tests/php/ha.php roundtrip|prepare|recover');

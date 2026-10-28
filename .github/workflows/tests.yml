@@ -184,16 +184,37 @@ jobs:
         if: always()
         run: docker rm -f bridge-worker-ci bridge-worker-onnx-ci || true
 
+  drills:
+    name: Failure drills and alert rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Inspect drill configuration
+        run: docker compose -p bridge-drills -f docker/compose.yaml --profile drills config -q
+      - name: No-model failure drills
+        run: sh scripts/failure_drills.sh
+      - name: Check and test alert rules with the digest-pinned Prometheus image
+        run: docker compose -p bridge-drills -f docker/compose.yaml --profile drills run --rm --no-deps promtool
+      - name: Stop drill containers and remove disposable state
+        if: always()
+        run: docker compose -p bridge-drills -f docker/compose.yaml --profile drills down -v
+
   # Keep the required branch-protection check stable as the matrix changes.
   deterministic:
     if: always()
-    needs: [php, mcp, images]
+    needs: [php, mcp, images, drills]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - name: Require every supported PHP version, the MCP server and the images to pass
+      - name: Require every supported PHP version, the MCP server, images and drills to pass
         env:
           MATRIX_RESULT: ${{ needs.php.result }}
           MCP_RESULT: ${{ needs.mcp.result }}
           IMAGES_RESULT: ${{ needs.images.result }}
-        run: test "$MATRIX_RESULT" = success -a "$MCP_RESULT" = success -a "$IMAGES_RESULT" = success
+          DRILLS_RESULT: ${{ needs.drills.result }}
+        run: test "$MATRIX_RESULT" = success -a "$MCP_RESULT" = success -a "$IMAGES_RESULT" = success -a "$DRILLS_RESULT" = success

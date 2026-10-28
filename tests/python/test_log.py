@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 
-from ai_bridge import log, server
+from ai_bridge import jobs, log, server
 
 TIMESTAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z")
 
@@ -65,6 +65,9 @@ class BrokenStream:
 
 
 class FormatterTests(unittest.TestCase):
+    def test_job_id_pattern_matches_the_worker(self):
+        self.assertEqual(log._JOB_ID.pattern, jobs.JOB_ID)
+
     def setUp(self):
         self.addCleanup(log.close)
 

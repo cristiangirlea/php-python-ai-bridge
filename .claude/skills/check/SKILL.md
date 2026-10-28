@@ -1,6 +1,6 @@
 ---
 name: check
-description: Run what CI's deterministic gate runs (compose python, PHP, syntax, integration and MCP suites) before a PR
+description: Run what CI's deterministic gate runs (compose python, PHP, syntax, integration and MCP suites, failure drills and promtool) before a PR
 ---
 Run the steps in order from the repository root and stop at the first failure. Report each step's
 result in one line; on a failure, show the error text and fix it before re-running.
@@ -11,6 +11,10 @@ shell. The MCP step needs `.cache/wheels` from one network-enabled `mcp-fetcher`
 run; it is then offline. On Linux, `mkdir -p .cache && chmod 777 .cache` first so container UID 65532
 can write there.
 
+The failure-drill driver uses only project `bridge-drills` and the `drills` profile, cleans up its own peers,
+and runs no models. It reports seven verdicts and an explicit start-crash-loop skip; a skip is documented
+coverage, not a pass. `promtool` checks the six alert rules and tests their behavior in a digest-pinned Prometheus image, offline.
+
 ```bash
 docker compose -f docker/compose.yaml --profile test config
 docker compose -f docker/compose.yaml run --rm --no-deps python-tests
@@ -20,6 +24,11 @@ docker compose -f docker/compose.yaml up -d worker frankenphp fault-worker hosti
 docker compose -f docker/compose.yaml run --rm --no-deps php-integration
 docker compose -f docker/compose.yaml run --rm --no-deps integration
 docker compose -f docker/compose.yaml --profile test down
+
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills config -q
+sh scripts/failure_drills.sh
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills run --rm --no-deps promtool
+docker compose -p bridge-drills -f docker/compose.yaml --profile drills down -v
 docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profile mcp-model --profile php-dev --profile py-dev --profile php-frameworks --profile tls config
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-fetcher
 docker compose -f docker/compose.yaml run --rm --no-deps mcp-tests
@@ -78,7 +87,7 @@ mount `/tmp` noexec, so the guard's killed-git case is skipped there, with its s
 `ha_check.sh` uses the disposable `bridge-instances` project: start `worker-a`, `worker-b` and `ha-proxy`,
 then `ha-check` roundtrip and prepare, hard-kill worker-a with SIGKILL, start it and run recover. PHP's
 `wait()` must see `failed/service_restarted`, the old key on worker-a must return that failed job, and
-a new key must succeed within three total submissions including the original. The networkless `ha-state` keeper holds the separate
+a new key must succeed within two recovery submissions, excluding preparation submissions and old-key probes. The networkless `ha-state` keeper holds the separate
 named tmpfs state mounts across worker kill/start;
 the driver's exit trap runs `down -v` even on failure. Do not use that project for another deployment.
 

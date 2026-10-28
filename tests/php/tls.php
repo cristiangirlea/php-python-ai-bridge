@@ -61,9 +61,10 @@ if ($mode === 'request-log') {
     $markers = array_keys(array_filter($requests, static fn (array $entry): bool =>
         $entry['method'] === 'GET' && $entry['route'] === '/metrics' && $entry['status'] === 200));
     check(count($markers) >= 2, 'the worker logged both authenticated metrics requests around the oversized POST');
-    $before = $markers[count($markers) - 2];
-    $after = $markers[count($markers) - 1];
-    check($after === $before + 1, 'the worker logged no request between the oversized POST markers');
+    $between = array_slice($requests, $markers[count($markers) - 2] + 1, $markers[count($markers) - 1] - $markers[count($markers) - 2] - 1);
+    // Other clients of the shared worker may log in between; only a job submission would be the oversized POST.
+    $posts = array_filter($between, static fn (array $entry): bool => $entry['method'] === 'POST' && $entry['route'] === '/v1/jobs');
+    check($posts === [], 'the worker logged no job submission between the oversized POST markers: ' . json_encode($between));
     echo "PASS: $count TLS worker-log checks; oversized POST never reached the worker handler\n";
 } elseif ($mode === 'trusted') {
     check(ini_get('curl.cainfo') === $root, 'curl.cainfo is the example CA root');
