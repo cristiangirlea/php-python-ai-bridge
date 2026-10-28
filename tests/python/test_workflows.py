@@ -316,12 +316,15 @@ jobs:  # the jobs
         self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 4)
         self.assertEqual(text.count("BENCH_RUNNER:"), 4)
 
-    def test_the_quality_job_runs_only_on_demand(self):
-        # It downloads the public datasets and runs some 2800 model jobs: worth a run when asked, not on every change.
+    def test_the_quality_job_runs_on_demand_and_for_release_tags(self):
         lines = jobs((REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8"))["quality"]
-        self.assertEqual(lines[0], "if: github.event_name == 'workflow_dispatch'")
+        self.assertEqual(lines[0], "if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'")
         self.assertTrue(any("run --rm --no-deps quality-fetcher" in line for line in lines))
         self.assertTrue(any("run --rm --no-deps -T model-quality" in line for line in lines))
+        text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
+        self.assertIn("  push:\n    tags: ['v*']\n", text)
+        self.assertTrue(any("RELEVANCE_DATASET: squad" in line for line in lines))
+        self.assertTrue(any('RELEVANCE_GATE: "1"' in line for line in lines))
 
     def test_the_load_measurement_runs_on_demand_only(self):
         # It takes about 45 minutes and measures, never gates: no pull request, push or schedule may start it.

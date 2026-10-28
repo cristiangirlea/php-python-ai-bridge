@@ -90,6 +90,8 @@ def _serve(connection: Connection, backend: str, model_dir: str) -> None:
     # Ready only after the warm-up, so no job waits in a pipe nobody reads; a failed load still reports ready.
     try:
         for name, max_length, stride in WARM_UP.get(backend, ()):
+            if name == "rerank":
+                name = tasks.rerank_model()[0]
             tasks._onnx(Path(model_dir) / name, max_length, stride)
     except Exception:
         loaded = False

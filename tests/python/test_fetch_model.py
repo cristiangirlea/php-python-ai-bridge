@@ -33,6 +33,11 @@ class PinTests(unittest.TestCase):
         self.assertEqual(pin["files"]["onnx/model_int8.onnx"], "model.onnx")
         self.assertEqual(pin["license"], fetch_model.MODELS["redact"]["license"])
 
+    def test_reranker_candidates_are_quantized_and_pinned(self):
+        for directory in ("rerank-minilm-l6", "rerank-bge-base"):
+            with self.subTest(directory=directory):
+                self.assertEqual(fetch_model.MODELS[directory]["files"]["onnx/model_quantized.onnx"], "model.onnx")
+
     def test_every_directory_the_ner_pass_loads_is_one_the_fetcher_fills(self):
         loaded = []
 
@@ -53,8 +58,8 @@ class PinTests(unittest.TestCase):
         self.assertEqual(sorted(loaded), ["redact", "redact-uncased"])
         self.assertLessEqual(set(loaded), set(fetch_model.MODELS))
 
-    def test_the_worker_checks_at_start_for_exactly_the_directories_the_fetcher_fills(self):
-        self.assertEqual(sorted(tasks.MODEL_DIRECTORIES), sorted(fetch_model.MODELS))
+    def test_the_fetcher_fills_every_selectable_directory(self):
+        self.assertEqual(set(tasks.MODEL_DIRECTORIES) | {"rerank-minilm-l6", "rerank-bge-base"}, set(fetch_model.MODELS))
 
 
 if __name__ == "__main__":

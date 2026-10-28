@@ -37,9 +37,20 @@ REDACT_DEFAULTS = {"entities": ["PER"], "min_score": 0.85}
 # Label order of dslim/bert-base-NER and dslim/bert-base-NER-uncased, which share it; the smoke tests fail loudly if a
 # re-pinned model changes it.
 NER_LABELS = ("O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC")
-# What the ONNX backend loads from its model directory: one directory per model, each holding the tokenizer.json and
-# model.onnx that scripts/fetch_model.py writes. tests/python/test_fetch_model.py keeps the two lists in step.
+# Default ONNX directories, each holding the tokenizer.json and model.onnx that scripts/fetch_model.py writes.
 MODEL_DIRECTORIES = ("rerank", "embed", "redact", "redact-uncased")
+RERANK_MODELS = {
+    "tinybert": ("rerank", "cross-encoder/ms-marco-TinyBERT-L2-v2"),
+    "minilm-l6": ("rerank-minilm-l6", "Xenova/ms-marco-MiniLM-L-6-v2"),
+    "bge-base": ("rerank-bge-base", "Xenova/bge-reranker-base"),
+}
+
+
+def rerank_model() -> tuple[str, str]:
+    choice = os.environ.get("BRIDGE_RERANK_MODEL", "tinybert")
+    if choice not in RERANK_MODELS:
+        raise SystemExit("BRIDGE_RERANK_MODEL must be tinybert, minilm-l6 or bge-base")
+    return RERANK_MODELS[choice]
 
 
 # Present only with BRIDGE_TEST_TASKS=1, for the fault tests.
@@ -146,11 +157,12 @@ def execute(task: str, payload: dict[str, Any], backend: str, model_dir: str, pr
 
     report(0)
     if backend == "onnx":
-        tokenizer, session, names = _onnx(Path(model_dir) / "rerank", 512)
-        # At most 17 batch reports, so they need no throttle, and the throttle's step rarely divides 32.
+        directory, model = rerank_model()
+        tokenizer, session, names = _onnx(Path(model_dir) / directory, 512)
+        # Batch reports bypass the per-document throttle so clients see every completed batch.
         scores = _score_pairs(tokenizer, session, names, query, documents,
-                              lambda completed: progress(completed, total))
-        model = MODEL_NAMES["onnx"]["rerank"]
+                              lambda completed: progress(completed, total),
+                              batch_size=4 if directory == "rerank-bge-base" else RERANK_BATCH_SIZE)
     else:
         words = set(re.findall(r"\w+", query.casefold()))
         scores = []
@@ -296,7 +308,7 @@ def _load_onnx(directory: Path, max_length: int, stride: int) -> tuple[Any, Any,
 
 def missing_models(model_dir: str) -> list[str]:
     """The model directories under model_dir that lack either file, in MODEL_DIRECTORIES order."""
-    return [name for name in MODEL_DIRECTORIES
+    return [name for name in (rerank_model()[0], *MODEL_DIRECTORIES[1:])
             if not all((Path(model_dir) / name / file).is_file() for file in ("tokenizer.json", "model.onnx"))]
 
 

@@ -8,7 +8,7 @@ Since 0.4.0 it is supported as an internal service for applications that own the
 
 ## What is implemented
 
-- PHP 8.2–8.5 client using cURL, with validated job objects and typed rerank, embedding and redaction results. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result; the ONNX backend scores them 32 pairs per forward pass.
+- PHP 8.2–8.5 client using cURL, with validated job objects and typed rerank, embedding and redaction results. Rerank accepts up to 512 candidate documents and an optional `top_k` so a large set narrows to a small result; the ONNX backend scores up to 32 pairs per forward pass (four for BGE).
 - Python 3.12 service with an explicit task allowlist and a pool of warm child processes, one job per child at a time.
 - Text embedding: up to 32 texts per job return unit-length 384-dimensional vectors for an index the caller owns.
 - Redaction: checksum and pattern rules for card numbers, IBANs, emails, IPv4 and IPv6 addresses and phone numbers on every backend, plus named-entity masking with the int8 cased and uncased `bert-base-NER` models on the ONNX profile. Assistive, not a compliance control.
@@ -88,7 +88,7 @@ Acquire dependencies and model data in the bounded, network-enabled fetcher:
 docker compose -f docker/compose.yaml run --rm --no-deps fetcher
 ```
 
-This downloads wheels and about 330 MB of model and tokenizer data into ignored `.cache/`, one directory per model under `models/`; the fetcher refuses any single artifact over 128 MiB. Fetch again after an upgrade that adds a model: an ONNX worker refuses to start while a model directory lacks its files, and names it. A cache created before the embed task used a flat layout that the fetcher does not delete: remove `.cache/models` and fetch again after upgrading. Wheels are checked against `requirements-model.lock`; the model revision and SHA-256 hashes are fixed in `scripts/fetch_model.py`. On Linux, ensure `.cache/` exists and is writable by container UID 65532 before acquisition. For a disposable local cache, `mkdir -p .cache && chmod 777 .cache` is sufficient; never apply that permission to the repository or another directory.
+This downloads wheels and the pinned model and tokenizer data into ignored `.cache/`, one directory per model under `models/`; the fetcher refuses any single artifact over 300 MiB. Fetch again after an upgrade that adds a model: an ONNX worker refuses to start while a model directory lacks its files, and names it. A cache created before the embed task used a flat layout that the fetcher does not delete: remove `.cache/models` and fetch again after upgrading. Wheels are checked against `requirements-model.lock`; the model revision and SHA-256 hashes are fixed in `scripts/fetch_model.py`. On Linux, ensure `.cache/` exists and is writable by container UID 65532 before acquisition. For a disposable local cache, `mkdir -p .cache && chmod 777 .cache` is sufficient; never apply that permission to the repository or another directory.
 
 Then run **without internet access**:
 
@@ -98,7 +98,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps model-test
 docker compose -f docker/compose.yaml run --rm --no-deps model-integration
 ```
 
-`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational), throughput and latency percentiles under concurrent load beside them in [its load section](docs/testing.md#measured-throughput-and-latency-under-load-informational), and quality on public data, reranking on ArguAna and NER on WNUT-17, in [its quality sections](docs/testing.md#measured-reranking-quality-on-arguana-informational). Model scores are relevance logits, not probabilities.
+`model-test` calls the real model from the PHP client. `model-integration` verifies the complete HTTP → FrankenPHP worker → PHP client → Python model path. These are smoke tests, **not** a model-quality or throughput benchmark; measured warm-job medians, and the cost of a worker's first job, are in [the testing guide](docs/testing.md#measured-latency-informational), throughput and latency percentiles under concurrent load beside them in [its load section](docs/testing.md#measured-throughput-and-latency-under-load-informational), and quality on public data, reranking on [ArguAna](docs/testing.md#reranker-comparison-on-arguana) and [SQuAD](docs/testing.md#reranker-comparison-on-squad-v11) and NER on [WNUT-17](docs/testing.md#measured-ner-quality-on-wnut-17-informational). Model scores are relevance logits, not probabilities.
 
 Stop this project's containers when finished:
 
@@ -150,10 +150,9 @@ Redaction is a pre-filter, not a compliance control: on public social-media text
 half of the named entities at the default threshold, and nearly all card numbers, IBANs, emails and
 IP addresses ([measured](docs/testing.md#measured-ner-quality-on-wnut-17-informational)).
 
-**Reorder search results by meaning.** Keep the search you have (a database, Meilisearch, Elastic),
-take its top results, and let the cross-encoder order them for the query. It is the cheapest visible
-quality change a search box can get; measure on your own data first, since on some corpora BM25 alone
-is better ([measured](docs/testing.md#measured-reranking-quality-on-arguana-informational)).
+**Reorder search results.** Keep the search you have (a database, Meilisearch, Elastic), take its top
+results, and let the cross-encoder order them for the query. Measure on your own data: reranking can
+help or hurt depending on the corpus ([measured](docs/testing.md#measured-reranking-quality-on-arguana-informational)).
 
 ```php
 $hits = $search->query($q, limit: 100);            // your existing search
@@ -213,7 +212,7 @@ CI runs deterministic tests for pushes to main and for pull requests across PHP 
 - **Trusted services only:** a bearer token reaches only the jobs it submitted; give each application its own (`BRIDGE_TOKENS`, [the protocol](docs/protocol.md#tokens)), since they still share one worker's capacity. Your application must authenticate users, associate job IDs with their owners, and authorize reads/cancellation. Random IDs are not authorization. Report a vulnerability privately as [SECURITY.md](SECURITY.md) says.
 - **Private HTTP transport:** deploy behind an authenticated TLS boundary for cross-host use; the [integration guide](docs/integration.md#cross-host-use-behind-tls) has a tested example with Caddy in front of the worker. The sample Python HTTP server is not an internet-facing production server.
 - **Process isolation is not a sandbox for arbitrary code:** task code is trusted and registered in source. Clients cannot upload Python, import modules or select a shell command. The container limits the entire service, not each job separately.
-- **One job per warm child, no sharing across jobs:** the worker keeps `BRIDGE_CONCURRENCY` child processes alive and each loads its backend's models as it starts and keeps them, so a job waits for loading only while no child has finished starting; a child is replaced after a cancellation, a deadline or a crash, and after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). Within one rerank job the ONNX backend scores documents 32 pairs per forward pass; there is no batching across jobs, no sharing of a loaded model between children, and no claim of GPU support, multi-host scaling or stateful agents.
+- **One job per warm child, no sharing across jobs:** the worker keeps `BRIDGE_CONCURRENCY` child processes alive and each loads its backend's models as it starts and keeps them, so a job waits for loading only while no child has finished starting; a child is replaced after a cancellation, a deadline or a crash, and after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). Within one rerank job the ONNX backend scores up to 32 pairs per forward pass (four for BGE); there is no batching across jobs, no sharing of a loaded model between children, and no claim of GPU support, multi-host scaling or stateful agents.
 - **Bounded connections and a short drain:** the worker serves at most 32 connections at once and answers one more with 503 `service_busy` and `Retry-After: 1`; a request line over 8 KiB or a header block over 16 KiB gets 431. On SIGTERM it refuses new jobs with 503 `draining`, fails queued ones as `service_restarted` and lets running ones finish for up to `BRIDGE_DRAIN_SECONDS` (default 30) before it stops; a second signal stops it at once. `GET /readyz` says whether a child is idle with its models loaded, which `/healthz` does not. See [the protocol](docs/protocol.md#drain-and-readiness).
 - **Cancellation cannot undo effects:** registered future tasks must manage their own external side effects. A transport failure during POST has an uncertain submission outcome; the client never retries POST automatically.
 - **No token streaming:** progress is polled by job ID. The MCP server forwards that progress to a host that asks for it; there is no SSE, framework plugin or chat SDK.
@@ -223,3 +222,5 @@ See [the integration guide](docs/integration.md), [test evidence and limits](doc
 ## License
 
 Code: [MIT](LICENSE). The optional [TinyBERT reranker](https://huggingface.co/cross-encoder/ms-marco-TinyBERT-L2-v2) and [MiniLM embedding model](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) are Apache-2.0 at their pinned revisions; the cased and uncased BERT NER models, [dslim/bert-base-NER](https://huggingface.co/dslim/bert-base-NER) and [dslim/bert-base-NER-uncased](https://huggingface.co/dslim/bert-base-NER-uncased), are MIT and are fetched as the int8 ONNX conversions published by Xenova ([cased](https://huggingface.co/Xenova/bert-base-NER), [uncased](https://huggingface.co/Xenova/bert-base-NER-uncased)), pinned by revision and hash. Model weights and dependency wheels are downloaded separately and retain their own licenses.
+
+The selectable [MiniLM reranker](https://huggingface.co/Xenova/ms-marco-MiniLM-L-6-v2) is Apache-2.0 and the selectable [BGE reranker](https://huggingface.co/Xenova/bge-reranker-base) is MIT at their pinned revisions.

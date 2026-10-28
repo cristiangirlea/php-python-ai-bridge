@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- `BRIDGE_RERANK_MODEL` selects a pinned ONNX reranker; SQuAD v1.1 is available for quality measurement and the release model workflow compares its NDCG@10 with BM25.
+
 ### Changed
 
 - The model wheels move to `numpy` 2.5.4, `onnxruntime` 1.31.0 and `tokenizers` 0.23.3 in `requirements-model.txt` and `requirements-model.lock`, which brings `huggingface-hub` 2.3.0 with `httpx2` in place of `requests` and drops `coloredlogs` and `sympy`. ONNX Runtime 1.31 sends telemetry to Microsoft's collector from import on, so every worker child now starts with `ORT_DISABLE_TELEMETRY=1`, whatever the service's environment says.

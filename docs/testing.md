@@ -87,7 +87,7 @@ Test durations reported by the runners are suite durations, not inference latenc
 
 The optional real-model smoke tests run on the default PHP 8.5 image with cached dependencies and no internet access during inference. They were not rerun on every PHP minor. On 2026-09-17, three PHP documentation snippets passed syntax validation and the fenced JSON examples parsed successfully; that check has not been repeated since, and it is not a framework boot test.
 
-The default backend is deterministic word overlap (`lexical-demo-not-a-model`). Passing its tests proves plumbing/lifecycle behavior, not AI quality. The embedding and redaction demos are `hashing-bow-not-a-model` and `rules-only-not-a-model`: the first proves the contract only, while the second runs the real checksum and pattern rules with no model. The optional ONNX checks use the four pinned, hash-verified models (the TinyBERT cross-encoder, MiniLM embeddings and the int8 conversions of the cased and uncased BERT NER models) with local inference. The model workflow runs weekly, on pull requests that touch the model path, and on demand; it is not a required check.
+The default backend is deterministic word overlap (`lexical-demo-not-a-model`). Passing its tests proves plumbing/lifecycle behavior, not AI quality. The embedding and redaction demos are `hashing-bow-not-a-model` and `rules-only-not-a-model`: the first proves the contract only, while the second runs the real checksum and pattern rules with no model. The optional ONNX checks use the default four pinned, hash-verified models (the TinyBERT cross-encoder, MiniLM embeddings and the int8 conversions of the cased and uncased BERT NER models) with local inference. The model workflow runs weekly, on pull requests that touch the model path, on version tags, and on demand; it is not a required check.
 
 The original prototype was not entirely developed with TDD. Review corrections used observed red-green regression tests. PHP 8.5 testing similarly reproduced a deprecated `curl_close()` call under the strict error handler before replacing it with object release. Passing tests alone do not prove a test-first history or complete correctness.
 
@@ -104,7 +104,7 @@ The original prototype was not entirely developed with TDD. Review corrections u
 - No verified native Windows/macOS service execution or ARM runtime; Docker tests target Linux amd64/Python 3.12.
 - No durable delivery, replay or automatic retry, and no multi-instance result routing. With `BRIDGE_STATE_DIR` set the job table (never inputs) survives a restart, so retained results and idempotency keys are answered and unfinished jobs are reported as `service_restarted`; without it, jobs and results live in memory.
 
-Configured resources are **limits, not measurements**: ordinary services, including the MCP server's own `mcp-worker`, get one CPU and 512 MiB each; the model worker gets one CPU and 1536 MiB. Normal task concurrency defaults to two, total capacity to 128 and terminal retention to 300 seconds; the MCP workers keep finished jobs for 30 seconds, because their one client reads each result as its job ends. Every worker keeps as many child processes as its concurrency and replaces one after a cancellation, a deadline, a crash or `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). The model profile sets concurrency to one; its one child loads every model it needs when it starts, before it reports ready, so the first job pays no load, and it keeps them and scores rerank documents 32 pairs per forward pass. None of these imply 128 simultaneous inference jobs or a specific requests-per-second rate.
+Configured resources are **limits, not measurements**: ordinary services, including the MCP server's own `mcp-worker`, get one CPU and 512 MiB each; the model worker gets one CPU and 1536 MiB. Normal task concurrency defaults to two, total capacity to 128 and terminal retention to 300 seconds; the MCP workers keep finished jobs for 30 seconds, because their one client reads each result as its job ends. Every worker keeps as many child processes as its concurrency and replaces one after a cancellation, a deadline, a crash or `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000). The model profile sets concurrency to one; its one child loads every model it needs when it starts, before it reports ready, so the first job pays no load, and it keeps them and scores up to 32 rerank pairs per forward pass (four for BGE). None of these imply 128 simultaneous inference jobs or a specific requests-per-second rate.
 
 ## Measured latency (informational)
 
@@ -383,3 +383,31 @@ The semantic evaluation, `tests/mcp/evaluation-semantic.xml`, ran on 2026-09-30 
 On the demo worker, Haiku found all six search answers by rewording its queries toward the notes' words, so the agent supplied the meaning the backend lacks; it missed the rerank, the similarity ranking, the redaction and the backend question, which word matching cannot answer. The first Sonnet run on the models, started right after Haiku's, scored 5/10: every search it lost ended in HTTP 429, because the model worker counts finished jobs against its capacity of 128 for 300 seconds and Haiku's run had filled it. The tools then passed that refusal to the agent rather than waiting it out, and the row above is a second run after the worker was restarted. Since then a tool waits out a full worker within its own call, and the MCP workers keep finished jobs for 30 seconds rather than 300: the same sequence, Haiku then Sonnet on the models with no restart between them, scored 10/10 for each. That run made 22 calls in all, too few to fill the worker, so it shows the sequence works; `tests/mcp/test_capacity.py` shows the wait itself.
 
 Before deploying, test the actual application and framework combination, measure latency under sustained load on the deployment's own hardware and workloads (the load section above is one development machine), exercise overload and restarts, validate tenant isolation with your own tokens, and decide whether results kept across a restart without replay of unfinished work is acceptable. The supported tier is the one [the operations guide](operations.md) describes; this is not a replacement for a durable job system.
+
+## Reranker comparison on ArguAna
+
+Measured 2026-10-28 UTC, commit `a1198de plus uncommitted changes`, runner: local Docker, CPU: AMD Ryzen 9 9950X 16-Core Processor.
+
+Each row uses 200 evenly spaced queries and the BM25 top 100 candidates. Latency is job wall time, with p95 by nearest rank; peak is the worker cgroup memory. Measurements ran on a shared Docker host; MiniLM used swap. BGE uses batches of four, the others 32.
+
+| Order | NDCG@10 | MRR@10 | Median s | p95 s | Peak MiB |
+| --- | --- | --- | --- | --- | --- |
+| BM25 | 0.449 | 0.356 | - | - | - |
+| tinybert | 0.348 | 0.269 | 0.68 | 1.03 | 1170.3 |
+| minilm-l6 | 0.418 | 0.326 | 5.86 | 25.37 | 1536.2 |
+| bge-base | 0.278 | 0.218 | 21.96 | 30.22 | 1410.5 |
+
+## Reranker comparison on SQuAD v1.1
+
+Measured 2026-10-28 UTC, commit `a1198de plus uncommitted changes`, runner: local Docker, CPU: AMD Ryzen 9 9950X 16-Core Processor.
+
+Each row uses 200 evenly spaced queries and the BM25 top 100 candidates. Latency is job wall time, with p95 by nearest rank; peak is the worker cgroup memory. Measurements ran on a shared Docker host; MiniLM used swap. BGE uses batches of four, the others 32.
+
+TinyBERT remains the default: it beats BM25 here and meets the memory and latency limits. MiniLM exceeds both limits on this runner; BGE falls below BM25 and exceeds the latency limit. With a batch of 32, BGE jobs failed with `worker_crashed` on both datasets; reducing its batch to four allowed these measurements to complete.
+
+| Order | NDCG@10 | MRR@10 | Median s | p95 s | Peak MiB |
+| --- | --- | --- | --- | --- | --- |
+| BM25 | 0.843 | 0.816 | - | - | - |
+| tinybert | 0.899 | 0.874 | 0.42 | 0.59 | 1130.2 |
+| minilm-l6 | 0.942 | 0.929 | 6.06 | 14.59 | 1536.2 |
+| bge-base | 0.633 | 0.562 | 9.82 | 12.96 | 1355.3 |

@@ -491,6 +491,23 @@ class RerankBatchingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.score(self.documents(5), session=self.Session(short=True))
 
+    def test_selected_reranker_is_loaded_and_reported(self):
+        for choice, (directory, model) in tasks.RERANK_MODELS.items():
+            with self.subTest(choice=choice), patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": choice}), \
+                    patch.object(tasks, "_onnx", return_value=(self.Tokenizer(), self.Session(), self.NAMES)) as onnx, \
+                    patch.object(tasks, "_tensors", self.tensors):
+                result = execute("rerank", {"query": "q", "documents": self.documents(2)}, "onnx",
+                                 "/unused", lambda *_: None)
+                onnx.assert_called_once_with(Path("/unused") / directory, 512)
+                self.assertEqual(result["model"], model)
+
+    def test_bge_uses_a_smaller_batch_for_long_pairs(self):
+        with patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": "bge-base"}), \
+                patch.object(tasks, "_onnx", return_value=(None, None, set())), \
+                patch.object(tasks, "_score_pairs", return_value=[1.0]) as score:
+            execute("rerank", {"query": "q", "documents": ["d"]}, "onnx", "/unused", lambda *_: None)
+        self.assertEqual(score.call_args.kwargs["batch_size"], 4)
+
     def test_batch_size_must_be_positive(self):
         with self.assertRaises(ValueError):
             self.score(self.documents(5), batch_size=0)

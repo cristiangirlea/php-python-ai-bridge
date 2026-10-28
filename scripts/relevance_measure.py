@@ -4,7 +4,8 @@ Reads BEIR's copy of ArguAna, which scripts/public_data.py pins and compose's qu
 test queries evenly spaced in file order, ranks the whole corpus for each with the standard-library BM25 below and
 sends its top 100 to the worker's rerank task, one job per query. It reports NDCG@10 and MRR@10 of the BM25 order and
 of the reranked order, and the wall time of each. It asserts only that every job succeeds and returns each candidate
-once, never a score. The output is a Markdown block for docs/testing.md; progress goes to stderr.
+once; RELEVANCE_GATE=1 also compares SQuAD NDCG@10 with BM25. The output is a Markdown block for docs/testing.md;
+progress goes to stderr.
 
     RELEVANCE_TARGET=http://model-worker:8090 BRIDGE_TOKEN=... python scripts/relevance_measure.py
 """
@@ -121,6 +122,29 @@ def load(archive: bytes, root: str = DATASET) -> tuple:
     return corpus, [(record["_id"], record["text"]) for record in texts if record["_id"] in qrels], qrels
 
 
+def load_squad(data: bytes) -> tuple:
+    """Map each question to the paragraph containing its answer."""
+    corpus, queries, qrels = {}, [], {}
+    for article in json.loads(data)["data"]:
+        for paragraph in article["paragraphs"]:
+            doc_id = f"p{len(corpus)}"
+            corpus[doc_id] = paragraph["context"]
+            for question in paragraph["qas"]:
+                query_id = question["id"]
+                queries.append((query_id, question["question"]))
+                qrels[query_id] = {doc_id: 1}
+    return corpus, queries, qrels
+
+
+def quality_gate(dataset: str, rows: list) -> bool:
+    """Only SQuAD is the release quality threshold."""
+    return dataset != "squad" or rows[1][2] >= rows[0][2]
+
+
+def p95(values: list) -> float:
+    return sorted(values)[math.ceil(len(values) * 0.95) - 1]
+
+
 def job_body(query: str, documents: list) -> dict:
     return {"task": "rerank", "timeout_ms": 120000, "input": {"query": query, "documents": documents}}
 
@@ -156,12 +180,16 @@ def render(rows: list) -> str:
 
 
 def main() -> None:
+    dataset = os.environ.get("RELEVANCE_DATASET", DATASET)
+    if dataset not in ("arguana", "squad"):
+        raise SystemExit("RELEVANCE_DATASET must be arguana or squad")
     base = os.environ.get("RELEVANCE_TARGET", "http://model-worker:8090")
     backend = wait_ready(base)["backend"]
     if backend != "onnx":
         raise SystemExit(f"{base} reports backend {backend!r}; the measurement needs the onnx worker")
-    pinned = public_data.DATASETS[DATASET]
-    corpus, queries, qrels = load(public_data.read(DATASET, public_data.data_dir(os.environ)))
+    pinned = public_data.DATASETS[dataset]
+    data = public_data.read(dataset, public_data.data_dir(os.environ))
+    corpus, queries, qrels = load_squad(data) if dataset == "squad" else load(data)
     chosen = sample(queries, QUERIES)
     ids = list(corpus)
     started = time.monotonic()
@@ -185,10 +213,13 @@ def main() -> None:
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     sent = sum(map(len, lists))
     print(f"""Measured {now} UTC, commit `{os.environ.get("BENCH_COMMIT", "unknown")}`, runner: {os.environ.get("BENCH_RUNNER", "unspecified")}, CPU: {cpu_model()}.
-Model {", ".join(f"`{model}`" for model in sorted(models))} ({backend} backend); ArguAna from BEIR, `{pinned["file"]}` at SHA-256 `{pinned["sha256"][:12]}`, {pinned["licence"]}: {len(chosen)} of its {len(queries)} test queries, evenly spaced in file order, over its {len(corpus)} documents (title and text); judged documents per query, on average: {statistics.fmean(len(qrels[query_id]) for query_id, _ in chosen):g}. Candidates: the BM25 top {CANDIDATES} per query (k1 {K1}, b {B}, lower-cased word tokens, no stemming or stop words), the query's own argument left out as BEIR does; each list reranked by one job, {shortened} of its {sent} documents cut to fit the worker's limits. Wall time: BM25 indexing and ranking all {len(chosen)} queries in one process; reranking, the sum of the jobs from POST /v1/jobs to a terminal state, median {statistics.median(seconds):.2f} s per job.
+Model {", ".join(f"`{model}`" for model in sorted(models))} ({backend} backend); {dataset}, `{pinned["file"]}` at SHA-256 `{pinned["sha256"][:12]}`, {pinned["licence"]}: {len(chosen)} of its {len(queries)} test queries, evenly spaced in file order, over its {len(corpus)} documents; judged documents per query, on average: {statistics.fmean(len(qrels[query_id]) for query_id, _ in chosen):g}. Candidates: the BM25 top {CANDIDATES} per query (k1 {K1}, b {B}, lower-cased word tokens, no stemming or stop words), excluding a query's own document where present; each list reranked by one job, {shortened} of its {sent} documents cut to fit the worker's limits. Wall time: BM25 indexing and ranking all {len(chosen)} queries in one process; reranking, the sum of the jobs from POST /v1/jobs to a terminal state, median {statistics.median(seconds):.2f} s, p95 {p95(seconds):.2f} s per job.
 """)
-    print(render([("BM25", len(chosen), *summary(lists, chosen, qrels), bm25_seconds),
-                  ("BM25, reranked", len(chosen), *summary(reranked, chosen, qrels), sum(seconds))]))
+    rows = [("BM25", len(chosen), *summary(lists, chosen, qrels), bm25_seconds),
+            ("BM25, reranked", len(chosen), *summary(reranked, chosen, qrels), sum(seconds))]
+    print(render(rows))
+    if os.environ.get("RELEVANCE_GATE") == "1" and not quality_gate(dataset, rows):
+        raise SystemExit("SQuAD reranker NDCG@10 is below BM25")
 
 
 if __name__ == "__main__":

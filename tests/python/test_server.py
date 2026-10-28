@@ -630,6 +630,25 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(tasks.missing_models(root), ["redact-uncased"])
             self.assertEqual(tasks.missing_models(os.path.join(root, "absent")), list(tasks.MODEL_DIRECTORIES))
 
+    def test_reranker_setting_selects_files_and_rejects_unknown_values(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.models(root, ["rerank-minilm-l6", "embed", "redact", "redact-uncased"])
+            with patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": "minilm-l6"}):
+                self.assertEqual(tasks.missing_models(root), [])
+                self.start("onnx", root)
+            with patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": "bad"}):
+                with self.assertRaisesRegex(SystemExit, "BRIDGE_RERANK_MODEL"):
+                    self.start("lexical", root)
+
+    def test_each_reranker_maps_to_its_directory_and_reported_name(self):
+        for choice, expected in {
+            "tinybert": ("rerank", "cross-encoder/ms-marco-TinyBERT-L2-v2"),
+            "minilm-l6": ("rerank-minilm-l6", "Xenova/ms-marco-MiniLM-L-6-v2"),
+            "bge-base": ("rerank-bge-base", "Xenova/bge-reranker-base"),
+        }.items():
+            with self.subTest(choice=choice), patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": choice}):
+                self.assertEqual(tasks.rerank_model(), expected)
+
     def test_an_onnx_worker_refuses_to_start_without_its_models(self):
         with tempfile.TemporaryDirectory() as root:
             self.models(root, ["rerank", "embed", "redact"])

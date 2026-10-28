@@ -335,6 +335,7 @@ services:
       PYTHONPATH: /work/worker:/deps
       BRIDGE_BACKEND: onnx
       BRIDGE_MODEL_DIR: /cache/models
+      BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}
       BRIDGE_CONCURRENCY: "1"
       # model-quality reads each of its thousands of results as its job ends; a shorter retention spares it the waits.
       BRIDGE_RETENTION_SECONDS: ${BRIDGE_MODEL_RETENTION_SECONDS:-300}
@@ -461,6 +462,8 @@ services:
       <<: *python-env
       QUALITY_DATA_DIR: /cache/datasets
       RELEVANCE_TARGET: http://model-worker:8090
+      RELEVANCE_DATASET: ${RELEVANCE_DATASET:-arguana}
+      RELEVANCE_GATE: ${RELEVANCE_GATE:-0}
       NER_TARGET: http://model-worker:8090
       BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
       BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
