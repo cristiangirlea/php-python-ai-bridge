@@ -27,6 +27,52 @@ from test_log import parse as parse_log
 TOKEN = "test-only-bridge-token-never-use-in-production"
 
 
+class NetworkStartTests(unittest.TestCase):
+    def start(self, host, trust=None, mode="off"):
+        environment = {"BRIDGE_TOKEN": TOKEN, "BRIDGE_LOG": mode}
+        if trust is not None:
+            environment["BRIDGE_TRUST_NETWORK"] = trust
+        stream = io.StringIO()
+        with patch.dict(os.environ, environment, clear=True), contextlib.redirect_stderr(stream), \
+                patch.object(sys, "argv", ["ai_bridge.server", "--host", host, "--port", "0"]), \
+                patch.object(server, "BridgeServer", return_value=MagicMock()), patch.object(server.signal, "signal"):
+            server.main()
+        return stream.getvalue()
+
+    def test_non_loopback_warns_once_in_plain_stderr(self):
+        for host in ("0.0.0.0", "::", "192.168.1.2", "example.internal"):
+            for trust in (None, "", "0"):
+                with self.subTest(host=host, trust=trust):
+                    text = self.start(host, trust)
+                    self.assertEqual(len(text.splitlines()), 1)
+                    self.assertIn("reverse proxy", text)
+                    self.assertIn("private interface", text)
+                    self.assertIn("BRIDGE_TRUST_NETWORK=1", text)
+                    self.assertNotIn(host, text)
+
+    def test_loopback_and_explicit_trust_are_quiet(self):
+        for host, trust in (("127.0.0.1", None), ("127.99.1.2", "0"), ("::1", ""),
+                            ("0.0.0.0", "1"), ("::", "1")):
+            with self.subTest(host=host, trust=trust):
+                self.assertEqual(self.start(host, trust), "")
+
+    def test_json_start_warning_names_the_fixed_rule_and_variable(self):
+        lines = parse_log(self.start("0.0.0.0", mode="json"))
+        start = next(line for line in lines if line["event"] == "start")
+        self.assertEqual(start["level"], "warning")
+        self.assertEqual(start["network_warning"],
+                         "Use a TLS reverse proxy with HTTP normalisation and limits, or a co-located client on a private interface; set BRIDGE_TRUST_NETWORK=1 to acknowledge")
+        self.assertIsNone(parse_log(self.start("127.0.0.1", mode="json"))[0]["network_warning"])
+        self.assertIsNone(parse_log(self.start("0.0.0.0", "1", "json"))[0]["network_warning"])
+
+    def test_invalid_trust_stops_before_building_the_server(self):
+        for value in ("true", "yes", "2", "-1", " 1", "1\n"):
+            with self.subTest(value=value), patch.object(server, "BridgeServer") as built:
+                with self.assertRaisesRegex(SystemExit, "BRIDGE_TRUST_NETWORK"):
+                    self.start("127.0.0.1", value)
+                built.assert_not_called()
+
+
 class HttpTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -148,7 +194,7 @@ class CapacityHttpTests(unittest.TestCase):
     """A store of its own, so the full one never refuses the other HTTP tests."""
 
     def setUp(self):
-        self.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=1, retention_seconds=300))
+        self.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=1, result_capacity=1, retention_seconds=300))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -179,6 +225,17 @@ class CapacityHttpTests(unittest.TestCase):
         # Whole seconds, never an HTTP date: the finished job holds its slot for the 300 s retention.
         self.assertRegex(retry_after, r"\A[1-9][0-9]*\Z")
         self.assertIn(int(retry_after), (299, 300))
+
+    def test_active_limit_returns_retry_after_over_http(self):
+        self.server.jobs.close()
+        self.server.jobs = jobs.JobStore(Settings(concurrency=1, capacity=1, result_capacity=8, test_tasks=True))
+        job = self.server.jobs.submit("test.delay", {"seconds": 2})
+        deadline = time.monotonic() + 5
+        while self.server.jobs.get(job["id"])["status"] != "running":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        status, retry_after, body = self.submit()
+        self.assertEqual((status, retry_after, body["error"]["code"]), (429, "1", "capacity_exceeded"))
 
     def test_a_refusal_for_capacity_is_counted_once_per_429(self):
         def rejected():
@@ -642,9 +699,9 @@ class StartupTests(unittest.TestCase):
 
     def test_each_reranker_maps_to_its_directory_and_reported_name(self):
         for choice, expected in {
-            "tinybert": ("rerank", "cross-encoder/ms-marco-TinyBERT-L2-v2"),
-            "minilm-l6": ("rerank-minilm-l6", "Xenova/ms-marco-MiniLM-L-6-v2"),
-            "bge-base": ("rerank-bge-base", "Xenova/bge-reranker-base"),
+            "tinybert": ("rerank", "cross-encoder/ms-marco-TinyBERT-L2-v2", 32),
+            "minilm-l6": ("rerank-minilm-l6", "Xenova/ms-marco-MiniLM-L-6-v2", 8),
+            "bge-base": ("rerank-bge-base", "Xenova/bge-reranker-base", 4),
         }.items():
             with self.subTest(choice=choice), patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": choice}):
                 self.assertEqual(tasks.rerank_model(), expected)
@@ -726,16 +783,24 @@ class EnvironmentTests(unittest.TestCase):
     def test_every_variable_is_read(self):
         with tempfile.TemporaryDirectory() as state_dir:
             settings = self.main({
-                "BRIDGE_CONCURRENCY": "3", "BRIDGE_CAPACITY": "9", "BRIDGE_RETENTION_SECONDS": "1.5",
+                "BRIDGE_CONCURRENCY": "3", "BRIDGE_CAPACITY": "9", "BRIDGE_RESULT_CAPACITY": "17", "BRIDGE_RETENTION_SECONDS": "1.5",
                 "BRIDGE_BACKEND": "lexical", "BRIDGE_MODEL_DIR": "/elsewhere", "BRIDGE_TEST_TASKS": "1",
                 "BRIDGE_WORKER_MAX_JOBS": "7", "BRIDGE_STATE_DIR": state_dir, "BRIDGE_OWNER_CAPACITY": "4",
             })
-            self.assertEqual(settings, Settings(concurrency=3, capacity=9, retention_seconds=1.5, backend="lexical",
+            self.assertEqual(settings, Settings(concurrency=3, capacity=9, result_capacity=17, retention_seconds=1.5, backend="lexical",
                                                 model_dir="/elsewhere", test_tasks=True, max_jobs=7,
                                                 state_dir=state_dir, owner_capacity=4))
 
     def test_an_empty_state_dir_is_unset(self):
         self.assertIsNone(self.main({"BRIDGE_STATE_DIR": ""}).state_dir)
+
+    def test_result_capacity_is_validated_at_start(self):
+        for value in ("", "0", "-1", "65537", "1.5", "1e3", "nan", "true", "many"):
+            with self.subTest(value=value), self.assertRaises(SystemExit) as raised:
+                self.main({"BRIDGE_RESULT_CAPACITY": value})
+            self.assertIn("BRIDGE_RESULT_CAPACITY", str(raised.exception.code))
+        for value in ("1", "65536"):
+            self.assertEqual(self.main({"BRIDGE_RESULT_CAPACITY": value}).result_capacity, int(value))
 
     def test_a_state_dir_that_cannot_hold_the_table_names_its_variable(self):
         with tempfile.TemporaryDirectory() as root:
@@ -772,14 +837,14 @@ class EnvironmentTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, expected)
 
     def test_an_owner_cap_outside_1_to_the_capacity_or_not_an_integer_names_its_variable(self):
-        for capacity, value in (("9", "0"), ("9", "10"), (None, "129"), ("9", "-1"), ("9", "many"), ("9", "1.5"),
+        for capacity, value in (("9", "0"), ("9", "394"), (None, "513"), ("9", "-1"), ("9", "many"), ("9", "1.5"),
                                 ("9", "")):
             environment = {"BRIDGE_OWNER_CAPACITY": value, **({"BRIDGE_CAPACITY": capacity} if capacity else {})}
             with self.subTest(environment=environment):
                 with self.assertRaises(SystemExit) as raised:
                     self.main(environment)
                 self.assertIn("BRIDGE_OWNER_CAPACITY", str(raised.exception.code))
-        for value in ("1", "9"):
+        for value in ("1", "9", "393"):
             with self.subTest(value=value):
                 self.assertEqual(self.main({"BRIDGE_CAPACITY": "9", "BRIDGE_OWNER_CAPACITY": value}).owner_capacity,
                                  int(value))
@@ -1007,12 +1072,15 @@ class MetricsHttpTests(unittest.TestCase):
             "bridge_jobs_total": "counter", "bridge_jobs_submitted_total": "counter",
             "bridge_submissions_rejected_total": "counter", "bridge_queue_depth": "gauge",
             "bridge_jobs_running": "gauge", "bridge_pool_size": "gauge", "bridge_pool_ready": "gauge",
-            "bridge_concurrency": "gauge", "bridge_capacity": "gauge",
+            "bridge_concurrency": "gauge", "bridge_capacity": "gauge", "bridge_result_capacity": "gauge",
+            "bridge_results_retained": "gauge",
             "bridge_job_duration_seconds": "histogram", "bridge_job_queue_seconds": "histogram",
             "bridge_info": "gauge"})
         self.assertEqual(sample(families, "bridge_info", protocol="1", backend="lexical"), 1)
         self.assertEqual(sample(families, "bridge_concurrency"), 1)
         self.assertEqual(sample(families, "bridge_capacity"), 16)
+        self.assertEqual(sample(families, "bridge_result_capacity"), 384)
+        self.assertEqual(sample(families, "bridge_results_retained"), self.server.jobs.snapshot()["results_retained"])
         self.assertIn(sample(families, "bridge_submissions_rejected_total", owner="default", reason="capacity"), (0, 1, 2))
         bounds = sorted({dict(labels)["le"] for name, labels in families["bridge_job_duration_seconds"][1]
                          if name.endswith("_bucket")}, key=float)
@@ -1053,6 +1121,7 @@ class MetricsHttpTests(unittest.TestCase):
         self.assertEqual(moved("bridge_jobs_total", owner="default", task="test.delay", status="timed_out"), 1)
         self.assertEqual(moved("bridge_jobs_submitted_total", owner="default", task="test.delay"), 3)
         self.assertEqual(moved("bridge_jobs_submitted_total", owner="default", task="test.error"), 1)
+        self.assertEqual(moved("bridge_results_retained"), 4)
         self.assertEqual(moved("bridge_job_duration_seconds_count", task="test.delay"), 3)
         self.assertEqual(moved("bridge_job_duration_seconds_count", task="test.error"), 1)
         self.assertGreaterEqual(moved("bridge_job_duration_seconds_sum", task="test.delay"), 0.15)
@@ -1356,7 +1425,7 @@ class OwnerHttpTests(unittest.TestCase):
 
     def test_the_owner_series_exist_at_zero_and_move_for_the_right_owner(self):
         self.stop()
-        self.start(Settings(concurrency=1, capacity=1, test_tasks=True))
+        self.start(Settings(concurrency=1, capacity=1, result_capacity=1, test_tasks=True))
         families = parse_metrics(self.call("GET", "/metrics", APP)[1])
         for owner in ("app", "other"):
             self.assertEqual(sample(families, "bridge_jobs_total", owner=owner, task="test.delay", status="succeeded"), 0)
@@ -1382,7 +1451,7 @@ class OwnerHttpTests(unittest.TestCase):
 
     def test_a_token_at_its_cap_gets_the_full_store_s_429_and_the_other_still_submits(self):
         self.stop()
-        self.start(Settings(concurrency=1, capacity=3, owner_capacity=2, retention_seconds=300, test_tasks=True))
+        self.start(Settings(concurrency=1, capacity=3, result_capacity=3, owner_capacity=2, retention_seconds=300, test_tasks=True))
 
         def submit(token):
             connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
@@ -1403,7 +1472,9 @@ class OwnerHttpTests(unittest.TestCase):
         # The capped token's own jobs hold its slots for the 300 s retention.
         self.assertRegex(retry_after, r"\A[1-9][0-9]*\Z")
         self.assertIn(int(retry_after), (299, 300))
-        self.assertEqual(submit(OTHER)[0], 202)
+        status, _, job = submit(OTHER)
+        self.assertEqual(status, 202)
+        self.finished(job["id"], "other")
         # The store is now full as a whole, and its 429 is the same answer.
         status, retry_after, full = submit(OTHER)
         self.assertEqual(status, 429)
@@ -1490,7 +1561,7 @@ class LoggingHttpTests(unittest.TestCase):
                  ("GET", "/v1/jobs/" + job_id, None, 404), ("POST", "/v1/jobs/" + job_id + "/cancel", "{}", 404),
                  ("POST", "/v1/jobs", "{}", 400), ("GET", "/" + SENTINEL, None, 404),
                  ("GET", "/healthz?" + SENTINEL, None, 404), ("GET", "/v1/jobs/" + SENTINEL, None, 404),
-                 ("DELETE", "/v1/jobs", None, 501)]
+                 ("DELETE", "/v1/jobs", None, 405)]
         for method, path, body, status in calls:
             connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
             try:
@@ -1507,7 +1578,7 @@ class LoggingHttpTests(unittest.TestCase):
                          [("GET", "/healthz"), ("GET", "/readyz"), ("GET", "/metrics"), ("GET", "/v1/jobs/{id}"),
                           ("POST", "/v1/jobs/{id}/cancel"), ("POST", "/v1/jobs"), ("GET", "other"), ("GET", "other"),
                           ("GET", "other"), ("other", "/v1/jobs")])
-        self.assertEqual([line["status"] for line in requests][3:], [404, 404, 400, 404, 404, 404, 501])
+        self.assertEqual([line["status"] for line in requests][3:], [404, 404, 400, 404, 404, 404, 405])
         # The unsupported method is refused before authentication, so it has no owner.
         self.assertEqual([line["owner"] for line in requests], ["app"] * 9 + [None])
         self.assertEqual([line["level"] == "warning" for line in requests], [line["status"] >= 500 for line in requests])
@@ -1638,9 +1709,9 @@ class LoggingHttpTests(unittest.TestCase):
         self.assertEqual(self.lines(), [])
 
     def test_a_head_refused_without_a_body_is_logged(self):
-        self.assertEqual(exchange(self.server.server_address, b"HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n")[0], 501)
+        self.assertEqual(exchange(self.server.server_address, b"HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n")[0], 405)
         self.assertEqual([(line["method"], line["route"], line["status"]) for line in self.lines()],
-                         [("other", "/healthz", 501)])
+                         [("other", "/healthz", 405)])
 
     def test_a_drain_thread_held_past_the_stop_s_wait_writes_no_line_after_it(self):
         snapshot = self.server.jobs.snapshot
@@ -1717,7 +1788,9 @@ class LoggingOffTests(unittest.TestCase):
 
     def test_requests_and_jobs_build_no_line(self):
         with patch.object(server.Handler, "_method") as method, patch.object(server.Handler, "_route") as route, \
-                patch.object(log, "event") as event, patch.object(server, "time", MagicMock(wraps=time)) as clock:
+                patch.object(log, "event") as event, \
+                patch.object(log, "enabled", return_value=False) as enabled, \
+                patch("ai_bridge.server.round", create=True) as duration:
             connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
             try:
                 connection.request("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {"seconds": 0}}),
@@ -1735,7 +1808,8 @@ class LoggingOffTests(unittest.TestCase):
         method.assert_not_called()
         route.assert_not_called()
         event.assert_not_called()
-        clock.monotonic.assert_not_called()
+        enabled.assert_called()
+        duration.assert_not_called()
 
     def test_the_drain_takes_no_snapshot(self):
         with patch.object(self.server.jobs, "snapshot") as snapshot, patch.object(log, "event") as event:
@@ -1837,15 +1911,16 @@ class LoggingStartTests(unittest.TestCase):
         lines = parse_log(text)
         self.assertEqual([line["event"] for line in lines], ["start", "stop"])
         self.assertEqual({key: lines[0][key] for key in log.EVENTS["start"]},
-                         {"backend": "lexical", "concurrency": 2, "capacity": 9, "owner_capacity": 3,
-                          "retention_seconds": 300.0, "max_jobs": 1000, "drain_seconds": 7, "tokens": 2})
+                         {"backend": "lexical", "concurrency": 2, "capacity": 9, "result_capacity": 384, "owner_capacity": 3,
+                          "retention_seconds": 300.0, "max_jobs": 1000, "drain_seconds": 7, "tokens": 2,
+                          "network_warning": None})
         self.assertEqual((lines[1]["cancelled"], lines[1]["level"]), (0, "info"))
         for value in (APP, OTHER, SENTINEL, "app"):
             self.assertNotIn(value, text)
 
     def test_without_an_owner_cap_the_start_line_gives_the_capacity(self):
         lines = parse_log(self.main({"BRIDGE_LOG": "json", "BRIDGE_CAPACITY": "9", "BRIDGE_TOKEN": TOKEN}))
-        self.assertEqual((lines[0]["capacity"], lines[0]["owner_capacity"]), (9, 9))
+        self.assertEqual((lines[0]["capacity"], lines[0]["owner_capacity"]), (9, 393))
 
     def serve_with_a_running_job(self, signals):
         """A serve_forever that first starts a long job, then signals the server and serves until it stops."""

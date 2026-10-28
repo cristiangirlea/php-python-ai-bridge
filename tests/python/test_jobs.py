@@ -61,7 +61,7 @@ class FailingDatabase:
 
 class ValidationTests(unittest.TestCase):
     def test_invalid_worker_limits(self):
-        for name in ["concurrency", "capacity", "max_jobs"]:
+        for name in ["concurrency", "capacity", "result_capacity", "max_jobs"]:
             for value in [True, 0, -1, 1.5, "1", 1000001]:
                 with self.subTest(name=name, value=value), self.assertRaises(ValueError):
                     JobStore(Settings(**{name: value}))
@@ -473,7 +473,7 @@ class RerankBatchingTests(unittest.TestCase):
         self.assertEqual(scores, self.score(documents)[0])
         self.assertEqual(reports, list(range(1, 71)))
 
-    def test_execute_on_onnx_reports_every_batch(self):
+    def test_execute_on_onnx_throttles_batch_progress(self):
         tokenizer, session, events = self.Tokenizer(), self.Session(), []
         with patch.object(tasks, "_onnx", return_value=(tokenizer, session, self.NAMES)) as onnx, \
                 patch.object(tasks, "_tensors", self.tensors):
@@ -483,16 +483,14 @@ class RerankBatchingTests(unittest.TestCase):
         self.assertEqual(result["model"], "cross-encoder/ms-marco-TinyBERT-L2-v2")
         self.assertEqual([item["index"] for item in result["rankings"]], [129, 128, 127])
         self.assertEqual([rows for rows, _ in session.shapes], [32, 32, 32, 32, 2])
-        # 130 documents give a throttle step of 3, which divides none of 32, 64 and 128: batch reports must
-        # bypass the per-document throttle or the client sees nothing between 0 and 96.
-        self.assertEqual(events, [(0, 130), (32, 130), (64, 130), (96, 130), (128, 130), (130, 130)])
+        self.assertEqual(events, [(0, 130), (96, 130), (130, 130)])
 
     def test_a_wrong_number_of_scores_is_rejected(self):
         with self.assertRaises(ValueError):
             self.score(self.documents(5), session=self.Session(short=True))
 
     def test_selected_reranker_is_loaded_and_reported(self):
-        for choice, (directory, model) in tasks.RERANK_MODELS.items():
+        for choice, (directory, model, _) in tasks.RERANK_MODELS.items():
             with self.subTest(choice=choice), patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": choice}), \
                     patch.object(tasks, "_onnx", return_value=(self.Tokenizer(), self.Session(), self.NAMES)) as onnx, \
                     patch.object(tasks, "_tensors", self.tensors):
@@ -1096,9 +1094,89 @@ class JobsTests(unittest.TestCase):
         job = self.store.submit("rerank", {"query": "x", "documents": ["x"]})
         self.assertEqual(self.wait(job["id"])["error"]["code"], "task_failed")
 
+    def test_retained_results_do_not_consume_active_capacity(self):
+        self.store.close()
+        self.store = JobStore(Settings(capacity=3, result_capacity=2, test_tasks=True))
+        first = self.store.submit("test.delay", {"seconds": 0}, idempotency_key="first")
+        self.wait(first["id"])
+        active = [self.store.submit("test.delay", {"seconds": 5}) for _ in range(3)]
+        with self.assertRaises(CapacityError) as caught:
+            self.store.submit("test.delay", {"seconds": 0})
+        self.assertEqual(str(caught.exception), "active job capacity reached")
+        self.assertEqual(self.store.submit("test.delay", {"seconds": 0}, idempotency_key="first")["id"], first["id"])
+        for job in active:
+            self.store.cancel(job["id"])
+        with self.assertRaises(CapacityError) as caught:
+            self.store.submit("test.delay", {"seconds": 0})
+        self.assertGreater(caught.exception.retry_after, 1)
+        self.assertEqual(self.store.submit("test.delay", {"seconds": 0}, idempotency_key="first")["id"], first["id"])
+
+    def test_duration_samples_exclude_queue_wait_and_queued_cancellation(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, capacity=3, test_tasks=True))
+        first = self.store.submit("test.delay", {"seconds": 0.8})
+        queued = self.store.submit("test.delay", {"seconds": 0})
+        cancelled = self.store.submit("test.delay", {"seconds": 0})
+        self.assertEqual(self.store.cancel(cancelled["id"])["status"], "cancelled")
+        self.assertEqual(self.wait(first["id"])["status"], "succeeded")
+        self.assertEqual(self.wait(queued["id"])["status"], "succeeded")
+        with self.store._lock:
+            samples = list(self.store._recent_durations)
+            record = self.store._jobs[queued["id"]]
+            self.assertGreater(record["_started_at"] - record["_submitted_at"], 0.4)
+            self.assertEqual(len(samples), 2)
+            self.assertAlmostEqual(samples[-1], record["_finished"] - record["_started_at"])
+
+    def test_running_cancellation_and_timeout_add_run_time_samples(self):
+        for status in ("cancelled", "timed_out"):
+            with self.subTest(status=status):
+                self.store.close()
+                self.store = JobStore(Settings(concurrency=1, test_tasks=True))
+                deadline = time.monotonic() + 5
+                while self.store.readiness() is not None:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                job = self.store.submit("test.delay", {"seconds": 5}, timeout_ms=1000)
+                self.wait(job["id"], states={"running"})
+                started = time.monotonic()
+                if status == "cancelled":
+                    time.sleep(0.2)
+                    self.store.cancel(job["id"])
+                self.assertEqual(self.wait(job["id"])["status"], status)
+                elapsed = time.monotonic() - started
+                with self.store._lock:
+                    samples = list(self.store._recent_durations)
+                self.assertEqual(len(samples), 1)
+                self.assertGreater(samples[0], 0.15)
+                self.assertAlmostEqual(samples[0], elapsed, delta=0.1)
+
+    def test_duration_window_keeps_only_the_latest_100_jobs(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, capacity=1, result_capacity=200, test_tasks=True))
+        for _ in range(101):
+            job = self.store.submit("test.delay", {"seconds": 0})
+            self.assertEqual(self.wait(job["id"])["status"], "succeeded")
+        with self.store._lock:
+            records = list(self.store._jobs.values())
+            self.assertEqual(list(self.store._recent_durations),
+                             [job["_finished"] - job["_started_at"] for job in records[-100:]])
+
+    def test_active_jobs_can_finish_beyond_the_result_limit(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=1, capacity=3, result_capacity=2, test_tasks=True))
+        first = self.store.submit("test.delay", {"seconds": 0})
+        self.assertEqual(self.wait(first["id"])["status"], "succeeded")
+        jobs = [self.store.submit("test.delay", {"seconds": 0.2}) for _ in range(3)]
+        for job in jobs:
+            self.assertEqual(self.wait(job["id"])["status"], "succeeded")
+        self.assertEqual(self.store.snapshot()["results_retained"], 1 + 3)
+        with self.assertRaises(CapacityError) as caught:
+            self.store.submit("test.delay", {"seconds": 0})
+        self.assertEqual(str(caught.exception), "result capacity reached")
+
     def test_retained_results_bound_memory(self):
         self.store.close()
-        self.store = JobStore(Settings(capacity=1, retention_seconds=0.15, test_tasks=True))
+        self.store = JobStore(Settings(capacity=1, result_capacity=1, retention_seconds=0.15, test_tasks=True))
         job = self.store.submit("test.delay", {"seconds": 0})
         self.wait(job["id"])
         with self.assertRaises(CapacityError):
@@ -1109,13 +1187,14 @@ class JobsTests(unittest.TestCase):
 
     def test_a_full_store_says_when_its_first_retained_job_expires(self):
         self.store.close()
-        self.store = JobStore(Settings(concurrency=1, capacity=2, retention_seconds=2.5, test_tasks=True))
+        self.store = JobStore(Settings(concurrency=1, capacity=2, result_capacity=2, retention_seconds=2.5, test_tasks=True))
         self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
-        self.store.submit("test.delay", {"seconds": 5})
-        time.sleep(1)
+        time.sleep(0.5)
+        self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
+        time.sleep(0.5)
         with self.assertRaises(CapacityError) as caught:
             self.store.submit("test.delay", {"seconds": 0})
-        # About 1.5 s of the finished job's retention is left, rounded up; the running job does not count.
+        # About 1.5 s of the first result's retention is left, rounded up.
         self.assertEqual(caught.exception.retry_after, 2)
 
     def test_a_store_full_of_unfinished_jobs_says_one_second(self):
@@ -1126,9 +1205,26 @@ class JobsTests(unittest.TestCase):
             self.store.submit("test.delay", {"seconds": 0})
         self.assertEqual(caught.exception.retry_after, 1)
 
+    def test_active_capacity_retry_uses_recent_median_and_is_clamped(self):
+        self.store.close()
+        self.store = JobStore(Settings(concurrency=2, capacity=4, test_tasks=True))
+        for _ in range(4):
+            self.store.submit("test.delay", {"seconds": 5})
+        with self.store._lock:
+            self.store._recent_durations.extend([2.0, 3.0, 1000.0])
+        with self.assertRaises(CapacityError) as caught:
+            self.store.submit("test.delay", {"seconds": 0})
+        self.assertEqual(caught.exception.retry_after, 6)
+        with self.store._lock:
+            self.store._recent_durations.clear()
+            self.store._recent_durations.append(1000.0)
+        with self.assertRaises(CapacityError) as caught:
+            self.store.submit("test.delay", {"seconds": 0})
+        self.assertEqual(caught.exception.retry_after, 300)
+
     def test_a_store_full_of_long_retained_jobs_says_their_retention(self):
         self.store.close()
-        self.store = JobStore(Settings(concurrency=1, capacity=1, retention_seconds=300, test_tasks=True))
+        self.store = JobStore(Settings(concurrency=1, capacity=1, result_capacity=1, retention_seconds=300, test_tasks=True))
         self.wait(self.store.submit("test.delay", {"seconds": 0})["id"])
         with self.assertRaises(CapacityError) as caught:
             self.store.submit("test.delay", {"seconds": 0})
@@ -1173,9 +1269,12 @@ class JobsTests(unittest.TestCase):
                 Path(state_dir, name).read_bytes() for name in os.listdir(state_dir) if name.startswith("jobs.sqlite")
             )
             self.assertNotIn(secret.encode(), db_bytes)
-            reopened = JobStore(Settings(concurrency=1, retention_seconds=1.2, test_tasks=True, state_dir=state_dir))
+            reopened = JobStore(Settings(concurrency=1, result_capacity=3, retention_seconds=1.2, test_tasks=True, state_dir=state_dir))
             try:
                 self.assertEqual(self.row_ids(state_dir), {kept["id"], running["id"], queued["id"]})
+                self.assertEqual(reopened.snapshot()["results_retained"], 3)
+                with self.assertRaises(CapacityError):
+                    reopened.submit("test.delay", {"seconds": 0})
                 self.assertIsNone(reopened.get(expired["id"]))
                 survived = reopened.get(kept["id"])
                 self.assertEqual((survived["status"], survived["result"]), ("succeeded", {"value": "kept"}))
@@ -1823,7 +1922,7 @@ class OwnerTests(unittest.TestCase):
             store.close()
 
     def test_a_full_store_answers_with_the_limit_that_applies_to_the_owner(self):
-        store = JobStore(self.settings(capacity=3, owner_capacity=2, retention_seconds=300))
+        store = JobStore(self.settings(capacity=3, result_capacity=3, owner_capacity=2, retention_seconds=300))
         try:
             ages = {}
             for owner, age in (("app", 20), ("app", 10), ("other", 250)):
@@ -1881,10 +1980,10 @@ class OwnerTests(unittest.TestCase):
             store.close()
 
     def test_an_owner_cap_outside_1_to_the_capacity_is_refused(self):
-        for value in (0, -1, 5, True, 1.5, "1"):
+        for value in (0, -1, 389, True, 1.5, "1"):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "invalid worker limits"):
                 JobStore(Settings(capacity=4, owner_capacity=value))
-        for value in (1, 4):
+        for value in (1, 4, 388):
             with self.subTest(value=value):
                 JobStore(Settings(concurrency=1, capacity=4, owner_capacity=value)).close()
 
@@ -2329,6 +2428,16 @@ class WarmUpTests(unittest.TestCase):
             self.assertEqual(self.recv(parent), (None, "loaded", None))
         self.assertEqual([call.args for call in load.call_args_list],
                          [(Path("/m") / name, length, stride) for name, length, stride in jobs.WARM_UP["onnx"]])
+
+    def test_warm_up_loads_the_selected_reranker_directory(self):
+        selection = patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": "minilm-l6"})
+        selection.start()
+        self.addCleanup(selection.stop)
+        with patch.object(tasks, "_onnx") as load:
+            parent = self.serve("onnx", "/m")
+            self.assertEqual(self.recv(parent), (None, "ready", None))
+            self.assertEqual(self.recv(parent), (None, "loaded", None))
+        self.assertEqual(load.call_args_list[0].args, (Path("/m/rerank-minilm-l6"), 512, 0))
 
     def test_ready_is_sent_only_once_the_load_has_finished(self):
         release = threading.Event()

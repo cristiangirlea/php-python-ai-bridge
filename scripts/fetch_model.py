@@ -19,6 +19,7 @@ MODELS = {
         },
     },
     "rerank-bge-base": {
+        "limit": 300 * 1024 * 1024,
         "repository": "Xenova/bge-reranker-base",
         "revision": "280bcc27a84e0b898c251e06fddb25171bd9b101",
         "license": "MIT",
@@ -74,14 +75,15 @@ MODELS = {
         },
     },
 }
-# The quantized BGE reranker is about 267 MiB.
-LIMIT = 300 * 1024 * 1024
+# Only the quantized BGE reranker needs more than the ordinary artifact cap.
+LIMIT = 150 * 1024 * 1024
 
 
 def fetch(task: str, spec: dict) -> dict:
     directory = Path("/cache/models") / task
     directory.mkdir(parents=True, exist_ok=True)
     repository, revision = spec["repository"], spec["revision"]
+    limit = spec.get("limit", LIMIT)
     manifest = {"repository": repository, "revision": revision, "license": spec["license"], "files": {}}
     for source, destination in spec["files"].items():
         url = f"https://huggingface.co/{repository}/resolve/{revision}/{source}"
@@ -91,8 +93,8 @@ def fetch(task: str, spec: dict) -> dict:
         with urlopen(url, timeout=60) as response, temporary.open("wb") as output:
             while chunk := response.read(1024 * 1024):
                 total += len(chunk)
-                if total > LIMIT:
-                    raise ValueError(f"Model artifact exceeds the {LIMIT // (1024 * 1024)} MiB limit")
+                if total > limit:
+                    raise ValueError(f"Model artifact exceeds the {limit // (1024 * 1024)} MiB limit")
                 digest.update(chunk)
                 output.write(chunk)
         if digest.hexdigest() != spec["hashes"][destination]:

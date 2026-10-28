@@ -1,0 +1,65 @@
+{
+  "reference_file": "onnx/model.onnx",
+  "precision": "fp32",
+  "absolute_logit_tolerance": {"minilm-l6": 0.75, "bge-base": 1.25},
+  "cases": [
+    {
+      "query": "What is the capital of France?",
+      "documents": [
+        "Paris is the capital and most populous city of France.",
+        "France is a country in Western Europe, bordering Germany and Spain.",
+        "Berlin is the capital of Germany.",
+        "Bananas are yellow fruits that grow in tropical climates."
+      ]
+    },
+    {
+      "query": "How do antibiotics treat bacterial infections?",
+      "documents": [
+        "Antibiotics treat bacterial infections by killing bacteria or preventing their growth.",
+        "Bacterial infections can cause fever, swelling and pain.",
+        "Viruses reproduce inside living cells and are not killed by antibiotics.",
+        "The Moon orbits Earth approximately once every twenty-seven days."
+      ]
+    }
+  ],
+  "models": {
+    "minilm-l6": {
+      "repository": "Xenova/ms-marco-MiniLM-L-6-v2",
+      "revision": "a09144355adeed5f58c8ed011d209bf8ee5a1fec",
+      "sha256": "c623d0bcb99f4622beb413eaef00cfbe5db20df9f1dd982da4b4f26022881870",
+      "scores": [
+        [
+          7.613461971282959,
+          -0.12400798499584198,
+          -2.541010856628418,
+          -11.132271766662598
+        ],
+        [
+          9.596930503845215,
+          -4.068315505981445,
+          -6.744388103485107,
+          -11.208942413330078
+        ]
+      ]
+    },
+    "bge-base": {
+      "repository": "Xenova/bge-reranker-base",
+      "revision": "280bcc27a84e0b898c251e06fddb25171bd9b101",
+      "sha256": "15b9a8c3da82eddf263df571281166e00e9308fe19d077084b642ebfcaf06d2b",
+      "scores": [
+        [
+          8.568035125732422,
+          3.586966037750244,
+          -3.6593854427337646,
+          -10.193470001220703
+        ],
+        [
+          7.863492488861084,
+          -2.260781764984131,
+          -3.502155065536499,
+          -10.194633483886719
+        ]
+      ]
+    }
+  }
+}

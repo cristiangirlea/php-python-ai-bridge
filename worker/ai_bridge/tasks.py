@@ -40,17 +40,20 @@ NER_LABELS = ("O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LO
 # Default ONNX directories, each holding the tokenizer.json and model.onnx that scripts/fetch_model.py writes.
 MODEL_DIRECTORIES = ("rerank", "embed", "redact", "redact-uncased")
 RERANK_MODELS = {
-    "tinybert": ("rerank", "cross-encoder/ms-marco-TinyBERT-L2-v2"),
-    "minilm-l6": ("rerank-minilm-l6", "Xenova/ms-marco-MiniLM-L-6-v2"),
-    "bge-base": ("rerank-bge-base", "Xenova/bge-reranker-base"),
+    "tinybert": ("rerank", "cross-encoder/ms-marco-TinyBERT-L2-v2", 32),
+    "minilm-l6": ("rerank-minilm-l6", "Xenova/ms-marco-MiniLM-L-6-v2", 8),
+    "bge-base": ("rerank-bge-base", "Xenova/bge-reranker-base", 4),
 }
 
 
-def rerank_model() -> tuple[str, str]:
+def rerank_model() -> tuple[str, str, int]:
     choice = os.environ.get("BRIDGE_RERANK_MODEL", "tinybert")
     if choice not in RERANK_MODELS:
         raise SystemExit("BRIDGE_RERANK_MODEL must be tinybert, minilm-l6 or bge-base")
     return RERANK_MODELS[choice]
+
+
+MODEL_NAMES["onnx"]["rerank"] = rerank_model()[1]
 
 
 # Present only with BRIDGE_TEST_TASKS=1, for the fault tests.
@@ -157,12 +160,9 @@ def execute(task: str, payload: dict[str, Any], backend: str, model_dir: str, pr
 
     report(0)
     if backend == "onnx":
-        directory, model = rerank_model()
+        directory, model, batch_size = rerank_model()
         tokenizer, session, names = _onnx(Path(model_dir) / directory, 512)
-        # Batch reports bypass the per-document throttle so clients see every completed batch.
-        scores = _score_pairs(tokenizer, session, names, query, documents,
-                              lambda completed: progress(completed, total),
-                              batch_size=4 if directory == "rerank-bge-base" else RERANK_BATCH_SIZE)
+        scores = _score_pairs(tokenizer, session, names, query, documents, report, batch_size=batch_size)
     else:
         words = set(re.findall(r"\w+", query.casefold()))
         scores = []
@@ -296,7 +296,11 @@ def _load_onnx(directory: Path, max_length: int, stride: int) -> tuple[Any, Any,
 
     tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
     tokenizer.enable_truncation(max_length=max_length, stride=stride)
-    tokenizer.enable_padding()
+    pad_token = "<pad>" if tokenizer.token_to_id("<pad>") is not None else "[PAD]"
+    pad_id = tokenizer.token_to_id(pad_token)
+    if pad_id is None:
+        raise ValueError("tokenizer has no pad token")
+    tokenizer.enable_padding(pad_token=pad_token, pad_id=pad_id)
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
     options.inter_op_num_threads = 1

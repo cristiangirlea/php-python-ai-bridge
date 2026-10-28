@@ -1,9 +1,9 @@
 name: Real model smoke tests
 
 on:
+  workflow_dispatch:
   push:
     tags: ['v*']
-  workflow_dispatch:
   # Weekly, so a change upstream (a pinned file removed, a wheel yanked) is noticed without a PR.
   # GitHub runs schedules on the default branch only and pauses them after 60 days without commits.
   schedule:
@@ -26,6 +26,10 @@ on:
       - scripts/benchmark.py
       - scripts/ner_measure.py
       - scripts/relevance_measure.py
+      - scripts/rerank_reference.py
+      - tests/fixtures/rerank-fp32.json
+      - tests/php/model_parity.php
+      - tests/python/test_reranker_review.py
       - tests/python/test_relevance_measure.py
       - tests/python/test_fetch_model.py
       - tests/python/test_public_data.py
@@ -66,7 +70,23 @@ concurrency:
 
 # GitHub's hosted runners, as in tests.yml: the repository is public.
 jobs:
+  packagist:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Checks the newest ^0.4 release on Packagist, not necessarily this tag; move the constraint with each minor.
+      - name: Install and check the published package
+        run: |
+          docker run --rm --network bridge composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac sh -ec '
+            mkdir /tmp/packagist-check
+            cd /tmp/packagist-check
+            composer require cristiangirlea/php-python-ai-bridge:^0.4 --no-scripts --no-plugins
+            php -r '\''require "vendor/autoload.php"; exit(class_exists(PhpAiBridge\Client::class) && PhpAiBridge\Client::MAX_DOCUMENTS === 512 ? 0 : 1);'\''
+          '
+
   model:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
@@ -96,7 +116,7 @@ jobs:
               bge-base) expected=Xenova/bge-reranker-base ;;
             esac
             docker compose -f docker/compose.yaml up -d --force-recreate model-worker
-            docker compose -f docker/compose.yaml run --rm --no-deps -e BRIDGE_RERANK_EXPECTED="$expected" model-test php tests/php/model_selected.php
+            docker compose -f docker/compose.yaml run --rm --no-deps -e BRIDGE_RERANK_EXPECTED="$expected" model-test sh -ec 'php tests/php/model_selected.php; php tests/php/model_parity.php'
           done
           unset BRIDGE_RERANK_MODEL
           docker compose -f docker/compose.yaml up -d --force-recreate model-worker
@@ -183,6 +203,7 @@ jobs:
 
   # A hash pin keeps a package from changing, not from turning out vulnerable; this asks the advisory databases.
   audit:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

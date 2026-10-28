@@ -34,6 +34,7 @@ from benchmark import cpu_model, wait_ready  # noqa: E402
 from ner_measure import finish  # noqa: E402  (submits a job and waits out a full worker)
 
 DATASET = "arguana"
+GATE_DATASET = "squad"
 QUERIES, CANDIDATES, K = 200, 100, 10
 K1, B = 1.2, 0.75  # Lucene's defaults
 WORD = re.compile(r"\w+")
@@ -138,7 +139,9 @@ def load_squad(data: bytes) -> tuple:
 
 def quality_gate(dataset: str, rows: list) -> bool:
     """Only SQuAD is the release quality threshold."""
-    return dataset != "squad" or rows[1][2] >= rows[0][2]
+    if dataset != GATE_DATASET:
+        raise ValueError(f"quality gate requires {GATE_DATASET}")
+    return rows[1][2] >= rows[0][2]
 
 
 def p95(values: list) -> float:
@@ -181,6 +184,8 @@ def render(rows: list) -> str:
 
 def main() -> None:
     dataset = os.environ.get("RELEVANCE_DATASET", DATASET)
+    if os.environ.get("RELEVANCE_GATE") == "1" and dataset != GATE_DATASET:
+        raise SystemExit(f"RELEVANCE_GATE=1 requires RELEVANCE_DATASET={GATE_DATASET}")
     if dataset not in ("arguana", "squad"):
         raise SystemExit("RELEVANCE_DATASET must be arguana or squad")
     base = os.environ.get("RELEVANCE_TARGET", "http://model-worker:8090")

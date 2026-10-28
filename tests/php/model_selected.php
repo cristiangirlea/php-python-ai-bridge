@@ -27,10 +27,13 @@ do {
         usleep(100000);
     }
 } while (true);
-$documents = ['Paris is the capital of France.', 'Bananas are yellow.'];
+$documents = ['Bananas are yellow.', 'Paris is the capital of France.'];
 $job = $client->submitRerank('What is the capital of France?', $documents, 120000);
 $result = RerankResult::fromJob($client->wait($job->id, 120000), count($documents));
 if ($result->model !== $expected || count($result->rankings) !== count($documents)) {
     throw new RuntimeException('Selected reranker did not report the expected model and rankings');
+}
+if ($result->rankings[0]['index'] !== 1) {
+    throw new RuntimeException('Selected reranker did not rank the relevant document first');
 }
 echo "PASS: selected reranker reported through the PHP client\n";

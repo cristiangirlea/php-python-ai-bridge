@@ -9,9 +9,25 @@ All notable changes to this project are documented in this file. The format foll
 ### Added
 
 - `BRIDGE_RERANK_MODEL` selects a pinned ONNX reranker; SQuAD v1.1 is available for quality measurement and the release model workflow compares its NDCG@10 with BM25.
+- A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.
+- Reproducible raw-socket request fuzzing: a fixed corpus followed by fresh seeded multi-byte flips, inserts, deletes and splices, with `BRIDGE_FUZZ_SECONDS` for longer runs and distinct-input counts; slow-client connection-budget recovery tests.
+- Body and header limits and read/write timeouts in the Caddy TLS example; oversized bodies are rejected before contacting the worker.
+- Seven no-model failure drills on dedicated compose peers, with bounded standard-library HTTP probes, offline verdict tests and an explicit start-crash-loop skip. CI's required deterministic gate includes the drills and digest-pinned promtool syntax and behavior checks of the seven example alert rules.
+- Example Prometheus alert rules and a Grafana dashboard, with starting targets and import instructions in the operations guide.
+- The start log line includes `result_capacity`.
+- `BRIDGE_RESULT_CAPACITY` limits retained results at admission (default 384, giving 384 / 300 s = 1.28 jobs/s at default retention, three times the old combined limit's 0.43 jobs/s); `bridge_result_capacity` and `bridge_results_retained` expose the limit and current count.
 
 ### Changed
 
+- Reranker acquisition downloads about 630 MB of models, plus the pinned wheels. The per-file cap is 150 MiB, raised to 300 MiB only for BGE.
+- The model workflow runs on version tags as well as its existing triggers. Publishing now waits for its own read-only SQuAD quality gate; a default below BM25 prevents both image and release publication.
+- TinyBERT is intended for question-to-passage reranking; it is below BM25 on ArguAna-style argument retrieval. Select and measure a reranker for the application's domain.
+- State the supported deployment: behind a TLS reverse proxy that normalises HTTP and enforces limits, or on loopback/a private interface for a co-located client.
+- Parser refusals use fixed JSON errors (400, 405 or 431); ambiguous framing, folded headers and control bytes are refused. Five-second header and body read budgets also stop clients that keep trickling bytes.
+- At the active limit, `Retry-After` estimates queue drain time from the median run time (start to finish) of the 100 most recent jobs that started.
+- `BRIDGE_OWNER_CAPACITY` now permits values up to the sum of active and result capacities. When unset, the start log line reports that sum as `owner_capacity`.
+- `BRIDGE_CAPACITY` now limits queued and running jobs. Deployments that tuned it to bound memory should also set `BRIDGE_RESULT_CAPACITY`.
+- Document the Packagist installation and check the published package on demand and on tags.
 - The model wheels move to `numpy` 2.5.4, `onnxruntime` 1.31.0 and `tokenizers` 0.23.3 in `requirements-model.txt` and `requirements-model.lock`, which brings `huggingface-hub` 2.3.0 with `httpx2` in place of `requests` and drops `coloredlogs` and `sympy`. ONNX Runtime 1.31 sends telemetry to Microsoft's collector from import on, so every worker child now starts with `ORT_DISABLE_TELEMETRY=1`, whatever the service's environment says.
 - The MCP server's dependencies moved to `mcp` 2.3.0 (`mcp-types` 2.3.0, `cryptography` 50.0.2, `httpcore2` and `httpx2` 2.16.0, `pycparser` 3.12, `pydantic` 2.14.1, `pydantic-core` 2.50.1, `pyjwt` 2.15.1, `rpds-py` 2026.9.1, `sse-starlette` 3.6.0, `starlette` 1.10.0, `truststore` 0.10.5, `uvicorn` 0.54.0); `requirements-mcp.lock` now also holds the hashes of the Linux aarch64 wheels.
 

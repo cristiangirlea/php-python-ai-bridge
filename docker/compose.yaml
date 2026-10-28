@@ -20,6 +20,7 @@ x-python: &python
   <<: *limits
   image: python:3.12-bookworm@sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970
   environment: &python-env
+    BRIDGE_TRUST_NETWORK: "1"
     PYTHONDONTWRITEBYTECODE: "1"
     PYTHONPATH: /work/worker
     BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN to a random service token of at least 32 characters}
@@ -44,12 +45,93 @@ x-php: &php
     XDG_DATA_HOME: /tmp/data
 
 services:
+  # Failure drills use their own peers so a kill or a full state disk cannot disturb the test profile.
+  drill-child: &drill-worker
+    <<: *python
+    profiles: [drills]
+    networks: [drills]
+    environment: &drill-env
+      <<: *python-env
+      BRIDGE_TEST_TASKS: "1"
+      BRIDGE_CONCURRENCY: "1"
+      BRIDGE_DRAIN_SECONDS: "1"
+      BRIDGE_LOG: json
+    command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
+    stop_grace_period: 5s
+
+  drill-missing-model:
+    <<: *drill-worker
+    environment:
+      <<: *drill-env
+      BRIDGE_BACKEND: onnx
+      BRIDGE_MODEL_DIR: /empty-models
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /empty-models:ro,noexec,nosuid,size=1m,uid=65532,gid=65532
+
+  drill-state:
+    <<: *drill-worker
+    environment:
+      <<: *drill-env
+      BRIDGE_STATE_DIR: /state
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /state:rw,noexec,nosuid,size=1m,uid=65532,gid=65532,mode=0700
+
+  # Create the permission fault inside Linux, where a host bind's mode is not platform-dependent.
+  drill-open-token:
+    <<: *drill-worker
+    command:
+      - sh
+      - -ec
+      - |
+        printf 'drill=%s\n' "$$BRIDGE_TOKEN" > /tmp/open-tokens
+        chmod 0644 /tmp/open-tokens
+        unset BRIDGE_TOKEN
+        export BRIDGE_TOKENS_FILE=/tmp/open-tokens
+        exec python -m ai_bridge.server --host 0.0.0.0
+
+  drill-drain:
+    <<: *drill-worker
+
+  drill-flood:
+    <<: *drill-worker
+
+  drill-load:
+    <<: *drill-worker
+    environment:
+      <<: *drill-env
+      BRIDGE_CONCURRENCY: "2"
+      BRIDGE_STATE_DIR: /state
+    volumes:
+      - ..:/work:ro
+      - drill-load-state:/state
+
+  # Keep the state volume mounted across the load worker's stop, and poll independently of its lifetime.
+  drill-client:
+    <<: *python
+    profiles: [drills]
+    networks: [drills]
+    volumes:
+      - ..:/work:ro
+      - drill-load-state:/state:ro
+    command: [python, -c, "import time; time.sleep(3600)"]
+
+  promtool:
+    <<: *limits
+    profiles: [drills]
+    image: prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038
+    network_mode: none
+    entrypoint: [/bin/sh, -ec]
+    command: ['promtool check rules deploy/prometheus/alerts.yml && promtool test rules deploy/prometheus/alerts.test.yml']
+
   # The job table goes to disk here so the integration tests exercise that path; tmpfs keeps it off the host.
   worker:
     <<: *python
     environment:
       <<: *python-env
       BRIDGE_STATE_DIR: /state
+      BRIDGE_LOG: json
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
       - /state:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700
@@ -88,6 +170,9 @@ services:
     <<: *python
     profiles: [test]
     network_mode: none
+    environment:
+      <<: *python-env
+      BRIDGE_FUZZ_SECONDS: ${BRIDGE_FUZZ_SECONDS:-30}
     command: [python, -m, unittest, discover, -s, tests/python, -v]
 
   php-tests:
@@ -268,6 +353,7 @@ services:
       <<: *python-env
       BRIDGE_TEST_TASKS: "1"
       BRIDGE_CONCURRENCY: "1"
+      BRIDGE_RESULT_CAPACITY: "128"
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
 
   # Two clients of one worker, each with its own test-only literal token, independent of the run's BRIDGE_TOKEN.
@@ -279,9 +365,11 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: /work/worker
+      BRIDGE_TRUST_NETWORK: "1"
       BRIDGE_TOKENS: app=test-only-app-client-token-never-use-in-production,other=test-only-other-client-token-never-use-in-production
-      # Small enough for tests/integration.py, which repeats both numbers, to fill one token's cap and then the worker.
+      # tests/integration.py fills one token's cap and then the retained-result limit.
       BRIDGE_CAPACITY: "12"
+      BRIDGE_RESULT_CAPACITY: "12"
       BRIDGE_OWNER_CAPACITY: "8"
     command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
 
@@ -323,6 +411,7 @@ services:
     <<: *python
     profiles: [model]
     mem_limit: 1536m
+    memswap_limit: 1536m
     networks: [isolated]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=512m,uid=65532,gid=65532
@@ -369,12 +458,19 @@ services:
     environment:
       BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN}
       BRIDGE_STATE_DIR: /state
+      BRIDGE_TRUST_NETWORK: "1"
 
   # Reads the models the `fetcher` put in .cache, or `docker run -v <volume>:/cache <image> fetch` with a volume.
   model-worker-image:
     <<: *worker-image
     image: ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:${BRIDGE_IMAGE_TAG:-latest}
     mem_limit: 1536m
+    memswap_limit: 1536m
+    environment:
+      BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN}
+      BRIDGE_STATE_DIR: /state
+      BRIDGE_TRUST_NETWORK: "1"
+      BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}
     volumes:
       - ../.cache:/cache:ro
 
@@ -385,6 +481,7 @@ services:
     environment:
       <<: *php-env
       BRIDGE_URL: http://model-worker:8090
+      BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}
     command: [php, tests/php/model.php]
 
   model-frankenphp:
@@ -584,6 +681,7 @@ services:
     environment:
       <<: *mcp-env
       BRIDGE_URL: http://mcp-model-worker:8090
+      BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}
       # The worker runs one job at a time, so calls an agent makes together queue for its one warm child.
       BRIDGE_MCP_TIMEOUT_MS: "300000"
 
@@ -664,10 +762,18 @@ services:
       - 'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps/tools -r requirements-dev.lock && python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps/mcp -r requirements-mcp.lock && python -m ruff check worker mcp_server scripts tests && python -m mypy'
 
 networks:
+  drills:
+    internal: true
   isolated:
     internal: true
 
 volumes:
+  drill-load-state:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=65532,gid=65532,mode=0700"
   tls-ca:
     driver: local
     driver_opts:

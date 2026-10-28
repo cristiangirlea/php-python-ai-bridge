@@ -18,13 +18,13 @@ Three normal tasks are implemented. Reranking: given a query and up to 512 candi
 
 ## Install through Composer
 
-The latest tagged release is `v0.4.0`; see [the changelog](../CHANGELOG.md). Once the package is on Packagist, this is the normal path, run inside your application's dependency-acquisition container:
+The latest tagged release is `v0.4.0`; see [the changelog](../CHANGELOG.md). The package is on Packagist; run this inside your application's dependency-acquisition container:
 
 ```sh
 composer require cristiangirlea/php-python-ai-bridge:^0.4 --no-scripts --no-plugins
 ```
 
-Until the Packagist listing exists, install the same tag from the repository instead. In your application's root `composer.json`, add this repository and requirement, preserving existing entries:
+To pin an unreleased commit instead, add this repository and requirement to your application's root `composer.json`, preserving existing entries and replacing the example hash with the commit you want:
 
 ```json
 {
@@ -35,12 +35,12 @@ Until the Packagist listing exists, install the same tag from the repository ins
     }
   ],
   "require": {
-    "cristiangirlea/php-python-ai-bridge": "0.4.0"
+    "cristiangirlea/php-python-ai-bridge": "dev-main#<commit-hash>"
   }
 }
 ```
 
-Then run `composer update cristiangirlea/php-python-ai-bridge --no-scripts --no-plugins`. Either way, review and commit the resulting `composer.lock` to pin the installed revision. These commands deliberately skip application hooks/plugins; perform any reviewed framework setup separately in your isolated application environment. A tagged version needs no `minimum-stability` change. See [Composer's VCS repository documentation](https://getcomposer.org/doc/05-repositories.md#vcs).
+Then run `composer update cristiangirlea/php-python-ai-bridge --no-scripts --no-plugins`. Either way, review and commit the resulting `composer.lock` to pin the installed revision. These commands deliberately skip application hooks/plugins; perform any reviewed framework setup separately in your isolated application environment. A tagged version needs no `minimum-stability` change; the `dev-main` requirement permits this development version explicitly. See [Composer's VCS repository documentation](https://getcomposer.org/doc/05-repositories.md#vcs).
 
 A clean Composer installation of the library is checked on every push to `main` and every pull request: CI's `composer-install` service validates `composer.json` strictly, then installs the library's `git archive` zip into a throwaway consumer project from an `artifact` repository (or from a path repository in a git worktree whose git directory is outside the mount), offline, checks what shipped in `vendor/`, and autoloads the client; see [testing](testing.md#what-the-tests-establish). That proves the package installs and autoloads, not that any framework boots with it.
 
@@ -285,7 +285,7 @@ PHP objects reused by a long-lived worker must not retain per-user inputs, authe
 | `transport_error` during submission | Response unknown; a job may have been created | Resubmit with the same `idempotencyKey` while the job would still be retained; never retry without one |
 | `http_error`, status 401 | Service credentials rejected | Fix server-side configuration, do not forward service secrets |
 | `http_error`, status 400/413 | Invalid or oversized request | Reject/correct input |
-| `http_error`, status 429 | Total queued/running/retained capacity exhausted; no job was created | Apply backpressure; resubmit no sooner than `retryAfterSeconds` (below). Completed retained jobs also occupy capacity |
+| `http_error`, status 429 | Active job capacity, retained-result capacity, or the per-owner limit exhausted; no job was created | Apply backpressure; resubmit no sooner than `retryAfterSeconds` (below) |
 | `invalid_response` | Peer violated the client contract | Treat as an integration failure, not a valid task result |
 | Terminal `failed` or `timed_out` | Task did not succeed | Report a safe failure; retries require an application policy |
 
@@ -310,5 +310,14 @@ try {
 The current default limits are two warm task processes, 128 total job slots and 300 seconds of terminal retention. These are settings, not measured throughput or a production SLA. The model profile keeps one task process, which loads each model on its first job of that kind and keeps it.
 
 ## Before shipping a framework integration
+
+For ONNX reranking, the operator selects `BRIDGE_RERANK_MODEL=tinybert|minilm-l6|bge-base`
+on the worker, including the published `model-worker-image` service. The two MiniLM names
+serve different tasks: the selectable int8 cross-encoder reranks query/passage pairs;
+the embedding model produces vectors. Choose using [the domain measurements](testing.md#reranker-comparison-on-squad-v11):
+SQuAD tests question-to-passage retrieval, while TinyBERT falls below BM25 on ArguAna-style
+argument retrieval. Measure the application's own candidates, memory and p95 latency
+before switching; the selection and the returned `model` are worker settings, independent
+of the PHP client.
 
 Run a fresh Composer installation, framework container boot/configuration-cache tests, authenticated submit/status/cancel tests, cross-user ownership rejection and reused-worker isolation tests in your target PHP/framework versions. Test the real model if enabled. See [verification status and missing measurements](testing.md). Do not add Messenger or Laravel queue retries without an idempotency key per message, or uncertain submission outcomes become duplicate work.

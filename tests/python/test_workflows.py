@@ -101,6 +101,39 @@ def inputs(step: list) -> list:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_publishing_requires_a_read_only_quality_gate(self):
+        found = jobs((REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8"))
+        self.assertIn("needs: [quality]", found["publish"])
+        gate = "\n".join(found["quality"])
+        self.assertIn("contents: read", gate)
+        self.assertNotIn(": write", gate)
+        self.assertIn("RELEVANCE_DATASET: squad", gate)
+        self.assertIn('RELEVANCE_GATE: "1"', gate)
+        self.assertIn("python scripts/relevance_measure.py", gate)
+        self.assertNotIn("if:", "\n".join(found["publish"]))
+        for name, lines in found.items():
+            if any(line.endswith(": write") for line in lines):
+                self.assertIn("needs: [quality]", lines, name)
+
+    def test_model_workers_disable_swap_and_release_passes_selection(self):
+        text = (REPO / "docker/compose.yaml").read_text(encoding="utf-8")
+        for name in ("model-worker", "model-worker-image"):
+            block = re.search(rf"^  {name}:.*?(?=^  [\w-]+:|\Z)", text, re.MULTILINE | re.DOTALL).group()
+            self.assertIn("mem_limit: 1536m", block)
+            self.assertIn("memswap_limit: 1536m", block)
+            self.assertIn("BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}", block)
+
+    def test_quantized_models_run_score_and_order_parity_in_model_job(self):
+        text = (REPO / ".github/workflows/model-smoke.yml").read_text(encoding="utf-8")
+        model = "\n".join(jobs(text)["model"])
+        self.assertIn("for choice in minilm-l6 bge-base", model)
+        self.assertIn("model-test sh -ec 'php tests/php/model_selected.php; php tests/php/model_parity.php'", model)
+
+    def test_mcp_model_client_receives_the_workers_selection(self):
+        text = (REPO / "docker/compose.yaml").read_text(encoding="utf-8")
+        block = re.search(r"^  mcp-model:.*?(?=^  [\w-]+:|\Z)", text, re.MULTILINE | re.DOTALL).group()
+        self.assertIn("BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}", block)
+
     def test_the_workflows_are_found(self):
         self.assertEqual([path.name for path in WORKFLOWS], ["codeql.yml", "model-smoke.yml", "publish.yml", "tests.yml"])
         for path in WORKFLOWS:
@@ -287,8 +320,23 @@ jobs:  # the jobs
 
     def test_the_gate_requires_the_image_builds(self):
         found = jobs((REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"), "tests.yml")
-        self.assertIn("needs: [php, mcp, images]", found["deterministic"])
+        self.assertIn("needs: [php, mcp, images, drills]", found["deterministic"])
         self.assertTrue(any('"$IMAGES_RESULT" = success' in line for line in found["deterministic"]))
+
+    def test_the_gate_requires_failure_drills_and_promtool(self):
+        found = jobs((REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8"), "tests.yml")
+        gate = "\n".join(found["deterministic"])
+        self.assertIn("DRILLS_RESULT: ${{ needs.drills.result }}", gate)
+        self.assertIn('"$DRILLS_RESULT" = success', gate)
+        drill = "\n".join(found["drills"])
+        self.assertIn("run: sh scripts/failure_drills.sh", drill)
+        self.assertIn("run --rm --no-deps promtool", drill)
+        self.assertIn("if: always()", drill)
+        self.assertIn("--profile drills down -v", drill)
+        compose = (REPO / "docker/compose.yaml").read_text(encoding="utf-8")
+        self.assertRegex(compose, r"image: prom/prometheus:v[0-9.]+@sha256:[a-f0-9]{64}\n")
+        self.assertIn("promtool check rules deploy/prometheus/alerts.yml", compose)
+        self.assertIn("promtool test rules deploy/prometheus/alerts.test.yml", compose)
 
     def test_images_are_published_from_tags_with_the_job_token_only(self):
         # A pull request or a branch push must never reach a step that can write packages or releases.
@@ -343,6 +391,85 @@ jobs:  # the jobs
                     text,
                 )
         self.assertEqual(text.count("package-ecosystem:"), 3)
+
+    def test_packagist_install_job_and_triggers(self):
+        text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
+        triggers = re.search(r"^on:\n(.*?)^\S", text, re.M | re.S)
+        self.assertIsNotNone(triggers)
+        self.assertEqual(triggers.group(1), """  workflow_dispatch:
+  push:
+    tags: ['v*']
+  # Weekly, so a change upstream (a pinned file removed, a wheel yanked) is noticed without a PR.
+  # GitHub runs schedules on the default branch only and pauses them after 60 days without commits.
+  schedule:
+    - cron: "17 6 * * 1"
+  # Any change that can alter model acquisition or inference. Not a required check: it downloads
+  # model files and needs the network, which the deterministic gate deliberately does not.
+  pull_request:
+    paths:
+      - scripts/fetch_model.py
+      - requirements-model.txt
+      - requirements-model.lock
+      - worker/ai_bridge/tasks.py
+      # The worker pool that runs every model job.
+      - worker/ai_bridge/jobs.py
+      # The worker's HTTP handling, which every model test and the MCP workers' health check go through.
+      - worker/ai_bridge/server.py
+      # Imported by both: the counters and the log lines every model job passes through.
+      - worker/ai_bridge/metrics.py
+      - worker/ai_bridge/log.py
+      - scripts/benchmark.py
+      - scripts/ner_measure.py
+      - scripts/relevance_measure.py
+      - scripts/rerank_reference.py
+      - tests/fixtures/rerank-fp32.json
+      - tests/php/model_parity.php
+      - tests/python/test_reranker_review.py
+      - tests/python/test_relevance_measure.py
+      - tests/python/test_fetch_model.py
+      - tests/python/test_public_data.py
+      - scripts/public_data.py
+      - tests/fixtures/ner-sample.json
+      - tests/php/model.php
+      - tests/php/model_selected.php
+      - tests/model_integration.py
+      # What those smoke tests run through: the shared HTTP helpers, the PHP client and the demo route.
+      - tests/integration.py
+      - src/**
+      - examples/bootstrap.php
+      - examples/frankenphp/**
+      - scripts/run_frankenphp.sh
+      # The MCP server with the models behind it, and the probe that drives it over stdio.
+      - mcp_server/**
+      - requirements-mcp.lock
+      - scripts/mcp_stdio_onnx.sh
+      - tests/mcp_model_probe.py
+      - tests/mcp/fixtures/eval/**
+      - tests/mcp/semantic_reach.py
+      - tests/mcp/evaluation-semantic.xml
+      - tests/model_cases.py
+      - docker/compose.yaml
+      - .github/workflows/model-smoke.yml
+      # Audited by the audit job below, with the two Python locks above.
+      - composer.lock
+      - .github/audit-ignore.txt
+      - .github/scripts/audit.sh
+
+""")
+        found = jobs(text)
+        self.assertIn("if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'", found["packagist"])
+        for name in ("model", "audit"):
+            self.assertIn("if: github.event_name != 'push'", found[name])
+        for name in ("load",):
+            self.assertIn("if: github.event_name == 'workflow_dispatch'", found[name])
+        job = "\n".join(found["packagist"])
+        for forbidden in ("uses:", "container:", "services:", "env:", "secrets.", "github.token"):
+            self.assertNotIn(forbidden, job)
+        self.assertIn("timeout-minutes: 10", job)
+        self.assertIn("composer require cristiangirlea/php-python-ai-bridge:^0.4 --no-scripts --no-plugins", job)
+        self.assertIn("class_exists(PhpAiBridge\\Client::class)", job)
+        self.assertIn("PhpAiBridge\\Client::MAX_DOCUMENTS === 512", job)
+        self.assertIn("docker run --rm --network bridge composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac sh -ec '", job)
 
     def test_the_audit_job_runs_the_audit_script(self):
         text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")

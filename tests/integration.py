@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 BASE = os.environ.get("FRANKENPHP_URL", "http://frankenphp:8080")
 WORKER = os.environ.get("WORKER_URL", "http://worker:8090")
 TOKENS_WORKER = os.environ.get("TOKENS_WORKER_URL", "http://tokens-worker:8090")
-# BRIDGE_OWNER_CAPACITY and BRIDGE_CAPACITY of tokens-worker in docker/compose.yaml.
+# BRIDGE_OWNER_CAPACITY and BRIDGE_RESULT_CAPACITY of tokens-worker in docker/compose.yaml.
 OWNER_CAPACITY, CAPACITY = 8, 12
 
 
@@ -110,11 +110,18 @@ def owner_capacity():
     rerank = {"task": "rerank", "input": {"query": "needle", "documents": ["needle"]}}
     keyed = dict(rerank, idempotency_key="python-cap-" + os.urandom(8).hex())
     first = None
+    def wait_retained(token, job):
+        deadline = time.monotonic() + 30
+        while call(token, "GET", "/v1/jobs/" + job["id"])[1]["status"] not in ("succeeded", "failed", "cancelled", "timed_out"):
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+
     for _ in range(OWNER_CAPACITY + 1):
         status, retry_after, body = submit(app, rerank if first else keyed)
         if status != 202:
             break
         first = first or body
+        wait_retained(app, body)
     assert first is not None and (status, body["error"]["code"]) == (429, "capacity_exceeded"), status
     assert 1 <= int(retry_after) <= 300, retry_after
     status, _, again = submit(app, keyed)
@@ -125,6 +132,7 @@ def owner_capacity():
         if status != 202:
             break
         accepted += 1
+        wait_retained(other, body)
     assert accepted >= 1 and status == 429, (accepted, status)
     _, moved = metrics(other, TOKENS_WORKER)
     assert held(moved, "app") == OWNER_CAPACITY, held(moved, "app")

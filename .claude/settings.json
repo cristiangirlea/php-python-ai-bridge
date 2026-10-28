@@ -7,6 +7,11 @@
   },
   "permissions": {
     "allow": [
+      "Bash(sh scripts/failure_drills.sh)",
+      "Bash(bash scripts/failure_drills.sh)",
+      "Bash(docker compose -p bridge-drills -f docker/compose.yaml --profile drills config -q)",
+      "Bash(docker compose -p bridge-drills -f docker/compose.yaml --profile drills run --rm --no-deps promtool)",
+      "Bash(docker compose -p bridge-drills -f docker/compose.yaml --profile drills down -v)",
       "Bash(docker compose -f docker/compose.yaml config)",
       "Bash(docker compose -f docker/compose.yaml --profile * config)",
       "Bash(docker compose -f docker/compose.yaml run --rm --no-deps python-tests)",
@@ -67,6 +72,11 @@
       "Bash(gh run list *)",
       "Bash(gh workflow view *)",
       "Bash(gh workflow list *)",
+      "PowerShell(sh scripts/failure_drills.sh)",
+      "PowerShell(bash scripts/failure_drills.sh)",
+      "PowerShell(docker compose -p bridge-drills -f docker/compose.yaml --profile drills config -q)",
+      "PowerShell(docker compose -p bridge-drills -f docker/compose.yaml --profile drills run --rm --no-deps promtool)",
+      "PowerShell(docker compose -p bridge-drills -f docker/compose.yaml --profile drills down -v)",
       "PowerShell(docker compose -f docker/compose.yaml config)",
       "PowerShell(docker compose -f docker/compose.yaml --profile * config)",
       "PowerShell(docker compose -f docker/compose.yaml run --rm --no-deps python-tests)",

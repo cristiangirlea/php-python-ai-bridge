@@ -229,6 +229,7 @@ class TableTests(unittest.TestCase):
     def test_the_limits_line_names_the_worker_measured(self):
         header = {"date": "d", "commit": "c", "runner": "r", "cpu": "p", "case": "rerank", "seconds": 1.0}
         onnx = load.render(dict(header, backend="onnx", base="http://model-worker:8090"), [])
+        self.assertIn("active capacity 128 jobs, result capacity 384 jobs", onnx)
         self.assertIn("model-worker cpus=1, mem_limit=1536m, BRIDGE_CONCURRENCY=1", onnx)
         other = load.render(dict(header, backend=None, base="http://127.0.0.1:8090"), [])
         self.assertIn("not read by this script", other)

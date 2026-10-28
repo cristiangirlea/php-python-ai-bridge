@@ -147,7 +147,8 @@ class DatasetTests(unittest.TestCase):
         self.assertFalse(measure.quality_gate("squad", rows))
         rows[1] = ("BM25, reranked", 200, 0.5, 0, 0, 0)
         self.assertTrue(measure.quality_gate("squad", rows))
-        self.assertTrue(measure.quality_gate("arguana", rows))
+        with self.assertRaisesRegex(ValueError, "requires squad"):
+            measure.quality_gate("arguana", rows)
 
     def test_the_beir_layout_is_read(self):
         data = archive(

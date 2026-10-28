@@ -4,9 +4,24 @@
     # Only the port 80 redirect goes: `auto_https off` would also stop Caddy issuing the `tls internal` certificate.
     auto_https disable_redirects
     skip_install_trust
+    servers {
+        max_header_size 16384
+        timeouts {
+            read_header 5s
+            read_body 5s
+            write 10s
+            idle 5s
+        }
+    }
 }
 
 tls-proxy:8443 {
     tls internal
-    reverse_proxy worker:8090
+    request_body {
+        max_size 262144
+    }
+    reverse_proxy worker:8090 {
+        # Buffer the bounded body before dialing upstream, so a rejected upload never reaches the worker.
+        request_buffers 262145
+    }
 }
