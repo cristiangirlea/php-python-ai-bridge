@@ -1,4 +1,5 @@
-"""Optional structured logging: JSON lines on stderr with BRIDGE_LOG=json, nothing at all with off (the default).
+"""Optional structured logging: JSON lines on stderr with BRIDGE_LOG=json, no event lines with off (the default).
+The server may still write a plain network-boundary startup warning with logging off.
 A line holds only its event's schema keys, each value from a fixed set, a number, a job ID or a token's name, so no
 input, result, header, query string, token, error message or exception text can reach it, whatever a caller passes.
 Writing happens on a thread of its own behind a bounded queue: a stderr that blocks or fails never holds or fails a
@@ -18,12 +19,14 @@ from typing import Any, TextIO, cast
 from .tasks import MODEL_NAMES, TEST_TASKS
 
 MODES = ("off", "json")
+NETWORK_WARNING = ("Use a TLS reverse proxy with HTTP normalisation and limits, or a co-located client on a private "
+                   "interface; set BRIDGE_TRUST_NETWORK=1 to acknowledge")
 # Every key a line of each event carries, in this order, null when not given or not valid.
 EVENTS = {
     "request": ("method", "route", "status", "duration_ms", "owner"),
     "job": ("job_id", "task", "owner", "job_status", "queue_ms", "run_ms"),
     "start": ("backend", "concurrency", "capacity", "result_capacity", "owner_capacity", "retention_seconds", "max_jobs", "drain_seconds",
-              "tokens"),
+              "tokens", "network_warning"),
     "stop": ("cancelled",),
     "drain": ("duration_ms", "running", "interrupted"),
 }
@@ -62,6 +65,7 @@ _VALID: dict[str, Callable[[object], bool]] = {
     "backend": _among(MODEL_NAMES), "retention_seconds": _duration,
     "concurrency": _count, "capacity": _count, "result_capacity": _count, "owner_capacity": _count, "max_jobs": _count, "drain_seconds": _count,
     "tokens": _count,
+    "network_warning": _among((NETWORK_WARNING,)),
     "cancelled": _count, "running": _count, "interrupted": lambda value: type(value) is bool,
 }
 

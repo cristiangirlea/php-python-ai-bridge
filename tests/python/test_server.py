@@ -27,6 +27,52 @@ from test_log import parse as parse_log
 TOKEN = "test-only-bridge-token-never-use-in-production"
 
 
+class NetworkStartTests(unittest.TestCase):
+    def start(self, host, trust=None, mode="off"):
+        environment = {"BRIDGE_TOKEN": TOKEN, "BRIDGE_LOG": mode}
+        if trust is not None:
+            environment["BRIDGE_TRUST_NETWORK"] = trust
+        stream = io.StringIO()
+        with patch.dict(os.environ, environment, clear=True), contextlib.redirect_stderr(stream), \
+                patch.object(sys, "argv", ["ai_bridge.server", "--host", host, "--port", "0"]), \
+                patch.object(server, "BridgeServer", return_value=MagicMock()), patch.object(server.signal, "signal"):
+            server.main()
+        return stream.getvalue()
+
+    def test_non_loopback_warns_once_in_plain_stderr(self):
+        for host in ("0.0.0.0", "::", "192.168.1.2", "example.internal"):
+            for trust in (None, "", "0"):
+                with self.subTest(host=host, trust=trust):
+                    text = self.start(host, trust)
+                    self.assertEqual(len(text.splitlines()), 1)
+                    self.assertIn("reverse proxy", text)
+                    self.assertIn("private interface", text)
+                    self.assertIn("BRIDGE_TRUST_NETWORK=1", text)
+                    self.assertNotIn(host, text)
+
+    def test_loopback_and_explicit_trust_are_quiet(self):
+        for host, trust in (("127.0.0.1", None), ("127.99.1.2", "0"), ("::1", ""),
+                            ("0.0.0.0", "1"), ("::", "1")):
+            with self.subTest(host=host, trust=trust):
+                self.assertEqual(self.start(host, trust), "")
+
+    def test_json_start_warning_names_the_fixed_rule_and_variable(self):
+        lines = parse_log(self.start("0.0.0.0", mode="json"))
+        start = next(line for line in lines if line["event"] == "start")
+        self.assertEqual(start["level"], "warning")
+        self.assertEqual(start["network_warning"],
+                         "Use a TLS reverse proxy with HTTP normalisation and limits, or a co-located client on a private interface; set BRIDGE_TRUST_NETWORK=1 to acknowledge")
+        self.assertIsNone(parse_log(self.start("127.0.0.1", mode="json"))[0]["network_warning"])
+        self.assertIsNone(parse_log(self.start("0.0.0.0", "1", "json"))[0]["network_warning"])
+
+    def test_invalid_trust_stops_before_building_the_server(self):
+        for value in ("true", "yes", "2", "-1", " 1", "1\n"):
+            with self.subTest(value=value), patch.object(server, "BridgeServer") as built:
+                with self.assertRaisesRegex(SystemExit, "BRIDGE_TRUST_NETWORK"):
+                    self.start("127.0.0.1", value)
+                built.assert_not_called()
+
+
 class HttpTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1496,7 +1542,7 @@ class LoggingHttpTests(unittest.TestCase):
                  ("GET", "/v1/jobs/" + job_id, None, 404), ("POST", "/v1/jobs/" + job_id + "/cancel", "{}", 404),
                  ("POST", "/v1/jobs", "{}", 400), ("GET", "/" + SENTINEL, None, 404),
                  ("GET", "/healthz?" + SENTINEL, None, 404), ("GET", "/v1/jobs/" + SENTINEL, None, 404),
-                 ("DELETE", "/v1/jobs", None, 501)]
+                 ("DELETE", "/v1/jobs", None, 405)]
         for method, path, body, status in calls:
             connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
             try:
@@ -1513,7 +1559,7 @@ class LoggingHttpTests(unittest.TestCase):
                          [("GET", "/healthz"), ("GET", "/readyz"), ("GET", "/metrics"), ("GET", "/v1/jobs/{id}"),
                           ("POST", "/v1/jobs/{id}/cancel"), ("POST", "/v1/jobs"), ("GET", "other"), ("GET", "other"),
                           ("GET", "other"), ("other", "/v1/jobs")])
-        self.assertEqual([line["status"] for line in requests][3:], [404, 404, 400, 404, 404, 404, 501])
+        self.assertEqual([line["status"] for line in requests][3:], [404, 404, 400, 404, 404, 404, 405])
         # The unsupported method is refused before authentication, so it has no owner.
         self.assertEqual([line["owner"] for line in requests], ["app"] * 9 + [None])
         self.assertEqual([line["level"] == "warning" for line in requests], [line["status"] >= 500 for line in requests])
@@ -1644,9 +1690,9 @@ class LoggingHttpTests(unittest.TestCase):
         self.assertEqual(self.lines(), [])
 
     def test_a_head_refused_without_a_body_is_logged(self):
-        self.assertEqual(exchange(self.server.server_address, b"HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n")[0], 501)
+        self.assertEqual(exchange(self.server.server_address, b"HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n")[0], 405)
         self.assertEqual([(line["method"], line["route"], line["status"]) for line in self.lines()],
-                         [("other", "/healthz", 501)])
+                         [("other", "/healthz", 405)])
 
     def test_a_drain_thread_held_past_the_stop_s_wait_writes_no_line_after_it(self):
         snapshot = self.server.jobs.snapshot
@@ -1723,7 +1769,9 @@ class LoggingOffTests(unittest.TestCase):
 
     def test_requests_and_jobs_build_no_line(self):
         with patch.object(server.Handler, "_method") as method, patch.object(server.Handler, "_route") as route, \
-                patch.object(log, "event") as event, patch.object(server, "time", MagicMock(wraps=time)) as clock:
+                patch.object(log, "event") as event, \
+                patch.object(log, "enabled", return_value=False) as enabled, \
+                patch("ai_bridge.server.round", create=True) as duration:
             connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
             try:
                 connection.request("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {"seconds": 0}}),
@@ -1741,7 +1789,8 @@ class LoggingOffTests(unittest.TestCase):
         method.assert_not_called()
         route.assert_not_called()
         event.assert_not_called()
-        clock.monotonic.assert_not_called()
+        enabled.assert_called()
+        duration.assert_not_called()
 
     def test_the_drain_takes_no_snapshot(self):
         with patch.object(self.server.jobs, "snapshot") as snapshot, patch.object(log, "event") as event:
@@ -1844,7 +1893,8 @@ class LoggingStartTests(unittest.TestCase):
         self.assertEqual([line["event"] for line in lines], ["start", "stop"])
         self.assertEqual({key: lines[0][key] for key in log.EVENTS["start"]},
                          {"backend": "lexical", "concurrency": 2, "capacity": 9, "result_capacity": 384, "owner_capacity": 3,
-                          "retention_seconds": 300.0, "max_jobs": 1000, "drain_seconds": 7, "tokens": 2})
+                          "retention_seconds": 300.0, "max_jobs": 1000, "drain_seconds": 7, "tokens": 2,
+                          "network_warning": None})
         self.assertEqual((lines[1]["cancelled"], lines[1]["level"]), (0, "info"))
         for value in (APP, OTHER, SENTINEL, "app"):
             self.assertNotIn(value, text)

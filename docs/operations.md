@@ -6,6 +6,12 @@ Some of what follows is available since 0.4.0 ([CHANGELOG.md](../CHANGELOG.md)):
 
 ## 1. Deployment topologies
 
+The worker uses the standard library's `http.server`. It is supported only behind a reverse proxy that terminates TLS, normalises HTTP and enforces its own limits (the TLS example's Caddy or the operator's equivalent), or bound to loopback or a private interface for a co-located client. It is not supported as a directly exposed HTTP server. `--host` still defaults to `127.0.0.1`.
+
+Binding a non-loopback address without `BRIDGE_TRUST_NETWORK=1` writes one start warning on stderr explaining that rule. With `BRIDGE_LOG=json` it is the `start` line at warning level, with the fixed `network_warning` field; otherwise it is one plain line even when logging is off. Set `BRIDGE_TRUST_NETWORK=1` only to acknowledge that the deployment satisfies the rule; it does not add network protection. Unset, empty and `0` leave the warning enabled; any other value stops startup naming the variable. Compose acknowledges its private internal network explicitly. Hostnames are conservatively treated as non-loopback.
+
+The TLS example caps request bodies at 262144 bytes and buffers them before contacting the worker, caps headers at 16384 bytes, and sets five-second header/body read and idle timeouts and a ten-second write timeout. Apply equivalent limits to an operator-managed proxy; tune them deliberately with the worker's limits in mind.
+
 **A sidecar for one application.** One worker next to one application on a private network, no published port, one token. This is what `docker/compose.yaml` runs (`worker` beside `frankenphp`) and what [the published image](../README.md#run-the-published-image) runs with `docker run --network <internal network>`. The client points at `http://worker:8090`.
 
 **A shared worker behind TLS.** When clients run on other hosts, put a TLS proxy in front of the worker on the worker's host; compose's `tls` profile is the worked example (`tls-proxy` runs Caddy with `examples/tls/Caddyfile`), and [Cross-host use behind TLS](integration.md#cross-host-use-behind-tls) says what to change for production (a real certificate, the client configured with `https://` only, a proxy that never logs `Authorization`):
@@ -13,8 +19,11 @@ Some of what follows is available since 0.4.0 ([CHANGELOG.md](../CHANGELOG.md)):
 ```sh
 docker compose -f docker/compose.yaml --profile tls up -d tls-proxy worker
 docker compose -f docker/compose.yaml run --rm --no-deps tls-check
+docker compose -f docker/compose.yaml logs --no-log-prefix --no-color worker | docker compose -f docker/compose.yaml run --rm --no-deps -T tls-check php tests/php/tls.php request-log
 docker compose -f docker/compose.yaml --profile tls down -v
 ```
+
+Compose's worker enables JSON logging for these checks. The oversized POST leaves submitted-job counters unchanged; the log check requires both bracketing metrics requests and no worker request between them.
 
 Give each client its own token through `BRIDGE_TOKENS_FILE` or `BRIDGE_TOKENS` (section 4), each under its own name, and the MCP server a token of its own. Better still, give the MCP server a dedicated worker, as compose's `mcp-worker` is: an agent can be prompt-injected into filling a worker's capacity ([security](security.md)).
 
@@ -45,7 +54,7 @@ In a lexical-worker container, the parent process's `/proc/self/status` RSS grew
 
 **Drain deadline.** `BRIDGE_DRAIN_SECONDS` (integer 0 to 300, default 30) is how long running jobs may finish after SIGTERM. Give the container runtime a stop timeout longer than it (Docker's default is 10 s: `docker stop -t 40`, or `stop_grace_period` in compose), or the runtime kills the drain short.
 
-**Request limits** (`server.py`, `tasks.py`): a body of at most 262144 bytes (413 beyond), a request line of 8192 bytes and a header block of 16384 (431 beyond), a body that stalls for five seconds gets 408. Rerank takes 1 to 512 documents, embed 1 to 32 texts, both at most 200000 characters in all; redact one text of 1 to 8192 characters. `timeout_ms` is 100 to 300000, default 30000, and counts queue time. A child is replaced after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000).
+**Request limits** (`server.py`, `tasks.py`): a body of at most 262144 bytes (413 beyond), a request line of 8192 bytes and a header block of 16384 (431 beyond), five-second total read budgets for the request line plus headers and then the body, even for clients sending one byte per second (a header timeout closes the connection; a body timeout gets 408). Rerank takes 1 to 512 documents, embed 1 to 32 texts, both at most 200000 characters in all; redact one text of 1 to 8192 characters. `timeout_ms` is 100 to 300000, default 30000, and counts queue time. A child is replaced after `BRIDGE_WORKER_MAX_JOBS` jobs (default 1000).
 
 ## 3. State
 

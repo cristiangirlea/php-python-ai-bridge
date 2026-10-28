@@ -8,6 +8,9 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
+- A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.
+- Reproducible raw-socket request fuzzing: a fixed corpus followed by fresh seeded multi-byte flips, inserts, deletes and splices, with `BRIDGE_FUZZ_SECONDS` for longer runs and distinct-input counts; slow-client connection-budget recovery tests.
+- Body and header limits and read/write timeouts in the Caddy TLS example; oversized bodies are rejected before contacting the worker.
 - Seven no-model failure drills on dedicated compose peers, with bounded standard-library HTTP probes, offline verdict tests and an explicit start-crash-loop skip. CI's required deterministic gate includes the drills and digest-pinned promtool syntax and behavior checks of the seven example alert rules.
 - Example Prometheus alert rules and a Grafana dashboard, with starting targets and import instructions in the operations guide.
 - The start log line includes `result_capacity`.
@@ -15,6 +18,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
+- State the supported deployment: behind a TLS reverse proxy that normalises HTTP and enforces limits, or on loopback/a private interface for a co-located client.
+- Parser refusals use fixed JSON errors (400, 405 or 431); ambiguous framing, folded headers and control bytes are refused. Five-second header and body read budgets also stop clients that keep trickling bytes.
 - At the active limit, `Retry-After` estimates queue drain time from the median run time (start to finish) of the 100 most recent jobs that started.
 - `BRIDGE_OWNER_CAPACITY` now permits values up to the sum of active and result capacities. When unset, the start log line reports that sum as `owner_capacity`.
 - `BRIDGE_CAPACITY` now limits queued and running jobs. Deployments that tuned it to bound memory should also set `BRIDGE_RESULT_CAPACITY`.
