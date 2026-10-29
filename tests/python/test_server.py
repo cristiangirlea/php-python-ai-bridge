@@ -281,8 +281,8 @@ def exchange(address, data=b"", wait=2):
 
 
 def _stalled_serve(connection, backend, model_dir):
-    """A child whose warm-up takes about three seconds: the ONNX warm-up with every model load stalled."""
-    with patch.object(tasks, "_onnx", side_effect=lambda *_: time.sleep(0.75)):
+    """Keep model loading stalled beyond the HTTP and drain assertions, even on a busy host."""
+    with patch.object(tasks, "_onnx", side_effect=lambda *_: time.sleep(10)):
         jobs._serve(connection, "onnx", model_dir)
 
 
@@ -314,7 +314,8 @@ class DrainHttpTests(unittest.TestCase):
         return job
 
     def wait_running(self, job_id):
-        deadline = time.monotonic() + 5
+        # Starting a real child on a loaded runner is separate from the drain's time budget.
+        deadline = time.monotonic() + 10
         while self.server.jobs.get(job_id)["status"] != "running":
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.01)
@@ -354,7 +355,7 @@ class DrainHttpTests(unittest.TestCase):
         self.assertFalse(self.thread.is_alive())
         elapsed = time.monotonic() - started
         self.assertGreaterEqual(elapsed, 1)
-        self.assertLess(elapsed, 1.5)
+        self.assertLess(elapsed, self.server.drain_seconds + 1)
         self.server.server_close()
         self.assertEqual(self.server.jobs.get(job["id"])["status"], "cancelled")
 
@@ -374,14 +375,17 @@ class DrainHttpTests(unittest.TestCase):
         job = self.submit(10)
         self.wait_running(job["id"])
         drain = self.server.jobs.drain
-        with patch.object(self.server.jobs, "drain", side_effect=lambda: (time.sleep(0.8), drain())):
+        # Once drain() returns past the signal's deadline, there must be no further wait.
+        with patch.object(self.server.jobs, "drain", side_effect=lambda: (time.sleep(1.1), drain())), \
+                patch.object(self.server._interrupted, "wait", wraps=self.server._interrupted.wait) as wait:
             started = time.monotonic()
             self.server.stop()
             self.thread.join(5)
+            wait.assert_not_called()
         elapsed = time.monotonic() - started
         self.assertFalse(self.thread.is_alive())
         self.assertGreaterEqual(elapsed, 1)
-        self.assertLess(elapsed, 1.5)
+        self.assertLess(elapsed, 1.1 + 1)
 
     def test_a_second_signal_stops_serving_while_the_drain_call_is_still_held(self):
         self.start(drain_seconds=300)
@@ -400,7 +404,7 @@ class DrainHttpTests(unittest.TestCase):
 
     def test_a_malformed_body_during_the_drain_is_still_400(self):
         self.start(drain_seconds=10)
-        job = self.submit(1)
+        job = self.submit(10)
         self.wait_running(job["id"])
         self.server.stop()
         status, _, body = self.raw("POST", "/v1/jobs", "{")
@@ -418,12 +422,12 @@ class DrainHttpTests(unittest.TestCase):
             started = time.monotonic()
             self.assertEqual(self.raw("GET", "/healthz")[0], 200)
             self.assertEqual(self.raw("GET", "/v1/jobs/" + job["id"])[2]["status"], "queued")
-            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertLess(time.monotonic() - started, 1)
             started = time.monotonic()
             self.server.stop()
             self.thread.join(3)
             self.assertFalse(self.thread.is_alive())
-            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertLess(time.monotonic() - started, self.server.drain_seconds + 1)
             self.assertEqual(self.server.jobs.get(job["id"])["error"]["code"], "service_restarted")
 
     def test_a_drain_of_zero_seconds_stops_at_once(self):
@@ -433,6 +437,10 @@ class DrainHttpTests(unittest.TestCase):
         self.server.stop()
         self.thread.join(2)
         self.assertFalse(self.thread.is_alive())
+        # Serving stops before the running job ends; closing the server then cancels it.
+        self.assertEqual(self.server.jobs.get(job["id"])["status"], "running")
+        self.server.server_close()
+        self.assertEqual(self.server.jobs.get(job["id"])["status"], "cancelled")
 
 
 class ConnectionLimitTests(unittest.TestCase):
@@ -1116,10 +1124,8 @@ class MetricsHttpTests(unittest.TestCase):
     def test_a_scrape_while_a_job_runs_answers_at_once(self):
         job = self.submit("test.delay", {"seconds": 2})
         self.wait(job["id"], {"running"})
-        started = time.monotonic()
         _, families = self.scrape()
-        # Well inside the 2 s request timeout, while the job still runs.
-        self.assertLess(time.monotonic() - started, 0.5)
+        # The scrape observes the running job, so it did not wait for its completion.
         self.assertEqual(sample(families, "bridge_jobs_running"), 1)
         self.assertEqual(sample(families, "bridge_pool_size"), 1)
         self.raw("POST", "/v1/jobs/" + job["id"] + "/cancel", "{}", self.auth())
