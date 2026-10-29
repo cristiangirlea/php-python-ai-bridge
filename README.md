@@ -24,7 +24,7 @@ The default backends are **`lexical-demo-not-a-model`** for reranking and **`has
 
 ## Try it with Docker
 
-Requirements: Docker Engine/Desktop with Linux containers and Docker Compose. The provided images and model wheel lock target **Linux x86_64 / Python 3.12**; the [published worker images](#run-the-published-image) and the lock also cover arm64, which the tests do not run. No local PHP or Python installation is needed.
+Requirements: Docker Engine/Desktop with Linux containers and Docker Compose. The provided images and model wheel lock target **Linux x86_64 / Python 3.12**; the [published worker images](#run-the-published-image) and the lock also cover arm64: CI builds and starts both images natively on arm64, without models, so no inference runs there. No local PHP or Python installation is needed.
 
 One Composer package supports PHP 8.2, 8.3, 8.4 and 8.5: the upstream-supported PHP branches as of September 2026. The default demo uses PHP 8.5; CI exercises all four branches. See [support policy and verification limits](docs/testing.md).
 
@@ -78,7 +78,7 @@ docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -v bridge-m
   ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:latest
 ```
 
-Compose's `release` profile runs the same images under the limits above: `BRIDGE_IMAGE_TAG=<version> docker compose -f docker/compose.yaml --profile release up -d worker-image` (or `model-worker-image`, which reads `.cache/models` from the `fetcher`). Each image carries build provenance and an SBOM; `gh attestation verify oci://ghcr.io/cristiangirlea/php-python-ai-bridge-worker:<version> --owner cristiangirlea` checks it. The arm64 images are built under emulation and not run by the tests.
+Compose's `release` profile runs the same images under the limits above: `BRIDGE_IMAGE_TAG=<version> docker compose -f docker/compose.yaml --profile release up -d worker-image` (or `model-worker-image`, which reads `.cache/models` from the `fetcher`). Each image carries build provenance and an SBOM; `gh attestation verify oci://ghcr.io/cristiangirlea/php-python-ai-bridge-worker:<version> --owner cristiangirlea` checks it. The published arm64 images are built under emulation; CI and a check before publishing build the same Dockerfiles natively on arm64 and start them, without models.
 
 ### Run the real model
 
