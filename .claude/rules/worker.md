@@ -14,8 +14,9 @@ paths:
 - Tasks are an allowlist in `tasks.py`, each with `validate()` before `execute()` and each run in its own
   process. Clients get fixed error codes, never exception text, and the token is never logged or returned.
   Test-only tasks exist only with `BRIDGE_TEST_TASKS=1` (compose's `fault-worker`).
-- `MODEL_NAMES` is what every result reports as `model` and what the MCP server's `BACKENDS` table must
-  equal (`tests/mcp/test_models.py`); change both together.
+- `MODEL_NAMES` derives the ONNX reranker name from `BRIDGE_RERANK_MODEL`; the MCP server's `BACKENDS`
+  matches for the same selection and its description lists every selectable model (`tests/mcp/test_models.py`).
+  Change both together; the result's `model` identifies the worker's selection even with a different MCP setting.
 - Limits live in three places: concurrency, capacity, the per-owner cap and retention are `Settings` in
   `jobs.py` (defaults from the environment in `server.main`), the body size and the token limits are
   `MAX_BODY`, `MAX_TOKENS`, `MAX_TOKENS_FILE` and `TOKEN_NAME` in `server.py`, and the field, count and

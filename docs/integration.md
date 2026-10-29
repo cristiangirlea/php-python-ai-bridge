@@ -332,4 +332,13 @@ The current default limits are two warm task processes, 128 total job slots and 
 
 ## Before shipping a framework integration
 
+For ONNX reranking, the operator selects `BRIDGE_RERANK_MODEL=tinybert|minilm-l6|bge-base`
+on the worker, including the published `model-worker-image` service. The two MiniLM names
+serve different tasks: the selectable int8 cross-encoder reranks query/passage pairs;
+the embedding model produces vectors. Choose using [the domain measurements](testing.md#reranker-comparison-on-squad-v11):
+SQuAD tests question-to-passage retrieval, while none of the three beats BM25 on ArguAna-style
+argument retrieval. Measure the application's own candidates, memory and p95 latency
+before switching; the selection and the returned `model` are worker settings, independent
+of the PHP client.
+
 Run a fresh Composer installation, framework container boot/configuration-cache tests, authenticated submit/status/cancel tests, cross-user ownership rejection and reused-worker isolation tests in your target PHP/framework versions. Test the real model if enabled. See [verification status and missing measurements](testing.md). Do not add Messenger or Laravel queue retries without an idempotency key per message, or uncertain submission outcomes become duplicate work.

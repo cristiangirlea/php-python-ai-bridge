@@ -9,7 +9,7 @@ on:
   schedule:
     - cron: "17 6 * * 1"
   # Any change that can alter model acquisition or inference. Not a required check: it downloads
-  # about 330 MB and needs the network, which the deterministic gate deliberately does not.
+  # model files and needs the network, which the deterministic gate deliberately does not.
   pull_request:
     paths:
       - scripts/fetch_model.py
@@ -25,9 +25,14 @@ on:
       - worker/ai_bridge/log.py
       - scripts/benchmark.py
       - scripts/ner_measure.py
+      - scripts/relevance_measure.py
+      - scripts/rerank_reference.py
+      - tests/fixtures/rerank-fp32.json
+      - tests/php/model_parity.php
       - scripts/public_data.py
       - tests/fixtures/ner-sample.json
       - tests/php/model.php
+      - tests/php/model_selected.php
       - tests/model_integration.py
       # What those smoke tests run through: the shared HTTP helpers, the PHP client and the demo route.
       - tests/integration.py
@@ -97,6 +102,20 @@ jobs:
           docker compose -f docker/compose.yaml up -d model-worker model-frankenphp
           docker compose -f docker/compose.yaml run --rm --no-deps model-test
           docker compose -f docker/compose.yaml run --rm --no-deps model-integration
+      - name: Selected rerankers through the PHP client
+        shell: bash
+        run: |
+          for choice in minilm-l6 bge-base; do
+            export BRIDGE_RERANK_MODEL="$choice"
+            case "$choice" in
+              minilm-l6) expected=Xenova/ms-marco-MiniLM-L-6-v2 ;;
+              bge-base) expected=Xenova/bge-reranker-base ;;
+            esac
+            docker compose -f docker/compose.yaml up -d --force-recreate model-worker
+            docker compose -f docker/compose.yaml run --rm --no-deps -e BRIDGE_RERANK_EXPECTED="$expected" model-test sh -ec 'php tests/php/model_selected.php; php tests/php/model_parity.php'
+          done
+          unset BRIDGE_RERANK_MODEL
+          docker compose -f docker/compose.yaml up -d --force-recreate model-worker
       # The MCP server a host starts with the models behind it, over stdio, including a search over an index the
       # embedding model built. The builder writes as the containers' UID, so the data directory is world-writable.
       - name: ONNX-backed MCP server end to end
@@ -137,9 +156,9 @@ jobs:
         if: always()
         run: docker compose -f docker/compose.yaml --profile model --profile mcp-model down
 
-  # Public, hash-pinned quality figures; on demand only, as some 2800 model jobs gate on nothing but succeeding.
+  # Public, hash-pinned quality figures on demand and at release, with SQuAD as the release threshold.
   quality:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -165,6 +184,12 @@ jobs:
           docker compose -f docker/compose.yaml up -d model-worker
           docker compose -f docker/compose.yaml run --rm --no-deps -T model-quality | tee quality.md
           { echo "## Quality on public datasets (informational)"; echo; cat quality.md; } >> "$GITHUB_STEP_SUMMARY"
+      - name: SQuAD release quality gate
+        shell: bash
+        env:
+          RELEVANCE_DATASET: squad
+          RELEVANCE_GATE: "1"
+        run: docker compose -f docker/compose.yaml run --rm --no-deps -T model-quality python scripts/relevance_measure.py
       - name: Service logs on failure
         if: failure()
         run: docker compose -f docker/compose.yaml --profile model logs --tail 100

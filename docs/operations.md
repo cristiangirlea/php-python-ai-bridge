@@ -78,6 +78,11 @@ Compose's `release` profile runs both images under the compose limits: `BRIDGE_I
 
 ## 2. Sizing
 
+`BRIDGE_RERANK_MODEL` selects the ONNX reranker: `tinybert` (default), `minilm-l6`, or `bge-base`.
+The selected model's files must be present in the model directory at startup. An unknown value stops startup.
+The alternatives have different memory and latency costs; measure them on the target host and data before use.
+MCP tool descriptions name the model selected by the MCP server's own `BRIDGE_RERANK_MODEL` and list all three choices; a result's `model` field identifies the worker's model.
+
 **Memory and CPU per child.** Each child loads its own copy of its backend's models ([memory](testing.md#measured-model-worker-memory-informational)). On the `onnx` backend one child holding all four models and running the widest rerank batch peaked at 1286 MiB, and the container at 1464 MiB, of which about 180 MiB is the container itself (the server, the resource tracker and the wheels in the `/deps` tmpfs). The compose `model-worker` limit of 1536 MiB therefore allows `BRIDGE_CONCURRENCY=1` and no more; two children need up to about 2.7 GiB before any margin. Over 4290 jobs of the load mix the container peak stayed at 1022 MiB ([load](testing.md#measured-throughput-and-latency-under-load-informational)). With one CPU, that single child served about 3.5 jobs/s of the rerank, embed and redact mix with admission relaxed; warm medians are 0.05 s for a rerank of 32 documents, 0.21 s for 512, 0.16 s for an embed of 32 texts and 0.68 s for a redaction of 2000 characters, ([latency](testing.md#measured-latency-informational)). That table's cold first jobs (0.79 s for rerank, 2.31 s for redaction) come from the earlier design, in which a child loaded each model on its first job of that kind; today a child of the `onnx` backend loads its models when it starts, before it reports ready (`_serve` in `jobs.py`), so loading delays readiness, not a job, and that start time has no measurement. The lexical worker (`worker`: one CPU, 512 MiB, `BRIDGE_CONCURRENCY=2`) has no memory measurement; with admission relaxed it reached 18 jobs/s from one client thread and 115 jobs/s from sixteen, with no error. A warm child holds two threads, so `pids_limit: 128` is far from reached ([task counts](testing.md#measured-task-counts-under-a-cancellation-burst-informational)).
 
 **Capacity and retention.** `BRIDGE_CAPACITY` (default 128) bounds queued and running jobs. `BRIDGE_RESULT_CAPACITY` (default 384) bounds retained finished jobs at admission; beyond either limit submissions get 429. A job that finishes while the result store is full is still retained. Retained results may exceed `BRIDGE_RESULT_CAPACITY` by at most `BRIDGE_CAPACITY`, and memory is bounded by the sum. Size the limits and retention together:
@@ -235,7 +240,27 @@ HTTP assertions and bounded polling live in `scripts/failure_drills.py` (standar
 | Jobs vanish or end `service_restarted` after a stop | The runtime killed the process (SIGKILL after its stop timeout, 10 s by default in Docker) before the drain ended | Nothing: no job is marked `cancelled`; with `BRIDGE_STATE_DIR` the next start fails the unfinished rows as `service_restarted`, without it every job is gone | Give the runtime a stop timeout longer than `BRIDGE_DRAIN_SECONDS` (section 2); clients resubmit |
 | 503 `service_busy` | 32 connections are open | Answers at once with `Retry-After: 1` | Find the client holding connections; put rate limiting in front of the worker |
 
-## 8. Versioning and support policy
+## 8. Selecting an ONNX reranker
+
+Set `BRIDGE_RERANK_MODEL` on the worker to `tinybert` (the default), `minilm-l6`, or
+`bge-base`, then recreate the worker. Compose passes it to `model-worker`, the MCP model
+worker and the release profile's `model-worker-image`. The fetcher acquires all three
+pinned models; inference is offline. Their query/passage batch sizes are 32, 8 and 4,
+respectively. All model workers have a 1536 MiB memory limit with swap disabled
+(`memswap_limit` equals `mem_limit`); an allocation beyond the limit can kill a child.
+
+Use [the candidate tables](testing.md#reranker-comparison-on-squad-v11) for each model's
+measured memory, median and p95 job time. On SQuAD, TinyBERT reaches NDCG@10 0.899 at
+0.42 s p95, MiniLM 0.942 at 2.14 s and BGE 0.650 at 9.45 s, against BM25's 0.843; all stay
+under 1.4 GiB on SQuAD; the measured worst case across both datasets is 1434 MiB (BGE on ArguAna). The candidate selection budget is p95 below
+2 seconds for one sequential job reranking the BM25 top 100 passages, with 200 queries
+and the worker's usual input limits; it is separate from the sustained-load target
+above. None of the three beats BM25 on ArguAna-style argument retrieval, so the question-to-passage
+results are not evidence for that domain. Benchmark the application's own retrieval data
+before choosing a larger reranker. MiniLM and BGE are Xenova int8 conversions; the
+[fp32 parity record](../tests/fixtures/rerank-fp32.md) states their score drift and limits.
+
+## 9. Versioning and support policy
 
 Releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and each is described in [CHANGELOG.md](../CHANGELOG.md). Before 1.0, a breaking change comes in a new minor version (0.3 to 0.4) and is listed under Changed or Removed; from 1.0, only in a new major version.
 

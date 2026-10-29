@@ -25,7 +25,7 @@ def pinned(data: bytes, licence: str = "CC-BY-4.0") -> dict:
 
 class PinTests(unittest.TestCase):
     def test_every_dataset_is_pinned_over_https_with_a_hash_a_size_and_a_free_licence(self):
-        self.assertEqual(set(public_data.DATASETS), {"arguana", "wnut17"})
+        self.assertEqual(set(public_data.DATASETS), {"arguana", "wnut17", "squad"})
         for name, entry in public_data.DATASETS.items():
             with self.subTest(dataset=name):
                 self.assertTrue(entry["url"].startswith("https://"))
