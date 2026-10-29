@@ -316,13 +316,15 @@ class DrainHttpTests(unittest.TestCase):
     def wait_running(self, job_id):
         # Starting a real child on a loaded runner is separate from the drain's time budget.
         deadline = time.monotonic() + 10
-        while self.server.jobs.get(job_id)["status"] != "running":
+        while (status := self.server.jobs.get(job_id)["status"]) != "running":
+            self.assertNotIn(status, jobs.TERMINAL, f"job became {status} before running was observed")
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.01)
 
     def test_a_running_job_finishes_inside_the_deadline_while_gets_answer_and_submissions_are_refused(self):
         self.start(drain_seconds=10)
-        job = self.submit(1)
+        # Leave time to observe running even if the polling thread stalls for a second.
+        job = self.submit(3)
         self.wait_running(job["id"])
         self.server.stop()
         status, headers, body = self.raw("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {}}))
@@ -338,12 +340,13 @@ class DrainHttpTests(unittest.TestCase):
 
     def test_a_queued_job_is_failed_as_service_restarted_at_once(self):
         self.start(drain_seconds=10)
-        running = self.submit(1)
+        running = self.submit(10)
         self.wait_running(running["id"])
         queued = self.submit(0)
         self.server.stop()
         _, _, job = self.raw("GET", "/v1/jobs/" + queued["id"])
         self.assertEqual((job["status"], job["error"]["code"]), ("failed", "service_restarted"))
+        self.server.stop()
 
     def test_the_deadline_ends_the_drain_and_the_running_job_as_today(self):
         self.start(drain_seconds=1)
@@ -409,6 +412,7 @@ class DrainHttpTests(unittest.TestCase):
         self.server.stop()
         status, _, body = self.raw("POST", "/v1/jobs", "{")
         self.assertEqual((status, body["error"]["code"]), (400, "invalid_request"))
+        self.server.stop()
 
     def test_a_child_still_loading_holds_neither_gets_nor_the_drain(self):
         with patch.object(jobs, "_serve", _stalled_serve):
@@ -618,8 +622,9 @@ class SignalShutdownTests(unittest.TestCase):
         body = json.dumps({"task": "test.delay", "input": {"seconds": seconds}})
         status, job = self.request("POST", "/v1/jobs", body)
         self.assertEqual(status, 202)
-        deadline = time.monotonic() + 5
-        while self.request("GET", "/v1/jobs/" + job["id"])[1]["status"] != "running":
+        deadline = time.monotonic() + 10
+        while (status := self.request("GET", "/v1/jobs/" + job["id"])[1]["status"]) != "running":
+            self.assertNotIn(status, jobs.TERMINAL, f"job became {status} before running was observed")
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.01)
         self.children = _children(self.process.pid)
@@ -645,11 +650,12 @@ class SignalShutdownTests(unittest.TestCase):
 
     def test_a_running_job_completes_and_submissions_meanwhile_are_503_draining(self):
         self.launch(drain_seconds=10)
-        job = self.run_job(1)
+        # Leave time to observe running even if the polling thread stalls for a second.
+        job = self.run_job(3)
         self.process.send_signal(signal.SIGTERM)
         status, body = self.request("POST", "/v1/jobs", json.dumps({"task": "test.delay", "input": {}}))
         self.assertEqual((status, body["error"]["code"]), (503, "draining"))
-        self.stopped([], within=3)
+        self.stopped([], within=5)
         with contextlib.closing(sqlite3.connect(self.database)) as database:
             self.assertEqual(database.execute("SELECT status FROM jobs WHERE id = ?", (job["id"],)).fetchone(),
                              ("succeeded",))
@@ -1124,7 +1130,9 @@ class MetricsHttpTests(unittest.TestCase):
     def test_a_scrape_while_a_job_runs_answers_at_once(self):
         job = self.submit("test.delay", {"seconds": 2})
         self.wait(job["id"], {"running"})
+        started = time.monotonic()
         _, families = self.scrape()
+        self.assertLess(time.monotonic() - started, 1)
         # The scrape observes the running job, so it did not wait for its completion.
         self.assertEqual(sample(families, "bridge_jobs_running"), 1)
         self.assertEqual(sample(families, "bridge_pool_size"), 1)
