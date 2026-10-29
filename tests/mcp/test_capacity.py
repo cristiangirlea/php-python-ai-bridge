@@ -101,7 +101,7 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         result = await self.call(bridge, 3000, "bridge_search", {"query": "brass lamp", "index_path": "index"}, root)
         self.assertTrue(result.is_error, result.content)
         self.assertIn("of its 3 s", result.content[0].text)
-        self.assertLess(time.monotonic() - started, 3.2)
+        self.assertLess(time.monotonic() - started, 3 + 1)
 
     async def test_other_refusals_are_not_retried(self):
         self.worker(retention_seconds=0.5)

@@ -999,18 +999,18 @@ class JobsTests(unittest.TestCase):
 
     def test_reads_and_submissions_are_not_held_up_by_a_child_being_started(self):
         release = threading.Event()
-        slow, starting, _ = self.slow_starts(release)
+        self.addCleanup(release.set)
+        slow, starting, made = self.slow_starts(release, longest=10)
         with slow:
             crashed = self.store.submit("test.crash", {})
             self.assertTrue(starting.wait(5), "no replacement was started")
-            began = time.monotonic()
             self.assertEqual(self.store.get(crashed["id"])["error"]["code"], "worker_crashed")
             cancelled = self.store.submit("test.delay", {"seconds": 0})
             self.assertEqual(self.store.cancel(cancelled["id"])["status"], "cancelled")
             queued = self.store.submit("test.delay", {"seconds": 0, "value": "served"})
-            elapsed = time.monotonic() - began
+            # All operations returned before the held Process.start() could start the child.
+            self.assertIsNone(made[0].pid)
             release.set()
-            self.assertLess(elapsed, 0.5)
             self.assertEqual(self.wait(queued["id"])["result"]["value"], "served")
 
     def test_a_child_started_while_the_store_closes_does_not_outlive_it(self):
@@ -1697,24 +1697,20 @@ class WarmPoolTests(unittest.TestCase):
         self.assertEqual(starts.call_count, 1)
 
     def test_a_child_that_never_says_it_is_ready_is_replaced(self):
-        self.store.close()
-        # Longer than a child takes to start under the test container's one CPU, or the replacement goes the
-        # same way; the job then waits that long, the backoff and a start.
-        with patch.object(jobs, "READY_SECONDS", 1.0):
-            self.store = JobStore(Settings(concurrency=1, test_tasks=True))
-            self.wait_ready()
-            with self.store._lock:
-                # The child is up and waiting, but as far as the store knows it never said so: a stuck child.
-                silent = self.store._pool[0]
-                silent.ready = False
-            job = self.store.submit("test.delay", {"seconds": 0, "value": "served"})
-            self.assertEqual(self.wait(job["id"], timeout=10)["result"]["value"], "served")
-            self.assertIsNotNone(silent.retired_at)
-            try:
-                alive = silent.process.is_alive()
-            except ValueError:
-                alive = False  # the process object is closed: the reaper saw it dead
-            self.assertFalse(alive)
+        self.wait_ready(timeout=10)
+        with self.store._lock:
+            # Expire only the silent child; real replacements keep the normal startup budget.
+            silent = self.store._pool[0]
+            silent.ready = False
+            silent.started_at = time.monotonic() - jobs.READY_SECONDS
+        job = self.store.submit("test.delay", {"seconds": 0, "value": "served"})
+        self.assertEqual(self.wait(job["id"], timeout=10)["result"]["value"], "served")
+        self.assertIsNotNone(silent.retired_at)
+        try:
+            alive = silent.process.is_alive()
+        except ValueError:
+            alive = False  # the process object is closed: the reaper saw it dead
+        self.assertFalse(alive)
 
     def wait_ready(self, timeout=5):
         deadline = time.monotonic() + timeout
@@ -1778,10 +1774,25 @@ class WarmPoolTests(unittest.TestCase):
         running = self.store.submit("test.delay", {"seconds": 1, "value": "kept"})
         doomed = self.store.submit("test.delay", {"seconds": 5})
         self.wait(doomed["id"], {"running"})
-        started = time.monotonic()
-        self.assertEqual(self.store.cancel(doomed["id"])["status"], "cancelled")
-        self.store.get(running["id"])
-        self.assertLess(time.monotonic() - started, 0.1)
+        with self.store._lock:
+            process = next(worker.process for worker in self.store._pool if worker.job_id == doomed["id"])
+        release, joining, joined = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        join = process.join
+
+        def held_join(timeout=None):
+            joining.set()
+            release.wait(5)
+            join(timeout)
+            joined.set()
+
+        # Reads must return while the cancelled child's join is still held outside the lock.
+        with patch.object(process, "join", side_effect=held_join):
+            self.assertEqual(self.store.cancel(doomed["id"])["status"], "cancelled")
+            self.assertTrue(joining.wait(5), "the cancelled child was never joined")
+            self.store.get(running["id"])
+            self.assertFalse(joined.is_set(), "the read waited for the cancelled child's join")
+            release.set()
         self.assertEqual(self.wait(running["id"])["result"]["value"], "kept")
 
 
@@ -2338,19 +2349,18 @@ class SendTests(unittest.TestCase):
         with patch.object(JobStore, "_replenish"):
             store = JobStore(Settings(concurrency=1, test_tasks=True))
         self.addCleanup(store.close)
-        release, sending = threading.Event(), threading.Event()
+        release, sending, sent = threading.Event(), threading.Event(), threading.Event()
         self.addCleanup(release.set)
         worker = jobs._Worker(Mock(), Mock())
         worker.connection.poll.return_value = False
-        worker.connection.send.side_effect = lambda _: (sending.set(), release.wait(5))
+        worker.connection.send.side_effect = lambda _: (sending.set(), release.wait(5), sent.set())
         worker.ready = True
         with store._lock:
             store._pool.append(worker)
         job = store.submit("test.delay", {"seconds": 0})
         self.assertTrue(sending.wait(5), "the job was never sent")
-        started = time.monotonic()
         self.assertEqual(store.get(job["id"])["status"], "queued")
-        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertFalse(sent.is_set(), "the read waited for the held send")
 
 
 class ReadinessTests(unittest.TestCase):
