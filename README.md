@@ -78,7 +78,7 @@ docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -v bridge-m
   ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:latest
 ```
 
-Compose's `release` profile runs the same images under the limits above: `BRIDGE_IMAGE_TAG=<version> docker compose -f docker/compose.yaml --profile release up -d worker-image` (or `model-worker-image`, which reads `.cache/models` from the `fetcher`). Each image carries build provenance and an SBOM; `gh attestation verify oci://ghcr.io/cristiangirlea/php-python-ai-bridge-worker:<version> --owner cristiangirlea` checks it. The published arm64 images are built under emulation; CI and a check before publishing build the same Dockerfiles natively on arm64 and start them, without models.
+Compose's `release` profile runs the same images under the limits above: `BRIDGE_IMAGE_TAG=<version> docker compose -f docker/compose.yaml --profile release up -d worker-image` (or `model-worker-image`, which reads `.cache/models` from the `fetcher`). Each image carries build provenance and an SBOM; `gh attestation verify oci://ghcr.io/cristiangirlea/php-python-ai-bridge-worker:<version> --owner cristiangirlea` checks it. Publishing builds both images natively on amd64 and arm64, pulls and starts each by its pushed digest without models, then tags those tested images.
 
 ### Run the real model
 

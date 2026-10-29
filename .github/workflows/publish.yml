@@ -16,8 +16,198 @@ concurrency:
 # GitHub's hosted runners, as in tests.yml: the repository is public, and no step here needs more than the job's own
 # token.
 jobs:
+  build-amd64:
+    needs: [quality]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      worker: ${{ steps.worker.outputs.digest }}
+      onnx: ${{ steps.onnx.outputs.digest }}
+    env:
+      IMAGE: ghcr.io/cristiangirlea/php-python-ai-bridge-worker
+      # Build records use Actions artifact storage even without an explicit upload step.
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+    steps:
+      - name: Require a version tag
+        run: |
+          case "$GITHUB_REF" in refs/tags/v*) ;; *) echo "Run this on a v* tag, not $GITHUB_REF" >&2; exit 1 ;; esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the worker image
+        id: worker
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.worker
+          platforms: linux/amd64
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+      - name: Build and push the ONNX worker image
+        id: onnx
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.worker-onnx
+          platforms: linux/amd64
+          outputs: type=image,name=${{ env.IMAGE }}-onnx,push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+      - name: Pull the pushed images
+        run: |
+          docker pull "$IMAGE@${{ steps.worker.outputs.digest }}"
+          docker pull "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}"
+      - name: The images start the worker
+        run: |
+          docker run --rm --entrypoint python "$IMAGE@${{ steps.worker.outputs.digest }}" -c 'import ai_bridge.server'
+          docker run --rm "$IMAGE@${{ steps.worker.outputs.digest }}" --help
+          docker run --rm -e ORT_DISABLE_TELEMETRY=1 --entrypoint python "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}" -c 'import onnxruntime, tokenizers, numpy, ai_bridge.server'
+          docker run --rm "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}" --help
+      # Each image serves an authenticated /healthz; the ONNX one on the lexical backend, since CI has no models.
+      - name: The images answer /healthz
+        timeout-minutes: 3
+        env:
+          BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+          PROBE: |
+            import json, os, sys, time, urllib.error, urllib.request
+            request = urllib.request.Request("http://127.0.0.1:8090/healthz",
+                                             headers={"Authorization": "Bearer " + os.environ["BRIDGE_TOKEN"]})
+            for attempt in range(30):
+                try:
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        body = json.load(response)
+                    break
+                except urllib.error.HTTPError:
+                    raise
+                except OSError:
+                    time.sleep(1)
+            else:
+                sys.exit("/healthz never answered")
+            expected = {"status": "ok", "protocol": 1, "backend": sys.argv[1]}
+            if body != expected:
+                sys.exit(f"/healthz said {body}, expected {expected}")
+            print(body)
+        run: |
+          docker run -d --name bridge-worker-ci -e BRIDGE_TOKEN "$IMAGE@${{ steps.worker.outputs.digest }}"
+          docker run --rm --network container:bridge-worker-ci -e BRIDGE_TOKEN --entrypoint python "$IMAGE@${{ steps.worker.outputs.digest }}" \
+            -c "$PROBE" lexical
+          docker run -d --name bridge-worker-onnx-ci -e BRIDGE_TOKEN -e BRIDGE_BACKEND=lexical "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}"
+          docker run --rm --network container:bridge-worker-onnx-ci -e BRIDGE_TOKEN --entrypoint python \
+            "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}" -c "$PROBE" lexical
+          # The fetcher takes no arguments and `fetch` downloads at once, so it is only loaded here, offline.
+          docker run --rm --network none --entrypoint python "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}" -c \
+            'import importlib.util as u; s = u.spec_from_file_location("fetch_model", "/opt/bridge/fetch_model.py"); s.loader.exec_module(u.module_from_spec(s))'
+      - name: Stop the image checks' containers
+        if: always()
+        run: docker rm -f bridge-worker-ci bridge-worker-onnx-ci || true
+
+  build-arm64:
+    needs: [quality]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      worker: ${{ steps.worker.outputs.digest }}
+      onnx: ${{ steps.onnx.outputs.digest }}
+    env:
+      IMAGE: ghcr.io/cristiangirlea/php-python-ai-bridge-worker
+      # Build records use Actions artifact storage even without an explicit upload step.
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+    steps:
+      - name: Require a version tag
+        run: |
+          case "$GITHUB_REF" in refs/tags/v*) ;; *) echo "Run this on a v* tag, not $GITHUB_REF" >&2; exit 1 ;; esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the worker image
+        id: worker
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.worker
+          platforms: linux/arm64
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+      - name: Build and push the ONNX worker image
+        id: onnx
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.worker-onnx
+          platforms: linux/arm64
+          outputs: type=image,name=${{ env.IMAGE }}-onnx,push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+      - name: Pull the pushed images
+        run: |
+          docker pull "$IMAGE@${{ steps.worker.outputs.digest }}"
+          docker pull "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}"
+      - name: The images start the worker
+        run: |
+          docker run --rm --entrypoint python "$IMAGE@${{ steps.worker.outputs.digest }}" -c 'import ai_bridge.server'
+          docker run --rm "$IMAGE@${{ steps.worker.outputs.digest }}" --help
+          docker run --rm -e ORT_DISABLE_TELEMETRY=1 --entrypoint python "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}" -c 'import onnxruntime, tokenizers, numpy, ai_bridge.server'
+          docker run --rm "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}" --help
+      # Each image serves an authenticated /healthz; the ONNX one on the lexical backend, since CI has no models.
+      - name: The images answer /healthz
+        timeout-minutes: 3
+        env:
+          BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+          PROBE: |
+            import json, os, sys, time, urllib.error, urllib.request
+            request = urllib.request.Request("http://127.0.0.1:8090/healthz",
+                                             headers={"Authorization": "Bearer " + os.environ["BRIDGE_TOKEN"]})
+            for attempt in range(30):
+                try:
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        body = json.load(response)
+                    break
+                except urllib.error.HTTPError:
+                    raise
+                except OSError:
+                    time.sleep(1)
+            else:
+                sys.exit("/healthz never answered")
+            expected = {"status": "ok", "protocol": 1, "backend": sys.argv[1]}
+            if body != expected:
+                sys.exit(f"/healthz said {body}, expected {expected}")
+            print(body)
+        run: |
+          docker run -d --name bridge-worker-ci -e BRIDGE_TOKEN "$IMAGE@${{ steps.worker.outputs.digest }}"
+          docker run --rm --network container:bridge-worker-ci -e BRIDGE_TOKEN --entrypoint python "$IMAGE@${{ steps.worker.outputs.digest }}" \
+            -c "$PROBE" lexical
+          docker run -d --name bridge-worker-onnx-ci -e BRIDGE_TOKEN -e BRIDGE_BACKEND=lexical "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}"
+          docker run --rm --network container:bridge-worker-onnx-ci -e BRIDGE_TOKEN --entrypoint python \
+            "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}" -c "$PROBE" lexical
+          # The fetcher takes no arguments and `fetch` downloads at once, so it is only loaded here, offline.
+          docker run --rm --network none --entrypoint python "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}" -c \
+            'import importlib.util as u; s = u.spec_from_file_location("fetch_model", "/opt/bridge/fetch_model.py"); s.loader.exec_module(u.module_from_spec(s))'
+      - name: Stop the image checks' containers
+        if: always()
+        run: docker rm -f bridge-worker-ci bridge-worker-onnx-ci || true
+
   publish:
-    needs: [quality, arm64]
+    needs: [quality, build-amd64, build-arm64]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -45,40 +235,45 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push the worker image
+      - name: Tag the tested worker images
         id: worker
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: docker/Dockerfile.worker
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: true
-          sbom: true
-          tags: ${{ steps.version.outputs.worker }}
+        env:
+          AMD64_DIGEST: ${{ needs.build-amd64.outputs.worker }}
+          ARM64_DIGEST: ${{ needs.build-arm64.outputs.worker }}
+          TAGS: ${{ steps.version.outputs.worker }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          IFS=',' read -ra names <<< "$TAGS"
+          tags=()
+          for tag in "${names[@]}"; do tags+=(-t "$tag"); done
+          docker buildx imagetools create "${tags[@]}" "$IMAGE@$AMD64_DIGEST" "$IMAGE@$ARM64_DIGEST"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.worker.outputs.digest }}
           push-to-registry: true
-      - name: Build and push the ONNX worker image
+      - name: Tag the tested ONNX worker images
         id: onnx
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: docker/Dockerfile.worker-onnx
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: true
-          sbom: true
-          tags: ${{ steps.version.outputs.onnx }}
+        env:
+          AMD64_DIGEST: ${{ needs.build-amd64.outputs.onnx }}
+          ARM64_DIGEST: ${{ needs.build-arm64.outputs.onnx }}
+          TAGS: ${{ steps.version.outputs.onnx }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          IFS=',' read -ra names <<< "$TAGS"
+          tags=()
+          for tag in "${names[@]}"; do tags+=(-t "$tag"); done
+          docker buildx imagetools create "${tags[@]}" "$IMAGE-onnx@$AMD64_DIGEST" "$IMAGE-onnx@$ARM64_DIGEST"
+          digest=$(docker buildx imagetools inspect "$IMAGE-onnx:$VERSION" --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}-onnx
@@ -100,81 +295,6 @@ jobs:
             gh release create "$TAG" --verify-tag --notes-from-tag --title "$TAG" $flags
           fi
           gh release upload "$TAG" "$archive" --clobber
-
-  # Native ARM startup must pass before any image or release is published.
-  arm64:
-    name: Worker images (arm64)
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build the worker image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: docker/Dockerfile.worker
-          platforms: linux/arm64
-          push: false
-          load: true
-          tags: bridge-worker:ci
-      - name: Build the ONNX worker image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: docker/Dockerfile.worker-onnx
-          platforms: linux/arm64
-          push: false
-          load: true
-          tags: bridge-worker-onnx:ci
-      - name: The images start the worker
-        run: |
-          docker run --rm --entrypoint python bridge-worker:ci -c 'import ai_bridge.server'
-          docker run --rm bridge-worker:ci --help
-          docker run --rm -e ORT_DISABLE_TELEMETRY=1 --entrypoint python bridge-worker-onnx:ci -c 'import onnxruntime, tokenizers, numpy, ai_bridge.server'
-          docker run --rm bridge-worker-onnx:ci --help
-      # Each image serves an authenticated /healthz; the ONNX one on the lexical backend, since CI has no models.
-      - name: The images answer /healthz
-        timeout-minutes: 3
-        env:
-          BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
-          PROBE: |
-            import json, os, sys, time, urllib.error, urllib.request
-            request = urllib.request.Request("http://127.0.0.1:8090/healthz",
-                                             headers={"Authorization": "Bearer " + os.environ["BRIDGE_TOKEN"]})
-            for attempt in range(30):
-                try:
-                    with urllib.request.urlopen(request, timeout=2) as response:
-                        body = json.load(response)
-                    break
-                except urllib.error.HTTPError:
-                    raise
-                except OSError:
-                    time.sleep(1)
-            else:
-                sys.exit("/healthz never answered")
-            expected = {"status": "ok", "protocol": 1, "backend": sys.argv[1]}
-            if body != expected:
-                sys.exit(f"/healthz said {body}, expected {expected}")
-            print(body)
-        run: |
-          docker run -d --name bridge-worker-ci -e BRIDGE_TOKEN bridge-worker:ci
-          docker run --rm --network container:bridge-worker-ci -e BRIDGE_TOKEN --entrypoint python bridge-worker:ci \
-            -c "$PROBE" lexical
-          docker run -d --name bridge-worker-onnx-ci -e BRIDGE_TOKEN -e BRIDGE_BACKEND=lexical bridge-worker-onnx:ci
-          docker run --rm --network container:bridge-worker-onnx-ci -e BRIDGE_TOKEN --entrypoint python \
-            bridge-worker-onnx:ci -c "$PROBE" lexical
-          # The fetcher takes no arguments and `fetch` downloads at once, so it is only loaded here, offline.
-          docker run --rm --network none --entrypoint python bridge-worker-onnx:ci -c \
-            'import importlib.util as u; s = u.spec_from_file_location("fetch_model", "/opt/bridge/fetch_model.py"); s.loader.exec_module(u.module_from_spec(s))'
-      - name: Stop the image checks' containers
-        if: always()
-        run: docker rm -f bridge-worker-ci bridge-worker-onnx-ci || true
 
   # Publishing must wait for this tag's default reranker to meet the question-to-passage quality floor.
   quality:
