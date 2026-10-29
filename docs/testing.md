@@ -429,7 +429,9 @@ lower-cased word tokens without stemming or stop words; it is not BEIR's Elastic
 English analyser. Only the baseline and reranker in the same table are comparable.
 
 Run all six measurements sequentially from a committed tree with a fresh disposable
-`BRIDGE_TOKEN` already exported:
+`BRIDGE_TOKEN` already exported. Before each one the driver waits until no other container
+runs; services the host always runs (a CI cluster, a database) can be named in
+`BENCH_STANDING`, an extended regular expression, and are then not waited for:
 
 ```bash
 export MSYS_NO_PATHCONV=1

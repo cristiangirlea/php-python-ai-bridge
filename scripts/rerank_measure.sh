@@ -15,7 +15,8 @@ trap '"${C[@]}" --profile model down' EXIT
 quiet() {
     local began=$SECONDS foreign
     while :; do
-        foreign=$(docker ps --format '{{.Names}}' | sed '/^bridge-reranker-/d')
+        # Services that always run on the host are named in BENCH_STANDING (an extended regex) and never wait.
+        foreign=$(docker ps --format '{{.Names}}' | sed '/^bridge-reranker-/d' | { grep -Ev "${BENCH_STANDING:-^$}" || true; })
         if [ -z "$foreign" ]; then
             echo "Quiet host after $((SECONDS - began)) seconds" >&2
             return
