@@ -18,10 +18,10 @@ Three normal tasks are implemented. Reranking: given a query and up to 512 candi
 
 ## Install through Composer
 
-The latest tagged release is `v0.4.0`; see [the changelog](../CHANGELOG.md). The package is on Packagist; run this inside your application's dependency-acquisition container:
+The latest tagged release is `v0.5.0`; see [the changelog](../CHANGELOG.md). The package is on Packagist; run this inside your application's dependency-acquisition container:
 
 ```sh
-composer require cristiangirlea/php-python-ai-bridge:^0.4 --no-scripts --no-plugins
+composer require cristiangirlea/php-python-ai-bridge:^0.5 --no-scripts --no-plugins
 ```
 
 To pin an unreleased commit instead, add this repository and requirement to your application's root `composer.json`, preserving existing entries and replacing the example hash with the commit you want:
