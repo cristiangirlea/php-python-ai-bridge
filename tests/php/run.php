@@ -376,6 +376,51 @@ $headers = ['Authorization' => 'Bearer ' . $token, 'Content-Type' => 'applicatio
 check($recording->calls === [['GET', 'http://worker:8090/v1/jobs/' . str_repeat('a', 32), $headers, null, 1500]], 'the transport gets method, URL, headers, no body and the request timeout');
 $viaTransport->submit('rerank', ['query' => 'q'], 30000);
 check($recording->calls[1][3] === '{"task":"rerank","input":{"query":"q"},"timeout_ms":30000}', 'the transport gets the JSON body');
+foreach ([[CURLE_OPERATION_TIMEDOUT, 50, false, TransportTimeout::class],
+          [CURLE_OPERATION_TIMEDOUT, 1000, false, TransportTimeout::class],
+          [CURLE_OPERATION_TIMEDOUT, 1500, true, TransportTimeout::class],
+          [CURLE_OPERATION_TIMEDOUT, 1500, false, BridgeException::class],
+          [CURLE_COULDNT_CONNECT, 50, true, BridgeException::class]] as [$errno, $timeoutMs, $connected, $expected]) {
+    $error = CurlTransport::failure($errno, $timeoutMs, $connected);
+    check($error::class === $expected && $error->errorCode === 'transport_error', 'cURL errno ' . $errno . ' with budget ' . $timeoutMs . ' and connected=' . (int) $connected . ' must be ' . $expected);
+}
+// A connected peer that never replies exercises cURL's total timer without a network dependency.
+$peer = proc_open([PHP_BINARY, '-r', '
+    $server = stream_socket_server("tcp://127.0.0.1:0");
+    echo stream_socket_get_name($server, false), "\n";
+    fflush(STDOUT);
+    $connection = stream_socket_accept($server, 10);
+    if ($connection === false) {
+        exit(1);
+    }
+    echo "accepted\n";
+    fflush(STDOUT);
+    sleep(10);
+'], [1 => ['pipe', 'w']], $pipes);
+if ($peer === false) {
+    throw new RuntimeException('The silent loopback peer did not start');
+}
+try {
+    $address = trim((string) fgets($pipes[1]));
+    $error = failure(fn () => (new CurlTransport())->send('GET', 'http://' . $address, [], null, 100));
+    check(trim((string) fgets($pipes[1])) === 'accepted', 'the silent peer accepted the connection');
+    check($error instanceof TransportTimeout && $error->errorCode === 'transport_error', 'a silent connected peer expires the total timer');
+} finally {
+    fclose($pipes[1]);
+    proc_terminate($peer);
+    proc_close($peer);
+}
+$server = stream_socket_server('tcp://127.0.0.1:0', flags: STREAM_SERVER_BIND);
+if ($server === false) {
+    throw new RuntimeException('Could not reserve a refused loopback port');
+}
+try {
+    $address = stream_socket_get_name($server, false);
+    $error = failure(fn () => (new CurlTransport())->send('GET', 'http://' . $address, [], null, 100));
+    check(!$error instanceof TransportTimeout && $error->errorCode === 'transport_error', 'a refused loopback connection is not a total timeout');
+} finally {
+    fclose($server);
+}
 // The transport timer identifies a deadline-capped timeout even before the client's clock reaches it.
 $waitFailures = [];
 $timed = new class () implements Transport {
@@ -401,7 +446,7 @@ try {
             $timed->timeout = $timeout;
             $error = failure(fn () => (new Client('http://worker:8090', $token, 2000, $timed))->wait(str_repeat('a', 32), 50, 1));
             check($timed->budget === 50, 'the wait deadline caps the poll timeout');
-            $label = 'deadline-capped ' . ($timeout ? 'timeout' : 'refused connection') . ' at ' . $earlyMs . ' ms before deadline';
+            $label = 'deadline-capped ' . ($timeout ? 'timeout' : 'refused connection') . ' at ' . abs($earlyMs) . ' ms ' . ($earlyMs < 0 ? 'after' : 'before') . ' deadline';
             if ($error->errorCode !== ($timeout ? 'wait_timeout' : 'transport_error')) {
                 $waitFailures[] = $label;
             }
@@ -414,7 +459,7 @@ try {
         $timed->earlyMs = -5;
         $error = failure(fn () => (new Client('http://worker:8090', $token, 50, $timed))->wait(str_repeat('a', 32), $waitMs, 1));
         check($timed->budget === 50, 'the request timeout caps the poll');
-        if ($error->errorCode !== 'transport_error') {
+        if ($error->errorCode !== ($waitMs === 50 ? 'wait_timeout' : 'transport_error')) {
             $waitFailures[] = 'request timeout with wait budget ' . $waitMs;
         }
     }
@@ -460,7 +505,7 @@ if (!interface_exists(ClientInterface::class) || !interface_exists(RequestFactor
                 $psrWait = new Client('http://worker:8090', $token, 2000, new Psr18Transport($http, $factory, $factory));
                 $error = failure(fn () => $psrWait->wait(str_repeat('a', 32), 50, 1));
                 if ($error->errorCode !== 'transport_error') {
-                    $waitFailures[] = 'PSR-18 ' . $message . ' at ' . $earlyMs . ' ms before deadline';
+                    $waitFailures[] = 'PSR-18 ' . $message . ' at ' . abs($earlyMs) . ' ms ' . ($earlyMs < 0 ? 'after' : 'before') . ' deadline';
                 }
                 check(!str_contains($error->getMessage(), $message) && !str_contains($error->getMessage(), $token), 'PSR-18 polling discards exception text');
             }

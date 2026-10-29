@@ -164,7 +164,7 @@ final class Client
             if ($remaining < 1) {
                 throw new BridgeException('Local wait deadline exceeded; remote job may still be running', 'wait_timeout');
             }
-            $job = $this->jobResponse('GET', '/v1/jobs/' . $id, $id, null, min($remaining, $this->requestTimeoutMs), $remaining < $this->requestTimeoutMs);
+            $job = $this->jobResponse('GET', '/v1/jobs/' . $id, $id, null, min($remaining, $this->requestTimeoutMs), $remaining <= $this->requestTimeoutMs);
             if ($job->isTerminal()) {
                 return $job;
             }

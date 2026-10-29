@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
+- Native amd64 and arm64 worker image build, import, CLI and authenticated health checks on every pull request; publishing also requires a read-only native arm64 pre-check before pushing images or creating a release. These checks fetch no models and do not run model inference.
 - `BRIDGE_RERANK_MODEL` selects a pinned ONNX reranker: `tinybert` (default), `minilm-l6` or `bge-base`, with batch sizes 32, 8 and 4, measured SQuAD and ArguAna tables and an int8/fp32 parity check. SQuAD v1.1 is available for quality measurement. Model workers no longer swap past their memory limit.
 - Optional `BRIDGE_INSTANCE_ID` prefixes on job IDs, accepted by the worker, PHP client and MCP client, with restored IDs preserved across instance-name changes. A two-instance `ha` Compose profile routes reads and cancels by prefix; its required CI drill verifies hard-crash failure, retained idempotency keys and bounded recovery with a new key.
 - A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.
@@ -20,6 +21,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
+- A custom or PSR-18 transport's failure after the PHP `wait()` deadline is now `transport_error`; previously the clock alone could classify it as `wait_timeout`.
 - Rerank progress reports when completed batches cross step boundaries, including the final document.
 - Reranker acquisition downloads about 630 MB of models, plus the pinned wheels. The per-file cap is 128 MiB, raised to 300 MiB only for BGE's model.
 - The model workflow runs on version tags as well as its existing triggers. Publishing now waits for the read-only SQuAD quality gate in `publish.yml`; a default below BM25 prevents both image and release publication.
@@ -35,7 +37,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
-- PHP `wait()` identifies a cURL timeout from a deadline-capped poll as `wait_timeout` even when the transport timer fires early. Other transport failures and independent request timeouts remain `transport_error`; PSR-18 failures are no longer classified by clock proximity.
+- PHP `wait()` identifies a cURL total timeout from a deadline-capped poll, including an equal-budget tie, as `wait_timeout` even when the transport timer fires early. Other transport failures, a shorter connection/DNS timeout and independent request timeouts remain `transport_error`.
 - The TLS and two-instance (`ha`) examples reject declared body lengths above 262144 bytes before dialing a worker, including leading-zero lengths, with the worker's fixed 413 JSON. The read limit remains for uploads without a length, which can still reach the worker; forwarded chunked uploads are refused by the worker itself.
 
 ## [0.4.0] - 2026-10-26
