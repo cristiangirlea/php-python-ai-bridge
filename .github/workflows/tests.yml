@@ -114,9 +114,19 @@ jobs:
 
   # The images publish.yml pushes, built for this runner's platform only and never pushed.
   images:
-    name: Worker images
-    runs-on: ubuntu-latest
+    name: Worker images (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -127,7 +137,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.worker
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
           tags: bridge-worker:ci
@@ -136,7 +146,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.worker-onnx
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
           tags: bridge-worker-onnx:ci
