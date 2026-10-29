@@ -10,7 +10,7 @@ The worker uses the standard library's `http.server`. It is supported only behin
 
 Binding a non-loopback address without `BRIDGE_TRUST_NETWORK=1` writes one start warning on stderr explaining that rule. With `BRIDGE_LOG=json` it is the `start` line at warning level, with the fixed `network_warning` field; otherwise it is one plain line even when logging is off. Set `BRIDGE_TRUST_NETWORK=1` only to acknowledge that the deployment satisfies the rule; it does not add network protection. Unset, empty and `0` leave the warning enabled; any other value stops startup naming the variable. Compose acknowledges its private internal network explicitly. Hostnames are conservatively treated as non-loopback.
 
-The TLS example caps request bodies at 262144 bytes and buffers them before contacting the worker, caps headers at 16384 bytes, and sets five-second header/body read and idle timeouts and a ten-second write timeout. Apply equivalent limits to an operator-managed proxy; tune them deliberately with the worker's limits in mind.
+The TLS example rejects a declared `Content-Length` above 262144 before dialing the worker, with 413 and the worker's fixed `body_too_large` JSON. Its anchored decimal matcher permits 262144, rejects 262145 and larger, and ignores leading zeros; Caddy's HTTP parser refuses non-numeric lengths with 400. `request_body max_size 262144` also limits reads when no length is declared. Buffering makes bounded bodies available before dialing to reduce races with early worker refusals; it does not guarantee rejection before dialing when the length is unknown. A chunked client upload remains `Transfer-Encoding: chunked` upstream, which the worker refuses with 400 before authentication; an oversized chunked upload can instead receive a proxy 413 while still reaching the worker. Only declared oversized lengths have the pre-dial guarantee and fixed proxy JSON body. The example also caps headers at 16384 bytes and sets five-second header/body read and idle timeouts and a ten-second write timeout. Apply equivalent limits to an operator-managed proxy; tune them deliberately with the worker's limits in mind.
 
 **A sidecar for one application.** One worker next to one application on a private network, no published port, one token. This is what `docker/compose.yaml` runs (`worker` beside `frankenphp`) and what [the published image](../README.md#run-the-published-image) runs with `docker run --network <internal network>`. The client points at `http://worker:8090`.
 
@@ -23,7 +23,7 @@ docker compose -f docker/compose.yaml logs --no-log-prefix --no-color worker | d
 docker compose -f docker/compose.yaml --profile tls down -v
 ```
 
-Compose's worker enables JSON logging for these checks. The oversized POST leaves submitted-job counters unchanged; the log check requires both bracketing metrics requests and no worker request between them.
+Compose's worker enables JSON logging for these checks. Two 262144-byte POSTs (one with a leading-zero length) reach the worker and log 401 without a token. The declared oversized POSTs leave submitted-job counters unchanged; the log check requires the metrics markers, both boundary POSTs, and no job submission between the oversized-request markers.
 
 Give each client its own token through `BRIDGE_TOKENS_FILE` or `BRIDGE_TOKENS` (section 4), each under its own name, and the MCP server a token of its own. Better still, give the MCP server a dedicated worker, as compose's `mcp-worker` is: an agent can be prompt-injected into filling a worker's capacity ([security](security.md)).
 

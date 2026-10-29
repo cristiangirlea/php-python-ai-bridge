@@ -60,12 +60,15 @@ if ($mode === 'request-log') {
     }
     $markers = array_keys(array_filter($requests, static fn (array $entry): bool =>
         $entry['method'] === 'GET' && $entry['route'] === '/metrics' && $entry['status'] === 200));
-    check(count($markers) >= 2, 'the worker logged both authenticated metrics requests around the oversized POST');
+    check(count($markers) >= 3, 'the worker logged all three authenticated metrics markers');
+    $boundary = array_slice($requests, $markers[count($markers) - 3] + 1, $markers[count($markers) - 2] - $markers[count($markers) - 3] - 1);
+    $boundaryPosts = array_values(array_filter($boundary, static fn (array $entry): bool => $entry['method'] === 'POST' && $entry['route'] === '/v1/jobs'));
+    check(count($boundaryPosts) === 2 && array_column($boundaryPosts, 'status') === [401, 401], 'the worker logged both exact-limit POSTs with 401');
     $between = array_slice($requests, $markers[count($markers) - 2] + 1, $markers[count($markers) - 1] - $markers[count($markers) - 2] - 1);
     // Other clients of the shared worker may log in between; only a job submission would be the oversized POST.
     $posts = array_filter($between, static fn (array $entry): bool => $entry['method'] === 'POST' && $entry['route'] === '/v1/jobs');
     check($posts === [], 'the worker logged no job submission between the oversized POST markers: ' . json_encode($between));
-    echo "PASS: $count TLS worker-log checks; oversized POST never reached the worker handler\n";
+    echo "PASS: $count TLS worker-log checks; exact-limit POSTs reached the worker, oversized POSTs did not\n";
 } elseif ($mode === 'trusted') {
     check(ini_get('curl.cainfo') === $root, 'curl.cainfo is the example CA root');
     check(glob('/etc/ssl/certs/*') === [], 'the system CA store is empty, so only the example root is trusted');
@@ -117,23 +120,44 @@ if ($mode === 'request-log') {
         }
         return $matches[0];
     };
+    $post = static function (string $payload, string ...$headers) use ($url): array {
+        $handle = curl_init();
+        curl_setopt_array($handle, [
+            CURLOPT_URL => $url . '/v1/jobs',
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_HTTPHEADER => array_merge(['Content-Type: application/json', 'Expect:'], array_values($headers)),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+            CURLOPT_TIMEOUT => 5,
+        ]);
+        $body = curl_exec($handle);
+        $status = curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+        unset($handle);
+        return [$status, is_string($body) ? $body : false];
+    };
+    $tooLarge = '{"error":{"code":"body_too_large","message":"Request exceeds 262144 bytes"}}';
+    // Metrics distinguish forwarded boundary bodies from declarations refused before any upstream request.
+    $submissions();
+    foreach (['262144', '0262144'] as $length) {
+        [$status, $body] = $post(str_repeat('x', 262144), 'Content-Length: ' . $length);
+        check($status === 401 && is_string($body) && str_contains($body, 'unauthorized'), 'an exact-limit body reaches worker authentication: ' . $length . ' status ' . $status . ' body ' . var_export($body, true));
+    }
     $before = $submissions();
-    // Metrics bracket this POST so the worker log can detect forwarding even when authentication refuses it.
-    $handle = curl_init();
-    curl_setopt_array($handle, [
-        CURLOPT_URL => $url . '/v1/jobs',
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => str_repeat('x', 262145),
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Expect:'],
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
-        CURLOPT_TIMEOUT => 5,
-    ]);
-    $body = curl_exec($handle);
-    $status = curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-    unset($handle);
-    check($status === 413 && is_string($body) && !str_contains($body, 'unauthorized'), 'the proxy answers an oversized body with 413');
+    [$status, $body] = $post(str_repeat('x', 262145));
+    check($status === 413 && $body === $tooLarge, 'the proxy answers an oversized body with the fixed 413 JSON');
+    foreach (['262145', '0262145', '262149', '262150', '262199', '262200', '262999', '263000', '269999', '270000', '299999', '300000', '999999', '1000000', '999999999999999999'] as $length) {
+        // No body is sent: the declared size alone must produce the refusal.
+        [$status, $body] = $post('', 'Content-Length: ' . $length);
+        check($status === 413 && $body === $tooLarge, 'a declared oversized length gets the fixed 413 JSON: ' . $length);
+    }
     check($submissions() === $before, 'the oversized POST changes no submitted-job counter');
+
+    [$status] = $post('', 'Content-Length: invalid');
+    check($status === 400, 'a non-numeric Content-Length is refused');
+    [$status, $body] = $post('{"task":"rerank","input":{"query":"France","documents":["Paris"]}}', 'Transfer-Encoding: chunked', 'Authorization: Bearer ' . $token);
+    check($status === 400 && $body === '{"error":{"code":"invalid_request","message":"Request does not match the task contract"}}', 'a chunked upload reaches the worker as Transfer-Encoding and is refused before authentication');
 
     $error = failure(fn () => (new Client($url, str_repeat('x', 32)))->get($unknownJob));
     check($error->httpStatus === 401, 'the worker behind the proxy refuses a wrong token with 401');
