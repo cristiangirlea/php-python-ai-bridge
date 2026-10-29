@@ -35,6 +35,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
+- PHP `wait()` identifies a cURL timeout from a deadline-capped poll as `wait_timeout` even when the transport timer fires early. Other transport failures and independent request timeouts remain `transport_error`; PSR-18 failures are no longer classified by clock proximity.
 - The TLS and two-instance (`ha`) examples reject declared body lengths above 262144 bytes before dialing a worker, including leading-zero lengths, with the worker's fixed 413 JSON. The read limit remains for uploads without a length, which can still reach the worker; forwarded chunked uploads are refused by the worker itself.
 
 ## [0.4.0] - 2026-10-26

@@ -7,7 +7,8 @@ namespace PhpAiBridge;
 /**
  * Carries one HTTP request to the worker. An implementation follows no redirect, takes no proxy from the
  * environment and refuses a body over MAX_RESPONSE_BYTES with BridgeException invalid_response; a failure to
- * reach the worker or read its answer is BridgeException transport_error. The client judges status and body.
+ * reach the worker or read its answer is BridgeException transport_error. An expired timer that enforces
+ * timeoutMs uses the internal TransportTimeout signal; other failures must not. The client judges status and body.
  */
 interface Transport
 {

@@ -12,6 +12,7 @@ set_error_handler(static function (int $severity, string $message, string $file,
 });
 
 require dirname(__DIR__, 2) . '/examples/bootstrap.php';
+require __DIR__ . '/wait_clock.php';
 
 use BridgeTests\FakeClientException;
 use BridgeTests\FakeFactory;
@@ -28,6 +29,8 @@ use PhpAiBridge\RedactResult;
 use PhpAiBridge\RerankResult;
 use PhpAiBridge\Transport;
 use PhpAiBridge\TransportResponse;
+use PhpAiBridge\TransportTimeout;
+use PhpAiBridge\WaitClock;
 use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
@@ -373,16 +376,51 @@ $headers = ['Authorization' => 'Bearer ' . $token, 'Content-Type' => 'applicatio
 check($recording->calls === [['GET', 'http://worker:8090/v1/jobs/' . str_repeat('a', 32), $headers, null, 1500]], 'the transport gets method, URL, headers, no body and the request timeout');
 $viaTransport->submit('rerank', ['query' => 'q'], 30000);
 check($recording->calls[1][3] === '{"task":"rerank","input":{"query":"q"},"timeout_ms":30000}', 'the transport gets the JSON body');
-// A transport failure once the wait deadline has passed is the wait's timeout, whatever the transport.
-$slow = new class () implements Transport {
+// The transport timer identifies a deadline-capped timeout even before the client's clock reaches it.
+$waitFailures = [];
+$timed = new class () implements Transport {
+    public int $earlyMs = 1;
+    public bool $timeout = true;
+    public int $budget = 0;
+
     public function send(string $method, string $url, array $headers, ?string $body, int $timeoutMs): TransportResponse
     {
-        usleep(($timeoutMs + 5) * 1000);
+        $this->budget = $timeoutMs;
+        WaitClock::$now += ($timeoutMs - $this->earlyMs) * 1_000_000;
+        if ($this->timeout) {
+            throw new TransportTimeout();
+        }
         throw new BridgeException('Bridge transport failed; submission outcome may be unknown', 'transport_error');
     }
 };
-check(failure(fn () => (new Client('http://worker:8090', $token, 2000, $slow))->wait(str_repeat('a', 32), 30, 1))->errorCode === 'wait_timeout', 'a transport failure at the wait deadline is wait_timeout');
-check(failure(fn () => (new Client('http://worker:8090', $token, 20, $slow))->wait(str_repeat('a', 32), 2000, 1))->errorCode === 'transport_error', 'a shorter request timeout stays transport_error');
+try {
+    foreach ([1, 3, 5, 0, -5] as $earlyMs) {
+        $timed->earlyMs = $earlyMs;
+        foreach ([true, false] as $timeout) {
+            WaitClock::$now = 1_000_000_000;
+            $timed->timeout = $timeout;
+            $error = failure(fn () => (new Client('http://worker:8090', $token, 2000, $timed))->wait(str_repeat('a', 32), 50, 1));
+            check($timed->budget === 50, 'the wait deadline caps the poll timeout');
+            $label = 'deadline-capped ' . ($timeout ? 'timeout' : 'refused connection') . ' at ' . $earlyMs . ' ms before deadline';
+            if ($error->errorCode !== ($timeout ? 'wait_timeout' : 'transport_error')) {
+                $waitFailures[] = $label;
+            }
+            check(!str_contains($error->getMessage(), $token), 'poll failures never expose the token');
+        }
+    }
+    foreach ([50, 2000] as $waitMs) {
+        WaitClock::$now = 1_000_000_000;
+        $timed->timeout = true;
+        $timed->earlyMs = -5;
+        $error = failure(fn () => (new Client('http://worker:8090', $token, 50, $timed))->wait(str_repeat('a', 32), $waitMs, 1));
+        check($timed->budget === 50, 'the request timeout caps the poll');
+        if ($error->errorCode !== 'transport_error') {
+            $waitFailures[] = 'request timeout with wait budget ' . $waitMs;
+        }
+    }
+} finally {
+    WaitClock::$now = null;
+}
 
 // The Laravel provider and the Symfony bundle load only inside their frameworks, so the rest of src/ must not name them.
 $frameworkNames = [];
@@ -403,6 +441,37 @@ if (!interface_exists(ClientInterface::class) || !interface_exists(RequestFactor
 } else {
     require __DIR__ . '/psr18_fakes.php';
     $factory = new FakeFactory();
+    // PSR-18 cannot enforce the poll budget or distinguish timeout from other network errors.
+    try {
+        foreach ([1, 3, 5, 0, -5] as $earlyMs) {
+            foreach (['Operation timed out', 'Connection refused', 'DNS lookup failed', 'Connection reset'] as $message) {
+                $http = new class ($earlyMs, $message) implements ClientInterface {
+                    public function __construct(private readonly int $earlyMs, private readonly string $message)
+                    {
+                    }
+
+                    public function sendRequest(\Psr\Http\Message\RequestInterface $request): ResponseInterface
+                    {
+                        WaitClock::$now += (50 - $this->earlyMs) * 1_000_000;
+                        throw new FakeClientException($this->message);
+                    }
+                };
+                WaitClock::$now = 1_000_000_000;
+                $psrWait = new Client('http://worker:8090', $token, 2000, new Psr18Transport($http, $factory, $factory));
+                $error = failure(fn () => $psrWait->wait(str_repeat('a', 32), 50, 1));
+                if ($error->errorCode !== 'transport_error') {
+                    $waitFailures[] = 'PSR-18 ' . $message . ' at ' . $earlyMs . ' ms before deadline';
+                }
+                check(!str_contains($error->getMessage(), $message) && !str_contains($error->getMessage(), $token), 'PSR-18 polling discards exception text');
+            }
+        }
+        WaitClock::$now = 1_000_000_000;
+        $http = new FakeHttpClient(new FakeClientException('Operation timed out ' . $token));
+        $error = failure(fn () => (new Client('http://worker:8090', $token, 20, new Psr18Transport($http, $factory, $factory)))->wait(str_repeat('a', 32), 2000, 1));
+        check($error->errorCode === 'transport_error', 'PSR-18 request timeout stays transport_error');
+    } finally {
+        WaitClock::$now = null;
+    }
     $psr = static function (ResponseInterface|Throwable $answer) use ($factory, $token): array {
         $http = new FakeHttpClient($answer);
         return [new Client('http://worker:8090', $token, 2000, new Psr18Transport($http, $factory, $factory)), $http];
@@ -459,4 +528,5 @@ if (!interface_exists(ClientInterface::class) || !interface_exists(RequestFactor
     }
 }
 
+check($waitFailures === [], 'Incorrect wait failure classification: ' . implode('; ', $waitFailures));
 echo "PASS: $count PHP contract checks\n";

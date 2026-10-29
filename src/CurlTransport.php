@@ -73,6 +73,9 @@ final class CurlTransport implements Transport
                 throw new BridgeException('Response exceeds ' . self::MAX_RESPONSE_BYTES . ' bytes', 'invalid_response');
             }
             if ($ok === false) {
+                if (curl_errno($handle) === CURLE_OPERATION_TIMEDOUT) {
+                    throw new TransportTimeout();
+                }
                 throw new BridgeException('Bridge transport failed; submission outcome may be unknown', 'transport_error');
             }
             return new TransportResponse($status, is_string($contentType) ? $contentType : null, $response, $retryAfter);
