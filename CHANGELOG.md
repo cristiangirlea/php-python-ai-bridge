@@ -12,7 +12,7 @@ All notable changes to this project are documented in this file. The format foll
 - Optional `BRIDGE_INSTANCE_ID` prefixes on job IDs, accepted by the worker, PHP client and MCP client, with restored IDs preserved across instance-name changes. A two-instance `ha` Compose profile routes reads and cancels by prefix; its required CI drill verifies hard-crash failure, retained idempotency keys and bounded recovery with a new key.
 - A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.
 - Reproducible raw-socket request fuzzing: a fixed corpus followed by fresh seeded multi-byte flips, inserts, deletes and splices, with `BRIDGE_FUZZ_SECONDS` for longer runs and distinct-input counts; slow-client connection-budget recovery tests.
-- Body and header limits and read/write timeouts in the Caddy TLS example; oversized bodies are rejected before contacting the worker.
+- Body and header limits and read/write timeouts in the Caddy TLS example.
 - Seven no-model failure drills on dedicated compose peers, with bounded standard-library HTTP probes, offline verdict tests and an explicit start-crash-loop skip. CI's required deterministic gate includes the drills and digest-pinned promtool syntax and behavior checks of the seven example alert rules.
 - Example Prometheus alert rules and a Grafana dashboard, with starting targets and import instructions in the operations guide.
 - The start log line includes `result_capacity`.
@@ -32,6 +32,10 @@ All notable changes to this project are documented in this file. The format foll
 - Document the Packagist installation and check the published package on demand and on tags.
 - The model wheels move to `numpy` 2.5.4, `onnxruntime` 1.31.0 and `tokenizers` 0.23.3 in `requirements-model.txt` and `requirements-model.lock`, which brings `huggingface-hub` 2.3.0 with `httpx2` in place of `requests` and drops `coloredlogs` and `sympy`. ONNX Runtime 1.31 sends telemetry to Microsoft's collector from import on, so every worker child now starts with `ORT_DISABLE_TELEMETRY=1`, whatever the service's environment says.
 - The MCP server's dependencies moved to `mcp` 2.3.0 (`mcp-types` 2.3.0, `cryptography` 50.0.2, `httpcore2` and `httpx2` 2.16.0, `pycparser` 3.12, `pydantic` 2.14.1, `pydantic-core` 2.50.1, `pyjwt` 2.15.1, `rpds-py` 2026.9.1, `sse-starlette` 3.6.0, `starlette` 1.10.0, `truststore` 0.10.5, `uvicorn` 0.54.0); `requirements-mcp.lock` now also holds the hashes of the Linux aarch64 wheels.
+
+### Fixed
+
+- The TLS and two-instance (`ha`) examples reject declared body lengths above 262144 bytes before dialing a worker, including leading-zero lengths, with the worker's fixed 413 JSON. The read limit remains for uploads without a length, which can still reach the worker; forwarded chunked uploads are refused by the worker itself.
 
 ## [0.4.0] - 2026-10-26
 
