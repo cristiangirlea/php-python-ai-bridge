@@ -120,6 +120,8 @@ echo $documents[$result->rankings[0]['index']];
 
 Handle `InvalidArgumentException` for local validation and `PhpAiBridge\BridgeException` for transport/protocol errors. Remote task failure is a terminal job status, not necessarily an exception from `get()` or `wait()`.
 
+With the bundled cURL transport, `wait()` reports `wait_timeout` when the local polling budget expires or a poll's total timer expires after that budget capped its request timeout (including a tie with `requestTimeoutMs`), even if the transport timer fires a few milliseconds early. A shorter `requestTimeoutMs` or the separate 1000 ms connection/DNS timer expiring while the total timer still has budget remains `transport_error`, as do refused connections, DNS failures and resets regardless of proximity to the wait deadline. A local wait timeout never cancels the remote job.
+
 ## Through a PSR-18 HTTP client
 
 By default the client talks to the service through `ext-curl`. An application that already routes its HTTP through a [PSR-18](https://www.php-fig.org/psr/psr-18/) client can pass `PhpAiBridge\Psr18Transport` as the constructor's last argument instead. It takes the PSR-18 client, a PSR-17 request factory and a PSR-17 stream factory. The library does not require the PSR packages (`composer.json` only suggests `psr/http-client` and `psr/http-factory`); the HTTP client you install brings them.
@@ -128,10 +130,12 @@ Configure that client for the bridge before handing it over:
 
 - **Redirects off.** The service never redirects. A client that follows a redirect would send the service token to wherever the `Location` header points, before the bridge sees anything. `Psr18Transport` refuses any 3xx response it receives as `invalid_response`, but it cannot see a redirect the client has already followed.
 - **No proxy from the environment** for the service's private address, as the cURL path does.
-- **The client's own timeout applies.** PSR-18 has no per-request timeout, so `requestTimeoutMs` and the per-poll budget `wait()` computes are not enforced by this transport. Set the client's timeout at or below `requestTimeoutMs`. `wait()` still checks its deadline between polls and reports a transport failure past that deadline as `wait_timeout`, but one poll can outlast the wait budget by up to the client's timeout.
+- **The client's own timeout applies.** PSR-18 has no per-request timeout, so `requestTimeoutMs` and the per-poll budget `wait()` computes are not enforced by this transport. Set the client's timeout at or below `requestTimeoutMs`. `wait()` still checks its deadline between polls, but one poll can outlast the wait budget by up to the client's timeout. PSR-18 has no standard timeout-specific exception: all transport failures remain `transport_error`, even near or past the wait deadline. Neither exception messages nor the clock can reliably distinguish a timeout from a refused connection, DNS failure or reset.
 - **The 262144-byte response cap bounds what the bridge reads**, not what the client buffers: `Psr18Transport` reads at most one byte past the cap from the body stream and refuses a larger body as `invalid_response`. A client that buffers the whole response first (as Guzzle does for `sendRequest()`) has already received it.
 
 A client exception (`Psr\Http\Client\ClientExceptionInterface`) or a failure while reading the body becomes `BridgeException` `transport_error`, without the client's message. As with cURL, a failed submission's outcome is unknown: resubmit only with the same idempotency key (see below), never without one. Other statuses, the content type and the JSON are checked by `Client` exactly as on the cURL path. A 429's `Retry-After` is read from the PSR-7 response by the same rule as cURL's (exactly one header of 1 to 6 digits, else null), so `retryAfterSeconds` is the same through either transport. The 16 KiB response-header cap is the cURL transport's: a PSR-18 client has parsed the headers before the bridge sees them.
+
+The internal deadline signal belongs only to the bundled cURL transport. A custom `Transport` implementation's failures remain `transport_error`, even after the wait deadline, just like PSR-18 failures.
 
 In both examples `$url` and `$token` are read from the environment as in the plain PHP example above. Symfony HttpClient's `Psr18Client` is the PSR-18 client and both PSR-17 factories at once. It needs a PSR-7 implementation such as `nyholm/psr7`:
 

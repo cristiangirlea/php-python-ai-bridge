@@ -73,12 +73,22 @@ final class CurlTransport implements Transport
                 throw new BridgeException('Response exceeds ' . self::MAX_RESPONSE_BYTES . ' bytes', 'invalid_response');
             }
             if ($ok === false) {
-                throw new BridgeException('Bridge transport failed; submission outcome may be unknown', 'transport_error');
+                throw self::failure(curl_errno($handle), $timeoutMs, curl_getinfo($handle, CURLINFO_CONNECT_TIME_T) > 0);
             }
             return new TransportResponse($status, is_string($contentType) ? $contentType : null, $response, $retryAfter);
         } finally {
             // PHP 8 releases CurlHandle objects; curl_close() is deprecated in 8.5.
             unset($handle);
         }
+    }
+
+    /** @internal Classifies a failed request without exposing cURL details. */
+    public static function failure(int $errno, int $timeoutMs, bool $connected): BridgeException
+    {
+        // A shorter connect timer can expire while the total request still has budget.
+        if ($errno === CURLE_OPERATION_TIMEDOUT && ($timeoutMs <= 1000 || $connected)) {
+            return new TransportTimeout();
+        }
+        return new BridgeException('Bridge transport failed; submission outcome may be unknown', 'transport_error');
     }
 }

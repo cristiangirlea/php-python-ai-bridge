@@ -164,7 +164,7 @@ final class Client
             if ($remaining < 1) {
                 throw new BridgeException('Local wait deadline exceeded; remote job may still be running', 'wait_timeout');
             }
-            $job = $this->jobResponse('GET', '/v1/jobs/' . $id, $id, null, min($remaining, $this->requestTimeoutMs), $deadline);
+            $job = $this->jobResponse('GET', '/v1/jobs/' . $id, $id, null, min($remaining, $this->requestTimeoutMs), $remaining <= $this->requestTimeoutMs);
             if ($job->isTerminal()) {
                 return $job;
             }
@@ -202,9 +202,9 @@ final class Client
      * @param non-empty-string $method
      * @param array<string, mixed>|null $body
      */
-    private function jobResponse(string $method, string $path, string $id, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): Job
+    private function jobResponse(string $method, string $path, string $id, ?array $body = null, ?int $timeoutMs = null, bool $deadlineCapped = false): Job
     {
-        $job = Job::fromArray($this->request($method, $path, $body, $timeoutMs, $waitDeadline));
+        $job = Job::fromArray($this->request($method, $path, $body, $timeoutMs, $deadlineCapped));
         if ($job->id !== $id) {
             throw new BridgeException('Job ID does not match the request', 'invalid_response');
         }
@@ -216,7 +216,7 @@ final class Client
      * @param array<string, mixed>|null $body
      * @return array<mixed>
      */
-    private function request(string $method, string $path, ?array $body = null, ?int $timeoutMs = null, ?int $waitDeadline = null): array
+    private function request(string $method, string $path, ?array $body = null, ?int $timeoutMs = null, bool $deadlineCapped = false): array
     {
         // Raw UTF-8 keeps the encoded size close to the byte budget; the worker decodes UTF-8 directly.
         $json = $body === null ? null : json_encode((object) $body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -226,9 +226,9 @@ final class Client
         $headers = ['Authorization' => 'Bearer ' . $this->token, 'Content-Type' => 'application/json', 'Accept' => 'application/json'];
         try {
             $response = $this->transport->send($method, $this->baseUrl . $path, $headers, $json, $timeoutMs ?? $this->requestTimeoutMs);
-        } catch (BridgeException $error) {
-            // A transport cut short by the wait's own budget is that wait timing out; cURL rounds to whole milliseconds.
-            if ($error->errorCode === 'transport_error' && $waitDeadline !== null && hrtime(true) >= $waitDeadline - 1_000_000) {
+        } catch (TransportTimeout $error) {
+            // The timer that bounded this poll determines the error, independently of clock rounding.
+            if ($deadlineCapped) {
                 throw new BridgeException('Local wait deadline exceeded; remote job may still be running', 'wait_timeout');
             }
             throw $error;

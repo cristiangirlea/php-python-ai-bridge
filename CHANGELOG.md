@@ -21,6 +21,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
+- A custom or PSR-18 transport's failure after the PHP `wait()` deadline is now `transport_error`; previously the clock alone could classify it as `wait_timeout`.
 - Rerank progress reports when completed batches cross step boundaries, including the final document.
 - Reranker acquisition downloads about 630 MB of models, plus the pinned wheels. The per-file cap is 128 MiB, raised to 300 MiB only for BGE's model.
 - The model workflow runs on version tags as well as its existing triggers. Publishing now waits for the read-only SQuAD quality gate in `publish.yml`; a default below BM25 prevents both image and release publication.
@@ -36,6 +37,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
+- PHP `wait()` identifies a cURL total timeout from a deadline-capped poll, including an equal-budget tie, as `wait_timeout` even when the transport timer fires early. Other transport failures, a shorter connection/DNS timeout and independent request timeouts remain `transport_error`.
 - The TLS and two-instance (`ha`) examples reject declared body lengths above 262144 bytes before dialing a worker, including leading-zero lengths, with the worker's fixed 413 JSON. The read limit remains for uploads without a length, which can still reach the worker; forwarded chunked uploads are refused by the worker itself.
 
 ## [0.4.0] - 2026-10-26
