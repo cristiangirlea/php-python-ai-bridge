@@ -317,7 +317,7 @@ docker compose -f docker/compose.yaml run --rm --no-deps -T model-quality
 docker compose -f docker/compose.yaml --profile model down
 ```
 
-`model-quality` prints this table and the next. The model workflow's `quality` job runs the same steps on GitHub's runners when the workflow is started by hand, and appends both tables to its job summary; it does not run on pull requests or on the schedule.
+`model-quality` prints this table and the next. The model workflow's `quality` job runs the same steps on GitHub's runners when the workflow is started by hand or a `v*` tag is pushed, and appends both tables to its job summary; it does not run on pull requests or on the schedule.
 
 ## Measured NER quality on WNUT-17 (informational)
 
@@ -416,10 +416,18 @@ Before deploying, test the actual application and framework combination, measure
 
 ## Reranker comparison on ArguAna
 
-The earlier exploratory table has been withdrawn: it came from an uncommitted tree
-on a shared Docker host, with MiniLM swapping. It does not establish the latency or
-memory acceptance criteria. TinyBERT was below BM25 for ArguAna-style argument retrieval;
-do not generalize a question-to-passage result to that domain.
+Measured 2026-10-29 at commit `07a9e62` on the hardware below, 200 queries per row, each row
+from a fresh worker:
+
+| Order | NDCG@10 | MRR@10 | Median s per job | p95 s per job | Peak MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BM25 | 0.449 | 0.356 | — | — | — |
+| TinyBERT (default) | 0.348 | 0.269 | 0.52 | 0.58 | 1169 |
+| MiniLM-L6, int8 | 0.423 | 0.334 | 3.56 | 3.83 | 1142 |
+| BGE-base, int8 | 0.275 | 0.213 | 16.95 | 19.07 | 1434 |
+
+No candidate beats BM25 on this argument-retrieval task. Do not generalize a
+question-to-passage result to this domain.
 
 The reproducible measurement runs 200 evenly spaced queries over ArguAna's 8,674
 documents, reranking this script's BM25 top 100 per query (one job per query). It uses
@@ -458,11 +466,14 @@ installation in tmpfs, model warm-up and jobs, not just process RSS. All model w
 have one CPU, one warm child, a 1536 MiB memory limit and `memswap_limit=1536m` (no swap).
 Batch sizes are 32 for TinyBERT, 8 for MiniLM and 4 for BGE. Before each row the runner
 polls `docker ps --format '{{.Names}}'` every 60 seconds for up to three hours, requiring
-no container outside `bridge-reranker`. It records the wait and refuses shared-host timings.
+no container outside `bridge-reranker` other than those `BENCH_STANDING` names. It records
+the wait and refuses timings taken beside other work.
 
 Hardware verified for this run: AMD Ryzen 9 9950X, 16 cores/32 logical processors,
 Windows 11 Pro with Docker Desktop Engine 29.8.2, Linux amd64 VM exposing 24 CPUs and
-33,653,149,696 bytes of memory. New candidate tables await the quiet-host measurements.
+33,653,149,696 bytes of memory. The host's standing services (a local Kubernetes CI cluster,
+a registry, an analytics stack and a database, together about a third of one core) ran
+throughout and were named in `BENCH_STANDING`; no other test or build ran.
 
 ## Reranker comparison on SQuAD v1.1
 
@@ -477,8 +488,20 @@ licence and hash are pinned in `scripts/public_data.py` and rechecked offline.
 The default selection budget is: SQuAD NDCG@10 above BM25, p95 below 2 seconds per
 job at these measured sizes, and completion inside the 1536 MiB worker with no swap.
 This sequential candidate budget differs from the sustained-load operational target.
-TinyBERT remains the existing default until the new measurements establish a change;
-the withdrawn shared-host timings cannot prove which larger candidate meets the budget.
+
+Measured with the ArguAna rows above:
+
+| Order | NDCG@10 | MRR@10 | Median s per job | p95 s per job | Peak MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BM25 | 0.843 | 0.816 | — | — | — |
+| TinyBERT (default) | 0.899 | 0.874 | 0.31 | 0.42 | 1141 |
+| MiniLM-L6, int8 | 0.942 | 0.929 | 1.59 | 2.14 | 1151 |
+| BGE-base, int8 | 0.650 | 0.585 | 7.55 | 9.45 | 1371 |
+
+TinyBERT stays the default: it is the only candidate that beats BM25 and meets the
+latency and memory budget. MiniLM ranks best but misses the p95 budget by 0.14 s; it suits
+a deployment that accepts about 2 s per 100-passage job. BGE's int8 conversion is below
+BM25 on both tasks and misses the latency budget.
 
 With `RELEVANCE_GATE=1`, `scripts/relevance_measure.py` requires its `GATE_DATASET`
 (`squad`) and fails when the default's NDCG@10 is below BM25; equality passes the release

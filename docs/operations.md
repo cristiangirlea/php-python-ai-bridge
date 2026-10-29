@@ -211,7 +211,9 @@ respectively. All model workers have a 1536 MiB memory limit with swap disabled
 (`memswap_limit` equals `mem_limit`); an allocation beyond the limit can kill a child.
 
 Use [the candidate tables](testing.md#reranker-comparison-on-squad-v11) for each model's
-measured memory, median and p95 job time. The candidate selection budget is p95 below
+measured memory, median and p95 job time. On SQuAD, TinyBERT reaches NDCG@10 0.899 at
+0.42 s p95, MiniLM 0.942 at 2.14 s and BGE 0.650 at 9.45 s, against BM25's 0.843; all stay
+under 1.4 GiB. The candidate selection budget is p95 below
 2 seconds for one sequential job reranking the BM25 top 100 passages, with 200 queries
 and the worker's usual input limits; it is separate from the sustained-load target
 above. TinyBERT is below BM25 on ArguAna-style argument retrieval, so its question-to-passage

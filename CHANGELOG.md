@@ -8,7 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
-- `BRIDGE_RERANK_MODEL` selects a pinned ONNX reranker; SQuAD v1.1 is available for quality measurement and the release model workflow compares its NDCG@10 with BM25.
+- `BRIDGE_RERANK_MODEL` selects a pinned ONNX reranker: `tinybert` (default), `minilm-l6` or `bge-base`, with measured SQuAD and ArguAna tables and an int8/fp32 parity check. SQuAD v1.1 is available for quality measurement, and the release model workflow compares its NDCG@10 with BM25. Model workers no longer swap past their memory limit.
 - A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.
 - Reproducible raw-socket request fuzzing: a fixed corpus followed by fresh seeded multi-byte flips, inserts, deletes and splices, with `BRIDGE_FUZZ_SECONDS` for longer runs and distinct-input counts; slow-client connection-budget recovery tests.
 - Body and header limits and read/write timeouts in the Caddy TLS example; oversized bodies are rejected before contacting the worker.
