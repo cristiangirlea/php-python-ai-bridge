@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-29
+
 ### Added
 
 - Native amd64 and arm64 worker image build, import, CLI and authenticated health checks on every pull request; publishing also requires a read-only native arm64 pre-check before pushing images or creating a release. These checks fetch no models and do not run model inference.
@@ -108,7 +110,8 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 
-[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.1.0...v0.2.0
