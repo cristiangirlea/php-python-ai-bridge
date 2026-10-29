@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
+- Native amd64 and arm64 worker image build, import, CLI and authenticated health checks on every pull request; publishing also requires a read-only native arm64 pre-check before pushing images or creating a release. These checks fetch no models and do not run model inference.
 - `BRIDGE_RERANK_MODEL` selects a pinned ONNX reranker: `tinybert` (default), `minilm-l6` or `bge-base`, with batch sizes 32, 8 and 4, measured SQuAD and ArguAna tables and an int8/fp32 parity check. SQuAD v1.1 is available for quality measurement. Model workers no longer swap past their memory limit.
 - Optional `BRIDGE_INSTANCE_ID` prefixes on job IDs, accepted by the worker, PHP client and MCP client, with restored IDs preserved across instance-name changes. A two-instance `ha` Compose profile routes reads and cancels by prefix; its required CI drill verifies hard-crash failure, retained idempotency keys and bounded recovery with a new key.
 - A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.

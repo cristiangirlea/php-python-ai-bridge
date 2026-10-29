@@ -1,4 +1,4 @@
-"""The workflows run on GitHub's hosted runners, every job of them, with no self-hosted runner and no runner variable.
+"""Every workflow job uses GitHub's hosted runners, with no self-hosted runner or repository-selected runner.
 
 The repository is public: GitHub does not meter Actions minutes for it, and a fork's pull request runs its own code
 on a disposable runner of GitHub's, never on a machine of the maintainer's. Nothing here installs Docker Compose,
@@ -15,6 +15,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 WORKFLOWS = sorted(path for ext in ("*.yml", "*.yaml") for path in (REPO / ".github" / "workflows").glob(ext))
 RUNS_ON = "runs-on: ubuntu-latest"
+IMAGE_MATRIX = [
+    "strategy:", "fail-fast: false", "matrix:", "include:",
+    "- runner: ubuntu-latest", "platform: linux/amd64", "arch: amd64",
+    "- runner: ubuntu-24.04-arm", "platform: linux/arm64", "arch: arm64",
+]
 # A step's `uses:` may follow its `name:` (so the dash is optional) and may quote its value.
 USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 # Every spelling of the key YAML accepts (quoted, a space before the colon, a flow-style step), so that a line
@@ -52,6 +57,26 @@ def jobs(text: str, workflow: str = "<workflow>") -> dict:
 def runs_on_lines(text: str) -> int:
     """How many `runs-on:` lines the file has, wherever they are: the number of jobs the reader should have found."""
     return len(re.findall(r"^\s*runs-on:", text, re.MULTILINE))
+
+
+def check_hosted_runners(text: str, workflow: str) -> None:
+    """Only the image matrix and publish pre-check may select the hosted ARM runner."""
+    found = jobs(text, workflow)
+    if len(found) != runs_on_lines(text):
+        raise AssertionError(f"{workflow}: unread job or runner")
+    for name, lines in found.items():
+        expected = RUNS_ON
+        if (workflow, name) == ("tests.yml", "images"):
+            expected = "runs-on: ${{ matrix.runner }}"
+            if "strategy:" not in lines or "steps:" not in lines:
+                raise AssertionError("images: missing native platform matrix")
+            start, end = lines.index("strategy:"), lines.index("steps:")
+            if lines[start:end] != IMAGE_MATRIX:
+                raise AssertionError("images: only the two native hosted platforms are allowed")
+        elif (workflow, name) == ("publish.yml", "arm64"):
+            expected = "runs-on: ubuntu-24.04-arm"
+        if [line for line in lines if line.startswith("runs-on:")] != [expected]:
+            raise AssertionError(f"{workflow}/{name}: expected {expected}")
 
 
 def steps(text: str) -> list:
@@ -103,7 +128,7 @@ def inputs(step: list) -> list:
 class WorkflowTests(unittest.TestCase):
     def test_publishing_requires_a_read_only_quality_gate(self):
         found = jobs((REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8"))
-        self.assertIn("needs: [quality]", found["publish"])
+        self.assertIn("needs: [quality, arm64]", found["publish"])
         gate = "\n".join(found["quality"])
         self.assertIn("if: startsWith(github.ref, 'refs/tags/v')", found["quality"])
         self.assertNotIn("continue-on-error", gate)
@@ -117,7 +142,43 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("if:", "\n".join(found["publish"]))
         for name, lines in found.items():
             if any(line.endswith(": write") for line in lines):
-                self.assertIn("needs: [quality]", lines, name)
+                self.assertIn("needs: [quality, arm64]", lines, name)
+
+    def test_native_image_checks_cover_both_platforms_and_gate_publication(self):
+        tests = jobs((REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8"))
+        publish = jobs((REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8"))
+        image = tests["images"]
+        self.assertIn("name: Worker images (${{ matrix.arch }})", image)
+        self.assertEqual(image[image.index("strategy:"):image.index("steps:")], IMAGE_MATRIX)
+        self.assertFalse(any(line.startswith("if:") for line in image[:image.index("steps:")]))
+        self.assertIn("arm64", publish)
+        gate = publish["arm64"]
+        self.assertIn("if: startsWith(github.ref, 'refs/tags/v')", gate)
+        self.assertIn("permissions:", gate)
+        self.assertIn("contents: read", gate)
+        for forbidden in ("secrets.", ": write", "continue-on-error", "setup-qemu", "push: true"):
+            self.assertNotIn(forbidden, "\n".join(gate))
+        self.assertNotIn("setup-qemu", "\n".join(image))
+        # Both workflows use the same build, imports, CLI, authenticated health probes and cleanup.
+        image_steps = image[image.index("steps:"):]
+        gate_steps = gate[gate.index("steps:"):]
+        self.assertEqual(gate_steps, [line.replace("${{ matrix.platform }}", "linux/arm64") for line in image_steps])
+        for lines, platform in ((image, "${{ matrix.platform }}"), (gate, "linux/arm64")):
+            self.assertEqual(lines.count(f"platforms: {platform}"), 2)
+            self.assertEqual(lines.count("push: false"), 2)
+            self.assertEqual(lines.count("load: true"), 2)
+            block = "\n".join(lines)
+            for command in (
+                "import ai_bridge.server", "import onnxruntime, tokenizers, numpy, ai_bridge.server",
+                "docker run --rm bridge-worker:ci --help", "docker run --rm bridge-worker-onnx:ci --help",
+                'headers={"Authorization": "Bearer " + os.environ["BRIDGE_TOKEN"]}',
+                "-c \"$PROBE\" lexical", "BRIDGE_BACKEND=lexical", "if: always()",
+                "docker rm -f bridge-worker-ci bridge-worker-onnx-ci",
+            ):
+                self.assertIn(command, block)
+        for name, lines in publish.items():
+            if any(line.endswith(": write") for line in lines):
+                self.assertIn("needs: [quality, arm64]", lines, name)
 
     def test_model_workers_disable_swap_and_release_passes_selection(self):
         text = (REPO / "docker/compose.yaml").read_text(encoding="utf-8")
@@ -194,9 +255,32 @@ jobs:  # the jobs
 
     def test_every_job_runs_on_github_hosted_ubuntu(self):
         for path in WORKFLOWS:
-            for name, lines in jobs(path.read_text(encoding="utf-8"), path.name).items():
-                with self.subTest(workflow=path.name, job=name):
-                    self.assertEqual([line for line in lines if line.startswith("runs-on:")], [RUNS_ON])
+            with self.subTest(workflow=path.name):
+                check_hosted_runners(path.read_text(encoding="utf-8"), path.name)
+
+    def test_runner_exceptions_are_scoped_and_reject_other_labels(self):
+        for workflow in ("tests.yml", "publish.yml", "model-smoke.yml", "codeql.yml"):
+            for name in ("images", "arm64", "php", "quality"):
+                for label in ("ubuntu-latest", "ubuntu-24.04-arm", "self-hosted", "windows-latest",
+                              "${{ vars.CI_RUNNER }}", "${{ matrix.runner }}", "[ubuntu-latest]", ""):
+                    text = f"jobs:\n  {name}:\n    runs-on: {label}\n"
+                    if (workflow, name) == ("tests.yml", "images"):
+                        text += "\n".join(f"    {line}" for line in IMAGE_MATRIX) + "\n    steps:\n"
+                        allowed = label == "${{ matrix.runner }}"
+                    elif (workflow, name) == ("publish.yml", "arm64"):
+                        allowed = label == "ubuntu-24.04-arm"
+                    else:
+                        allowed = label == "ubuntu-latest"
+                    with self.subTest(workflow=workflow, job=name, label=label):
+                        if allowed:
+                            check_hosted_runners(text, workflow)
+                        else:
+                            with self.assertRaises(AssertionError):
+                                check_hosted_runners(text, workflow)
+        text = (REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+        for label in ("self-hosted", "windows-latest", "${{ vars.CI_RUNNER }}", "ubuntu-latest"):
+            with self.subTest(matrix_label=label), self.assertRaises(AssertionError):
+                check_hosted_runners(text.replace("runner: ubuntu-24.04-arm", f"runner: {label}"), "tests.yml")
 
     def test_no_workflow_names_a_self_hosted_runner_or_a_runner_variable(self):
         # A `runs-on` expression is how a self-hosted runner or a fallback to one would come back. Only the
@@ -206,12 +290,8 @@ jobs:  # the jobs
             with self.subTest(workflow=path.name):
                 self.assertNotIn("vars.CI_RUNNER", text)
                 self.assertNotIn("runner.environment", text)
-                self.assertNotRegex(text, r"runs-on: *\$\{\{")
                 self.assertNotRegex(text, r"runs-on: *\[")
-                # Every runs-on line in the file, whatever jobs() made of the job around it: a block form
-                # (`runs-on:` followed by `- self-hosted`) is a bare `runs-on:` line, which is not RUNS_ON.
-                for line in re.findall(r"^\s*runs-on:.*$", text, re.MULTILINE):
-                    self.assertEqual(line.strip(), RUNS_ON, line)
+                check_hosted_runners(text, path.name)
 
     def test_no_step_uses_a_local_action(self):
         # GitHub's runner images ship the Docker Compose plugin; the lab-only install action is gone with the lab.
@@ -325,6 +405,8 @@ jobs:  # the jobs
     def test_the_gate_requires_the_image_builds(self):
         found = jobs((REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"), "tests.yml")
         self.assertIn("needs: [php, mcp, images, drills]", found["deterministic"])
+        self.assertIn("if: always()", found["deterministic"])
+        self.assertIn("IMAGES_RESULT: ${{ needs.images.result }}", found["deterministic"])
         self.assertTrue(any('"$IMAGES_RESULT" = success' in line for line in found["deterministic"]))
 
     def test_the_required_mcp_job_runs_instance_routing_and_hard_crash_recovery(self):
@@ -354,7 +436,8 @@ jobs:  # the jobs
         self.assertIn("on:\n  push:\n    tags: ['v*']\n  workflow_dispatch:\n", text)
         self.assertNotIn("pull_request", text)
         self.assertEqual(set(re.findall(r"secrets\.(\w+)", text)), {"GITHUB_TOKEN"})
-        for platforms in re.findall(r"platforms:\s*(.*)", text):
+        publishing = "\n".join(jobs(text)["publish"])
+        for platforms in re.findall(r"platforms:\s*(.*)", publishing):
             self.assertEqual(platforms, "linux/amd64,linux/arm64")
 
     def test_publishing_starts_only_from_a_version_tag(self):
