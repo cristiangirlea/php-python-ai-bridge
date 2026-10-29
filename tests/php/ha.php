@@ -39,7 +39,36 @@ $client = new Client(getenv('BRIDGE_URL') ?: throw new RuntimeException('Set BRI
     getenv('BRIDGE_TOKEN') ?: throw new RuntimeException('Set BRIDGE_TOKEN'));
 $mode = $argv[1] ?? 'roundtrip';
 
-if ($mode === 'roundtrip') {
+if ($mode === 'request-log') {
+    $requests = [];
+    while (($line = fgets(STDIN)) !== false) {
+        $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        if (is_array($entry) && ($entry['event'] ?? null) === 'request') {
+            $requests[] = $entry;
+        }
+    }
+    $markers = array_keys(array_filter($requests, static fn (array $entry): bool =>
+        $entry['method'] === 'GET' && $entry['route'] === '/metrics' && $entry['status'] === 200));
+    check(count($markers) >= 2, 'the worker logged both authenticated metrics markers');
+    $between = array_slice($requests, $markers[count($markers) - 2] + 1, $markers[count($markers) - 1] - $markers[count($markers) - 2] - 1);
+    $posts = array_filter($between, static fn (array $entry): bool => $entry['method'] === 'POST');
+    check($posts === [], 'the worker logged no POST between the oversized request markers: ' . json_encode($between));
+    echo "PASS: $count HA worker-log checks; oversized POST never reached this worker\n";
+} elseif ($mode === 'roundtrip') {
+    $markers = static function (): void {
+        foreach (['worker-a', 'worker-b'] as $worker) {
+            $reply = (new CurlTransport())->send('GET', 'http://' . $worker . ':8090/metrics',
+                ['Authorization' => 'Bearer ' . getenv('BRIDGE_TOKEN')], null, 5000);
+            check($reply->status === 200, 'authenticated metrics marker from ' . $worker);
+        }
+    };
+    // Bracket the proxy refusal in both workers' logs, including unauthenticated forwarding.
+    $markers();
+    $reply = (new CurlTransport())->send('POST', getenv('BRIDGE_URL') . '/v1/jobs',
+        ['Content-Type' => 'application/json', 'Content-Length' => '262145'], '', 5000);
+    check($reply->status === 413 && $reply->body === '{"error":{"code":"body_too_large","message":"Request exceeds 262144 bytes"}}',
+        'a declared oversized POST gets the fixed proxy 413 JSON');
+    $markers();
     foreach (['c-' . str_repeat('f', 32), 'a-' . str_repeat('f', 32),
               'b-' . str_repeat('f', 32), str_repeat('f', 32)] as $id) {
         $reply = (new CurlTransport())->send('GET', getenv('BRIDGE_URL') . '/v1/jobs/' . $id, [], null, 5000);
@@ -161,5 +190,5 @@ if ($mode === 'roundtrip') {
     check($recovered, 'recovery succeeded within two fresh-key submissions, excluding preparation and old-key probes');
     echo "PASS: HA new-key recovery succeeds through the same URL with a capped attempt count\n";
 } else {
-    throw new RuntimeException('Usage: php tests/php/ha.php roundtrip|prepare|recover');
+    throw new RuntimeException('Usage: php tests/php/ha.php roundtrip|prepare|recover|request-log');
 }

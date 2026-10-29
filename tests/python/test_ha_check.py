@@ -10,6 +10,16 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 class HaDriverTests(unittest.TestCase):
+    def test_ha_and_tls_oversized_length_matchers_are_identical(self):
+        matchers = []
+        for example in ("ha", "tls"):
+            lines = (REPO / "examples" / example / "Caddyfile").read_text().splitlines()
+            matches = [line.split("Content-Length ", 1)[1] for line in lines
+                       if line.strip().startswith("@oversized header_regexp Content-Length ")]
+            self.assertEqual(len(matches), 1, example)
+            matchers.append(matches[0])
+        self.assertEqual(*matchers)
+
     def test_cleanup_survives_a_failed_log_command_and_keeps_the_original_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "commands"
