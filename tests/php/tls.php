@@ -120,7 +120,7 @@ if ($mode === 'request-log') {
         }
         return $matches[0];
     };
-    $post = static function (string $payload, string ...$headers) use ($url): array {
+    $post = static function (string $payload, int $version = CURL_HTTP_VERSION_1_1, string ...$headers) use ($url): array {
         $handle = curl_init();
         curl_setopt_array($handle, [
             CURLOPT_URL => $url . '/v1/jobs',
@@ -129,19 +129,20 @@ if ($mode === 'request-log') {
             CURLOPT_HTTPHEADER => array_merge(['Content-Type: application/json', 'Expect:'], array_values($headers)),
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
-            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+            CURLOPT_HTTP_VERSION => $version,
             CURLOPT_TIMEOUT => 5,
         ]);
         $body = curl_exec($handle);
         $status = curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+        $negotiated = curl_getinfo($handle, CURLINFO_HTTP_VERSION);
         unset($handle);
-        return [$status, is_string($body) ? $body : false];
+        return [$status, is_string($body) ? $body : false, $negotiated];
     };
     $tooLarge = '{"error":{"code":"body_too_large","message":"Request exceeds 262144 bytes"}}';
     // Metrics distinguish forwarded boundary bodies from declarations refused before any upstream request.
     $submissions();
     foreach (['262144', '0262144'] as $length) {
-        [$status, $body] = $post(str_repeat('x', 262144), 'Content-Length: ' . $length);
+        [$status, $body] = $post(str_repeat('x', 262144), CURL_HTTP_VERSION_1_1, 'Content-Length: ' . $length);
         check($status === 401 && is_string($body) && str_contains($body, 'unauthorized'), 'an exact-limit body reaches worker authentication: ' . $length . ' status ' . $status . ' body ' . var_export($body, true));
     }
     $before = $submissions();
@@ -149,14 +150,32 @@ if ($mode === 'request-log') {
     check($status === 413 && $body === $tooLarge, 'the proxy answers an oversized body with the fixed 413 JSON');
     foreach (['262145', '0262145', '262149', '262150', '262199', '262200', '262999', '263000', '269999', '270000', '299999', '300000', '999999', '1000000', '999999999999999999'] as $length) {
         // No body is sent: the declared size alone must produce the refusal.
-        [$status, $body] = $post('', 'Content-Length: ' . $length);
+        [$status, $body] = $post('', CURL_HTTP_VERSION_1_1, 'Content-Length: ' . $length);
         check($status === 413 && $body === $tooLarge, 'a declared oversized length gets the fixed 413 JSON: ' . $length);
     }
+    [$status, $body, $version] = $post('', CURL_HTTP_VERSION_2TLS, 'Content-Length: 262145');
+    check($version === CURL_HTTP_VERSION_2_0 && $status === 413 && $body === $tooLarge,
+        'a declared oversized length over HTTP/2 gets the fixed 413 JSON');
+    // A raw TLS socket preserves both conflicting Content-Length headers on the wire.
+    $context = stream_context_create(['ssl' => ['cafile' => $root, 'verify_peer' => true, 'verify_peer_name' => true]]);
+    $socket = stream_socket_client('tls://' . $host . ':' . $port, $code, $reason, 5, STREAM_CLIENT_CONNECT, $context);
+    if ($socket === false) {
+        throw new RuntimeException('The TLS socket for duplicate lengths did not connect');
+    }
+    stream_set_timeout($socket, 5);
+    fwrite($socket, "POST /v1/jobs HTTP/1.1\r\nHost: $host:$port\r\nContent-Length: 1\r\nContent-Length: 262145\r\nConnection: close\r\n\r\nx");
+    $response = stream_get_contents($socket);
+    fclose($socket);
+    check(is_string($response) && str_starts_with($response, 'HTTP/1.1 400 '),
+        'conflicting Content-Length headers over HTTP/1.1 are refused with 400');
     check($submissions() === $before, 'the oversized POST changes no submitted-job counter');
 
-    [$status] = $post('', 'Content-Length: invalid');
-    check($status === 400, 'a non-numeric Content-Length is refused');
-    [$status, $body] = $post('{"task":"rerank","input":{"query":"France","documents":["Paris"]}}', 'Transfer-Encoding: chunked', 'Authorization: Bearer ' . $token);
+    [$status] = $post('', CURL_HTTP_VERSION_1_1, 'Content-Length: invalid');
+    check($status === 400, 'a non-numeric Content-Length over HTTP/1.1 is refused with 400');
+    [$status, $body, $version] = $post('', CURL_HTTP_VERSION_2TLS, 'Content-Length: invalid');
+    check($version === CURL_HTTP_VERSION_2_0 && $status === 401 && $body === '{"error":{"code":"unauthorized","message":"Service authentication required"}}',
+        'a non-numeric Content-Length over HTTP/2 reaches worker authentication');
+    [$status, $body] = $post('{"task":"rerank","input":{"query":"France","documents":["Paris"]}}', CURL_HTTP_VERSION_1_1, 'Transfer-Encoding: chunked');
     check($status === 400 && $body === '{"error":{"code":"invalid_request","message":"Request does not match the task contract"}}', 'a chunked upload reaches the worker as Transfer-Encoding and is refused before authentication');
 
     $error = failure(fn () => (new Client($url, str_repeat('x', 32)))->get($unknownJob));

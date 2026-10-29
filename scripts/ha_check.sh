@@ -24,6 +24,10 @@ echo '+ docker compose -p bridge-instances -f docker/compose.yaml --profile ha u
 compose up -d --wait --wait-timeout 60 worker-a worker-b ha-proxy
 echo '+ docker compose -p bridge-instances -f docker/compose.yaml --profile ha run --rm --no-deps -T ha-check php tests/php/ha.php roundtrip'
 compose run --rm --no-deps -T ha-check php tests/php/ha.php roundtrip
+for worker in worker-a worker-b; do
+    echo "+ check $worker request log for oversized POST forwarding"
+    compose logs --no-log-prefix --no-color "$worker" | compose run --rm --no-deps -T ha-check php tests/php/ha.php request-log
+done
 echo '+ docker compose -p bridge-instances -f docker/compose.yaml --profile ha run --rm --no-deps -T ha-check php tests/php/ha.php prepare'
 target=$(compose run --rm --no-deps -T ha-check php tests/php/ha.php prepare)
 HA_JOB_ID=${target%% *}
