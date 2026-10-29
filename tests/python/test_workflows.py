@@ -60,7 +60,7 @@ def runs_on_lines(text: str) -> int:
 
 
 def check_hosted_runners(text: str, workflow: str) -> None:
-    """Only the image matrix and publish pre-check may select the hosted ARM runner."""
+    """Only the image matrix and native publisher may select the hosted ARM runner."""
     found = jobs(text, workflow)
     if len(found) != runs_on_lines(text):
         raise AssertionError(f"{workflow}: unread job or runner")
@@ -73,7 +73,7 @@ def check_hosted_runners(text: str, workflow: str) -> None:
             start, end = lines.index("strategy:"), lines.index("steps:")
             if lines[start:end] != IMAGE_MATRIX:
                 raise AssertionError("images: only the two native hosted platforms are allowed")
-        elif (workflow, name) == ("publish.yml", "arm64"):
+        elif (workflow, name) == ("publish.yml", "build-arm64"):
             expected = "runs-on: ubuntu-24.04-arm"
         if [line for line in lines if line.startswith("runs-on:")] != [expected]:
             raise AssertionError(f"{workflow}/{name}: expected {expected}")
@@ -109,6 +109,41 @@ def action(step: list) -> str:
     return next((USES.match(line).group(1) for line in step if USES.match(line)), "")
 
 
+def job_steps(text: str, name: str) -> list:
+    """Keep step indentation when selecting one job for exact comparisons."""
+    block = re.search(rf"^  {name}:\n.*?(?=^  [\w-]+:|\Z)", text, re.MULTILINE | re.DOTALL)
+    if block is None:
+        raise AssertionError(f"missing job: {name}")
+    return steps(block.group())
+
+
+def run_scripts(text: str) -> list[str]:
+    """Read inline and indented block scripts without including adjacent step fields."""
+    found = []
+    lines = text.splitlines()
+    position = 0
+    while position < len(lines):
+        line = lines[position]
+        position += 1
+        key = re.match(r"""^( *)(?:- +)?['\"]?run['\"]? *: *(.*)$""", line)
+        if key is None:
+            continue
+        value = key.group(2)
+        if re.fullmatch(r"[|>][+-]?[1-9]? *(?:#.*)?", value):
+            indent = line.index("run")
+            body = []
+            while position < len(lines):
+                below = lines[position]
+                if below.strip() and len(below) - len(below.lstrip()) <= indent:
+                    break
+                body.append(below)
+                position += 1
+            found.append("\n".join(body))
+        else:
+            found.append(value)
+    return found
+
+
 def is_checkout(step: list) -> bool:
     """Whether the step runs actions/checkout; GitHub reads owner and repository names case-insensitively."""
     return action(step).lstrip("'\"").lower().startswith("actions/checkout@")
@@ -126,9 +161,69 @@ def inputs(step: list) -> list:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_no_workflow_interpolates_expressions_into_run_scripts(self):
+        for path in WORKFLOWS:
+            for script in run_scripts(path.read_text(encoding="utf-8")):
+                with self.subTest(workflow=path.name, script=script.splitlines()[0]):
+                    self.assertNotIn("${{", script)
+
+    def test_run_reader_separates_scripts_from_step_fields(self):
+        text = """steps:
+  - run: echo inline
+  - name: Block
+    env:
+      VALUE: ${{ steps.previous.outputs.value }}
+    run: |-
+      echo "$VALUE"
+
+      echo done
+    timeout-minutes: 1
+  - run: >
+      echo folded
+  - run: echo consecutive
+  - run: |
+      echo block
+    env:
+      VALUE: ${{ github.sha }}
+  - run: echo last
+"""
+        self.assertEqual(run_scripts(text), [
+            "echo inline", '      echo "$VALUE"\n\n      echo done', "      echo folded", "echo consecutive",
+            "      echo block", "echo last",
+        ])
+
+    def test_publish_passes_each_comma_separated_tag_separately(self):
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        tag_steps = [step for step in job_steps(text, "publish") if any("imagetools create" in line for line in step)]
+        self.assertEqual(len(tag_steps), 2)
+        for step in tag_steps:
+            script = run_scripts("\n".join(step))[0]
+            with self.subTest(step=step[0].strip()):
+                self.assertIn('IFS=\',\' read -ra names <<< "$TAGS"', script)
+                self.assertIn('for tag in "${names[@]}"; do tags+=(-t "$tag"); done', script)
+                self.assertIn('imagetools create "${tags[@]}"', script)
+                self.assertNotIn('-t "$TAGS"', script)
+
+    def test_publish_validates_input_and_index_digests_before_output(self):
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        tag_steps = [step for step in job_steps(text, "publish") if any("imagetools create" in line for line in step)]
+        self.assertEqual(len(tag_steps), 2)
+        for step in tag_steps:
+            script = run_scripts("\n".join(step))[0]
+            with self.subTest(step=step[0].strip()):
+                self.assertIn("set -o pipefail", script)
+                for variable, label in (("AMD64_DIGEST", "AMD64"), ("ARM64_DIGEST", "ARM64"), ("digest", "index")):
+                    guard = f'[[ "${variable}" =~ ^sha256:[0-9a-f]{{64}}$ ]] || {{ echo "Invalid {label} digest" >&2; exit 1; }}'
+                    self.assertIn(guard, script)
+                    target = "imagetools create" if variable != "digest" else 'echo "digest=$digest" >> "$GITHUB_OUTPUT"'
+                    self.assertLess(script.index(guard), script.index(target))
+                self.assertIn("| jq -r '.digest')", script)
+                self.assertLess(script.index("set -o pipefail"), script.index("digest=$("))
+                self.assertLess(script.index("digest=$("), script.index('[[ "$digest"'))
+
     def test_publishing_requires_a_read_only_quality_gate(self):
         found = jobs((REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8"))
-        self.assertIn("needs: [quality, arm64]", found["publish"])
+        self.assertIn("needs: [quality, build-amd64, build-arm64]", found["publish"])
         gate = "\n".join(found["quality"])
         self.assertIn("if: startsWith(github.ref, 'refs/tags/v')", found["quality"])
         self.assertNotIn("continue-on-error", gate)
@@ -141,44 +236,99 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("python scripts/relevance_measure.py", gate)
         self.assertNotIn("if:", "\n".join(found["publish"]))
         for name, lines in found.items():
-            if any(line.endswith(": write") for line in lines):
-                self.assertIn("needs: [quality, arm64]", lines, name)
+            if name.startswith("build-"):
+                self.assertIn("needs: [quality]", lines, name)
 
     def test_native_image_checks_cover_both_platforms_and_gate_publication(self):
         tests = jobs((REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8"))
-        publish = jobs((REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8"))
+        publish_text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        publish = jobs(publish_text)
         image = tests["images"]
         self.assertIn("name: Worker images (${{ matrix.arch }})", image)
         self.assertEqual(image[image.index("strategy:"):image.index("steps:")], IMAGE_MATRIX)
         self.assertFalse(any(line.startswith("if:") for line in image[:image.index("steps:")]))
-        self.assertIn("arm64", publish)
-        gate = publish["arm64"]
-        self.assertIn("if: startsWith(github.ref, 'refs/tags/v')", gate)
-        self.assertIn("permissions:", gate)
-        self.assertIn("contents: read", gate)
-        for forbidden in ("secrets.", ": write", "continue-on-error", "setup-qemu", "push: true"):
-            self.assertNotIn(forbidden, "\n".join(gate))
-        self.assertNotIn("setup-qemu", "\n".join(image))
-        # Both workflows use the same build, imports, CLI, authenticated health probes and cleanup.
-        image_steps = image[image.index("steps:"):]
-        gate_steps = gate[gate.index("steps:"):]
-        self.assertEqual(gate_steps, [line.replace("${{ matrix.platform }}", "linux/arm64") for line in image_steps])
-        for lines, platform in ((image, "${{ matrix.platform }}"), (gate, "linux/arm64")):
-            self.assertEqual(lines.count(f"platforms: {platform}"), 2)
-            self.assertEqual(lines.count("push: false"), 2)
-            self.assertEqual(lines.count("load: true"), 2)
-            block = "\n".join(lines)
-            for command in (
-                "import ai_bridge.server", "import onnxruntime, tokenizers, numpy, ai_bridge.server",
-                "docker run --rm bridge-worker:ci --help", "docker run --rm bridge-worker-onnx:ci --help",
-                'headers={"Authorization": "Bearer " + os.environ["BRIDGE_TOKEN"]}',
-                "-c \"$PROBE\" lexical", "BRIDGE_BACKEND=lexical", "if: always()",
-                "docker rm -f bridge-worker-ci bridge-worker-onnx-ci",
-            ):
-                self.assertIn(command, block)
-        for name, lines in publish.items():
-            if any(line.endswith(": write") for line in lines):
-                self.assertIn("needs: [quality, arm64]", lines, name)
+        self.assertEqual(set(publish), {"quality", "build-amd64", "build-arm64", "publish"})
+        expected_checks = job_steps((REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8"), "images")[-3:]
+        expected_checks = [[line.replace("bridge-worker-onnx:ci", '"$IMAGE-onnx@$ONNX_DIGEST"')
+                            .replace("bridge-worker:ci", '"$IMAGE@$WORKER_DIGEST"')
+                            for line in step] for step in expected_checks]
+        for step in expected_checks[:2]:
+            if "        env:" not in step:
+                step.insert(step.index("        run: |"), "        env:")
+            start = step.index("        env:") + 1
+            step[start:start] = [
+                "          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}",
+                "          ONNX_DIGEST: ${{ steps.onnx.outputs.digest }}",
+            ]
+        for arch, runner in (("amd64", "ubuntu-latest"), ("arm64", "ubuntu-24.04-arm")):
+            with self.subTest(arch=arch):
+                lines = publish[f"build-{arch}"]
+                self.assertIn(f"runs-on: {runner}", lines)
+                self.assertIn("needs: [quality]", lines)
+                header = lines[:lines.index("steps:")]
+                self.assertFalse(any(line.startswith(("if:", "strategy:")) for line in header))
+                self.assertIn("worker: ${{ steps.worker.outputs.digest }}", header)
+                self.assertIn("onnx: ${{ steps.onnx.outputs.digest }}", header)
+                self.assertIn('DOCKER_BUILD_RECORD_UPLOAD: "false"', header)
+                block = "\n".join(lines)
+                for forbidden in ("continue-on-error", "tags:", "load:", "push: false"):
+                    self.assertNotIn(forbidden, block)
+                build_steps = job_steps(publish_text, f"build-{arch}")
+                builds = [step for step in build_steps if action(step).startswith("docker/build-push-action@")]
+                self.assertEqual(len(builds), 2)
+                for step, suffix in zip(builds, ("", "-onnx")):
+                    self.assertIn(f"platforms: linux/{arch}", inputs(step))
+                    self.assertIn(f"file: docker/Dockerfile.worker{suffix}", inputs(step))
+                    self.assertIn(f"outputs: type=image,name=${{{{ env.IMAGE }}}}{suffix},push-by-digest=true,name-canonical=true,push=true", inputs(step))
+                    self.assertIn("provenance: true", inputs(step))
+                    self.assertIn("sbom: true", inputs(step))
+                pull = next(i for i, step in enumerate(build_steps) if step[0].strip() == "- name: Pull the pushed images")
+                self.assertGreater(pull, max(build_steps.index(step) for step in builds))
+                for step in build_steps[pull:pull + 3]:
+                    self.assertIn("WORKER_DIGEST: ${{ steps.worker.outputs.digest }}", [line.strip() for line in step])
+                    self.assertIn("ONNX_DIGEST: ${{ steps.onnx.outputs.digest }}", [line.strip() for line in step])
+                self.assertEqual([line.strip() for line in run_scripts("\n".join(build_steps[pull]))[0].splitlines()], [
+                    'docker pull "$IMAGE@$WORKER_DIGEST"',
+                    'docker pull "$IMAGE-onnx@$ONNX_DIGEST"',
+                ])
+                self.assertEqual(build_steps[pull + 1:], expected_checks)
+
+    def test_no_workflow_uses_qemu_or_publish_artifacts(self):
+        for path in WORKFLOWS:
+            self.assertNotIn("setup-qemu-action", path.read_text(encoding="utf-8"))
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        self.assertNotIn("upload-artifact", text)
+        self.assertNotIn("download-artifact", text)
+
+    def test_publish_combines_and_attests_the_tested_digests(self):
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        publish = "\n".join(jobs(text)["publish"])
+        self.assertNotIn("docker/build-push-action", publish)
+        for name, suffix in (("worker", ""), ("onnx", "-onnx")):
+            for arch in ("amd64", "arm64"):
+                self.assertIn(f"{arch.upper()}_DIGEST: ${{{{ needs.build-{arch}.outputs.{name} }}}}", publish)
+            self.assertIn(f'TAGS: ${{{{ steps.version.outputs.{name} }}}}', publish)
+            self.assertIn(f'docker buildx imagetools create "${{tags[@]}}" "$IMAGE{suffix}@$AMD64_DIGEST" "$IMAGE{suffix}@$ARM64_DIGEST"', publish)
+            self.assertIn(f'''docker buildx imagetools inspect "$IMAGE{suffix}:$VERSION" --format '{{{{json .Manifest}}}}' ''', publish)
+        attestations = [step for step in job_steps(text, "publish") if action(step).startswith("actions/attest-build-provenance@")]
+        self.assertEqual(len(attestations), 2)
+        for step, name, suffix in zip(attestations, ("worker", "onnx"), ("", "-onnx")):
+            self.assertIn(f"subject-name: ${{{{ env.IMAGE }}}}{suffix}", inputs(step))
+            self.assertIn(f"subject-digest: ${{{{ steps.{name}.outputs.digest }}}}", inputs(step))
+            self.assertIn("push-to-registry: true", inputs(step))
+
+    def test_publishing_permissions_are_scoped_to_each_job(self):
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        self.assertIn("\npermissions:\n  contents: read\n", text)
+        for name, lines in jobs(text).items():
+            start = lines.index("permissions:") + 1
+            permissions = list(itertools.takewhile(lambda line: line.startswith(("contents:", "packages:", "id-token:", "attestations:")), lines[start:]))
+            expected = ["contents: read"]
+            if name.startswith("build-"):
+                expected += ["packages: write"]
+            elif name == "publish":
+                expected = ["contents: write", "packages: write", "id-token: write", "attestations: write"]
+            self.assertEqual(permissions, expected, name)
 
     def test_model_workers_disable_swap_and_release_passes_selection(self):
         text = (REPO / "docker/compose.yaml").read_text(encoding="utf-8")
@@ -260,14 +410,14 @@ jobs:  # the jobs
 
     def test_runner_exceptions_are_scoped_and_reject_other_labels(self):
         for workflow in ("tests.yml", "publish.yml", "model-smoke.yml", "codeql.yml"):
-            for name in ("images", "arm64", "php", "quality"):
+            for name in ("images", "arm64", "build-amd64", "build-arm64", "php", "quality"):
                 for label in ("ubuntu-latest", "ubuntu-24.04-arm", "self-hosted", "windows-latest",
                               "${{ vars.CI_RUNNER }}", "${{ matrix.runner }}", "[ubuntu-latest]", ""):
                     text = f"jobs:\n  {name}:\n    runs-on: {label}\n"
                     if (workflow, name) == ("tests.yml", "images"):
                         text += "\n".join(f"    {line}" for line in IMAGE_MATRIX) + "\n    steps:\n"
                         allowed = label == "${{ matrix.runner }}"
-                    elif (workflow, name) == ("publish.yml", "arm64"):
+                    elif (workflow, name) == ("publish.yml", "build-arm64"):
                         allowed = label == "ubuntu-24.04-arm"
                     else:
                         allowed = label == "ubuntu-latest"
@@ -436,20 +586,25 @@ jobs:  # the jobs
         self.assertIn("on:\n  push:\n    tags: ['v*']\n  workflow_dispatch:\n", text)
         self.assertNotIn("pull_request", text)
         self.assertEqual(set(re.findall(r"secrets\.(\w+)", text)), {"GITHUB_TOKEN"})
-        publishing = "\n".join(jobs(text)["publish"])
-        for platforms in re.findall(r"platforms:\s*(.*)", publishing):
-            self.assertEqual(platforms, "linux/amd64,linux/arm64")
 
     def test_publishing_starts_only_from_a_version_tag(self):
-        # Manual branch runs skip both jobs; publishing also keeps its version-tag guard.
+        # Every job that can publish refuses a manual branch run before login or push.
         text = (REPO / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
         triggers = re.search(r"^on:\n(.*?)^\S", text, re.MULTILINE | re.DOTALL)
         self.assertEqual(triggers.group(1), "  push:\n    tags: ['v*']\n  workflow_dispatch:\n\n")
-        first = steps(text)[0]
-        self.assertEqual(first[0].strip(), "- name: Require a version tag")
-        guard = "\n".join(first)
-        self.assertIn('case "$GITHUB_REF" in refs/tags/v*) ;; *)', guard)
-        self.assertRegex(guard, r"\*\) echo .*>&2; exit 1 ;; esac")
+        for name, lines in jobs(text).items():
+            if not any("docker/login-action@" in line or "push=true" in line or "imagetools create" in line for line in lines):
+                continue
+            first = job_steps(text, name)[0]
+            self.assertEqual(first[0].strip(), "- name: Require a version tag", name)
+            guard = "\n".join(first)
+            self.assertIn('case "$GITHUB_REF" in refs/tags/v*) ;; *)', guard)
+            self.assertRegex(guard, r"\*\) echo .*>&2; exit 1 ;; esac")
+        guard = "\n".join(job_steps(text, "publish")[0])
+        self.assertIn('version="${TAG#v}"', guard)
+        self.assertIn('"$IMAGE:$version" "$IMAGE-onnx:$version"', guard)
+        self.assertIn('"$IMAGE:$version,$IMAGE:latest" "$IMAGE-onnx:$version,$IMAGE-onnx:latest"', guard)
+        self.assertIn('*-*) echo "prerelease=true"', guard)
 
     def test_measurements_name_the_runner_they_ran_on(self):
         text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")

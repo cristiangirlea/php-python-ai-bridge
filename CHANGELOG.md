@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Changed
+
+- Worker image publishing now builds natively on amd64 and arm64, pushes untagged digests and pulls and starts those exact images before creating multi-architecture version tags. Build provenance and SBOMs remain attached, with release attestations on the combined index digests; digest handoff uses job outputs without Actions artifacts.
+
 ## [0.5.0] - 2026-10-29
 
 ### Added
