@@ -117,6 +117,33 @@ def job_steps(text: str, name: str) -> list:
     return steps(block.group())
 
 
+def run_scripts(text: str) -> list[str]:
+    """Read inline and indented block scripts without including adjacent step fields."""
+    found = []
+    lines = text.splitlines()
+    position = 0
+    while position < len(lines):
+        line = lines[position]
+        position += 1
+        key = re.match(r"""^( *)(?:- +)?['\"]?run['\"]? *: *(.*)$""", line)
+        if key is None:
+            continue
+        value = key.group(2)
+        if re.fullmatch(r"[|>][+-]?[1-9]? *(?:#.*)?", value):
+            indent = line.index("run")
+            body = []
+            while position < len(lines):
+                below = lines[position]
+                if below.strip() and len(below) - len(below.lstrip()) <= indent:
+                    break
+                body.append(below)
+                position += 1
+            found.append("\n".join(body))
+        else:
+            found.append(value)
+    return found
+
+
 def is_checkout(step: list) -> bool:
     """Whether the step runs actions/checkout; GitHub reads owner and repository names case-insensitively."""
     return action(step).lstrip("'\"").lower().startswith("actions/checkout@")
@@ -134,6 +161,66 @@ def inputs(step: list) -> list:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_no_workflow_interpolates_expressions_into_run_scripts(self):
+        for path in WORKFLOWS:
+            for script in run_scripts(path.read_text(encoding="utf-8")):
+                with self.subTest(workflow=path.name, script=script.splitlines()[0]):
+                    self.assertNotIn("${{", script)
+
+    def test_run_reader_separates_scripts_from_step_fields(self):
+        text = """steps:
+  - run: echo inline
+  - name: Block
+    env:
+      VALUE: ${{ steps.previous.outputs.value }}
+    run: |-
+      echo "$VALUE"
+
+      echo done
+    timeout-minutes: 1
+  - run: >
+      echo folded
+  - run: echo consecutive
+  - run: |
+      echo block
+    env:
+      VALUE: ${{ github.sha }}
+  - run: echo last
+"""
+        self.assertEqual(run_scripts(text), [
+            "echo inline", '      echo "$VALUE"\n\n      echo done', "      echo folded", "echo consecutive",
+            "      echo block", "echo last",
+        ])
+
+    def test_publish_passes_each_comma_separated_tag_separately(self):
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        tag_steps = [step for step in job_steps(text, "publish") if any("imagetools create" in line for line in step)]
+        self.assertEqual(len(tag_steps), 2)
+        for step in tag_steps:
+            script = run_scripts("\n".join(step))[0]
+            with self.subTest(step=step[0].strip()):
+                self.assertIn('IFS=\',\' read -ra names <<< "$TAGS"', script)
+                self.assertIn('for tag in "${names[@]}"; do tags+=(-t "$tag"); done', script)
+                self.assertIn('imagetools create "${tags[@]}"', script)
+                self.assertNotIn('-t "$TAGS"', script)
+
+    def test_publish_validates_input_and_index_digests_before_output(self):
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        tag_steps = [step for step in job_steps(text, "publish") if any("imagetools create" in line for line in step)]
+        self.assertEqual(len(tag_steps), 2)
+        for step in tag_steps:
+            script = run_scripts("\n".join(step))[0]
+            with self.subTest(step=step[0].strip()):
+                self.assertIn("set -o pipefail", script)
+                for variable, label in (("AMD64_DIGEST", "AMD64"), ("ARM64_DIGEST", "ARM64"), ("digest", "index")):
+                    guard = f'[[ "${variable}" =~ ^sha256:[0-9a-f]{{64}}$ ]] || {{ echo "Invalid {label} digest" >&2; exit 1; }}'
+                    self.assertIn(guard, script)
+                    target = "imagetools create" if variable != "digest" else 'echo "digest=$digest" >> "$GITHUB_OUTPUT"'
+                    self.assertLess(script.index(guard), script.index(target))
+                self.assertIn("| jq -r '.digest')", script)
+                self.assertLess(script.index("set -o pipefail"), script.index("digest=$("))
+                self.assertLess(script.index("digest=$("), script.index('[[ "$digest"'))
+
     def test_publishing_requires_a_read_only_quality_gate(self):
         found = jobs((REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8"))
         self.assertIn("needs: [quality, build-amd64, build-arm64]", found["publish"])
@@ -162,9 +249,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(any(line.startswith("if:") for line in image[:image.index("steps:")]))
         self.assertEqual(set(publish), {"quality", "build-amd64", "build-arm64", "publish"})
         expected_checks = job_steps((REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8"), "images")[-3:]
-        expected_checks = [[line.replace("bridge-worker-onnx:ci", '"$IMAGE-onnx@${{ steps.onnx.outputs.digest }}"')
-                            .replace("bridge-worker:ci", '"$IMAGE@${{ steps.worker.outputs.digest }}"')
+        expected_checks = [[line.replace("bridge-worker-onnx:ci", '"$IMAGE-onnx@$ONNX_DIGEST"')
+                            .replace("bridge-worker:ci", '"$IMAGE@$WORKER_DIGEST"')
                             for line in step] for step in expected_checks]
+        for step in expected_checks[:2]:
+            if "        env:" not in step:
+                step.insert(step.index("        run: |"), "        env:")
+            start = step.index("        env:") + 1
+            step[start:start] = [
+                "          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}",
+                "          ONNX_DIGEST: ${{ steps.onnx.outputs.digest }}",
+            ]
         for arch, runner in (("amd64", "ubuntu-latest"), ("arm64", "ubuntu-24.04-arm")):
             with self.subTest(arch=arch):
                 lines = publish[f"build-{arch}"]
@@ -189,9 +284,12 @@ class WorkflowTests(unittest.TestCase):
                     self.assertIn("sbom: true", inputs(step))
                 pull = next(i for i, step in enumerate(build_steps) if step[0].strip() == "- name: Pull the pushed images")
                 self.assertGreater(pull, max(build_steps.index(step) for step in builds))
-                self.assertEqual([line.strip() for line in build_steps[pull][2:]], [
-                    'docker pull "$IMAGE@${{ steps.worker.outputs.digest }}"',
-                    'docker pull "$IMAGE-onnx@${{ steps.onnx.outputs.digest }}"',
+                for step in build_steps[pull:pull + 3]:
+                    self.assertIn("WORKER_DIGEST: ${{ steps.worker.outputs.digest }}", [line.strip() for line in step])
+                    self.assertIn("ONNX_DIGEST: ${{ steps.onnx.outputs.digest }}", [line.strip() for line in step])
+                self.assertEqual([line.strip() for line in run_scripts("\n".join(build_steps[pull]))[0].splitlines()], [
+                    'docker pull "$IMAGE@$WORKER_DIGEST"',
+                    'docker pull "$IMAGE-onnx@$ONNX_DIGEST"',
                 ])
                 self.assertEqual(build_steps[pull + 1:], expected_checks)
 
