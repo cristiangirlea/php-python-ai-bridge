@@ -1,7 +1,6 @@
 name: Publish images
 
-# A version tag publishes the worker images and the source archive. A manual run publishes too, so it must be
-# started on a version tag: the first step refuses a branch.
+# Manual branch runs skip the quality gate and publishing; version tags publish only after the gate passes.
 on:
   push:
     tags: ['v*']
@@ -18,6 +17,7 @@ concurrency:
 # token.
 jobs:
   publish:
+    needs: [quality]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -100,3 +100,36 @@ jobs:
             gh release create "$TAG" --verify-tag --notes-from-tag --title "$TAG" $flags
           fi
           gh release upload "$TAG" "$archive" --clobber
+
+  # Publishing must wait for this tag's default reranker to meet the question-to-passage quality floor.
+  quality:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      BRIDGE_TOKEN: test-only-bridge-token-never-use-in-production
+      BRIDGE_MODEL_RETENTION_SECONDS: "15"
+      RELEVANCE_DATASET: squad
+      RELEVANCE_GATE: "1"
+      BENCH_COMMIT: ${{ github.sha }}
+      BENCH_RUNNER: GitHub-hosted ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare disposable cache
+        run: mkdir -p .cache && chmod 777 .cache
+      - name: Acquire pinned models and datasets
+        run: |
+          docker compose -f docker/compose.yaml run --rm --no-deps fetcher
+          docker compose -f docker/compose.yaml run --rm --no-deps quality-fetcher
+      - name: Require default reranker NDCG at least BM25
+        shell: bash
+        run: |
+          docker compose -f docker/compose.yaml up -d model-worker
+          docker compose -f docker/compose.yaml run --rm --no-deps -T model-quality python scripts/relevance_measure.py
+      - name: Stop gate containers
+        if: always()
+        run: docker compose -f docker/compose.yaml --profile model down

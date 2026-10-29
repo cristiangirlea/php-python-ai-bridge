@@ -10,7 +10,8 @@ paths:
 - The tool list is a literal in `tools.py`, never read from the worker: test-only tasks are never tools,
   whatever `BRIDGE_TEST_TASKS` says, and the suite runs with it set to prove that.
 - `BACKENDS` names what the worker reports, per backend and task, and must equal
-  `ai_bridge.tasks.MODEL_NAMES` (`tests/mcp/test_models.py`); this package cannot import the worker.
+  `ai_bridge.tasks.MODEL_NAMES` for the same `BRIDGE_RERANK_MODEL` (`tests/mcp/test_models.py`);
+  descriptions list all selectable rerankers and results identify the worker's choice. This package cannot import the worker.
   Every timing claim in a tool description is a measured median from `docs/testing.md` (a test checks),
   every path parameter says where it resolves, and every position in a result says what it counts.
 - Paths resolve under `BRIDGE_MCP_ROOT` and must stay inside it after following symlinks; the server

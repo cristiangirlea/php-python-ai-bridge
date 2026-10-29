@@ -97,7 +97,7 @@ set `BRIDGE_PHP_IMAGE` to its pinned image from `.github/workflows/tests.yml` an
 integration steps. Report the other three as "left to CI". If the integration step fails, read
 `docker compose -f docker/compose.yaml logs --tail 100` before `down`.
 
-The real-model smoke tests (`model-smoke.yml`) are not part of this: they download about 330 MB and run
+The real-model smoke tests (`model-smoke.yml`) are not part of this: they download about 630 MB of models plus pinned wheels and run
 only for a change on that workflow's `paths:` list, through `fetcher`, `model-test` and
 `model-integration` as README describes.
 

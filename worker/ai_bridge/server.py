@@ -22,7 +22,7 @@ from typing import Any
 from . import log
 from .jobs import DEFAULT_OWNER, INSTANCE_ID, JOB_ID, CapacityError, DrainingError, JobStore, Settings
 from .metrics import CONTENT_TYPE, render
-from .tasks import missing_models
+from .tasks import missing_models, rerank_model
 
 MAX_BODY = 262144
 MAX_REQUEST_LINE = 8192
@@ -537,6 +537,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
     args = parser.parse_args()
+    rerank_model()
     tokens = resolve_tokens()
     settings = Settings(
         concurrency=_number("BRIDGE_CONCURRENCY", "2", int),

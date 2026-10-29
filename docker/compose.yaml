@@ -492,6 +492,7 @@ services:
     <<: *python
     profiles: [model]
     mem_limit: 1536m
+    memswap_limit: 1536m
     networks: [isolated]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=512m,uid=65532,gid=65532
@@ -504,6 +505,7 @@ services:
       PYTHONPATH: /work/worker:/deps
       BRIDGE_BACKEND: onnx
       BRIDGE_MODEL_DIR: /cache/models
+      BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}
       BRIDGE_CONCURRENCY: "1"
       # model-quality reads each of its thousands of results as its job ends; a shorter retention spares it the waits.
       BRIDGE_RETENTION_SECONDS: ${BRIDGE_MODEL_RETENTION_SECONDS:-300}
@@ -544,6 +546,12 @@ services:
     <<: *worker-image
     image: ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:${BRIDGE_IMAGE_TAG:-latest}
     mem_limit: 1536m
+    memswap_limit: 1536m
+    environment:
+      BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN}
+      BRIDGE_STATE_DIR: /state
+      BRIDGE_TRUST_NETWORK: "1"
+      BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}
     volumes:
       - ../.cache:/cache:ro
 
@@ -554,6 +562,7 @@ services:
     environment:
       <<: *php-env
       BRIDGE_URL: http://model-worker:8090
+      BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}
     command: [php, tests/php/model.php]
 
   model-frankenphp:
@@ -631,6 +640,8 @@ services:
       <<: *python-env
       QUALITY_DATA_DIR: /cache/datasets
       RELEVANCE_TARGET: http://model-worker:8090
+      RELEVANCE_DATASET: ${RELEVANCE_DATASET:-arguana}
+      RELEVANCE_GATE: ${RELEVANCE_GATE:-0}
       NER_TARGET: http://model-worker:8090
       BENCH_COMMIT: ${BENCH_COMMIT:-unknown}
       BENCH_RUNNER: ${BENCH_RUNNER:-local, unspecified}
@@ -751,6 +762,7 @@ services:
     environment:
       <<: *mcp-env
       BRIDGE_URL: http://mcp-model-worker:8090
+      BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}
       # The worker runs one job at a time, so calls an agent makes together queue for its one warm child.
       BRIDGE_MCP_TIMEOUT_MS: "300000"
 

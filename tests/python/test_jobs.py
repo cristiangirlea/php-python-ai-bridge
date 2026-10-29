@@ -473,7 +473,7 @@ class RerankBatchingTests(unittest.TestCase):
         self.assertEqual(scores, self.score(documents)[0])
         self.assertEqual(reports, list(range(1, 71)))
 
-    def test_execute_on_onnx_reports_every_batch(self):
+    def test_execute_on_onnx_throttles_batch_progress(self):
         tokenizer, session, events = self.Tokenizer(), self.Session(), []
         with patch.object(tasks, "_onnx", return_value=(tokenizer, session, self.NAMES)) as onnx, \
                 patch.object(tasks, "_tensors", self.tensors):
@@ -483,13 +483,21 @@ class RerankBatchingTests(unittest.TestCase):
         self.assertEqual(result["model"], "cross-encoder/ms-marco-TinyBERT-L2-v2")
         self.assertEqual([item["index"] for item in result["rankings"]], [129, 128, 127])
         self.assertEqual([rows for rows, _ in session.shapes], [32, 32, 32, 32, 2])
-        # 130 documents give a throttle step of 3, which divides none of 32, 64 and 128: batch reports must
-        # bypass the per-document throttle or the client sees nothing between 0 and 96.
         self.assertEqual(events, [(0, 130), (32, 130), (64, 130), (96, 130), (128, 130), (130, 130)])
 
     def test_a_wrong_number_of_scores_is_rejected(self):
         with self.assertRaises(ValueError):
             self.score(self.documents(5), session=self.Session(short=True))
+
+    def test_selected_reranker_is_loaded_and_reported(self):
+        for choice, (directory, model, _) in tasks.RERANK_MODELS.items():
+            with self.subTest(choice=choice), patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": choice}), \
+                    patch.object(tasks, "_onnx", return_value=(self.Tokenizer(), self.Session(), self.NAMES)) as onnx, \
+                    patch.object(tasks, "_tensors", self.tensors):
+                result = execute("rerank", {"query": "q", "documents": self.documents(2)}, "onnx",
+                                 "/unused", lambda *_: None)
+                onnx.assert_called_once_with(Path("/unused") / directory, 512)
+                self.assertEqual(result["model"], model)
 
     def test_batch_size_must_be_positive(self):
         with self.assertRaises(ValueError):
@@ -2413,6 +2421,16 @@ class WarmUpTests(unittest.TestCase):
             self.assertEqual(self.recv(parent), (None, "loaded", None))
         self.assertEqual([call.args for call in load.call_args_list],
                          [(Path("/m") / name, length, stride) for name, length, stride in jobs.WARM_UP["onnx"]])
+
+    def test_warm_up_loads_the_selected_reranker_directory(self):
+        selection = patch.dict(os.environ, {"BRIDGE_RERANK_MODEL": "minilm-l6"})
+        selection.start()
+        self.addCleanup(selection.stop)
+        with patch.object(tasks, "_onnx") as load:
+            parent = self.serve("onnx", "/m")
+            self.assertEqual(self.recv(parent), (None, "ready", None))
+            self.assertEqual(self.recv(parent), (None, "loaded", None))
+        self.assertEqual(load.call_args_list[0].args, (Path("/m/rerank-minilm-l6"), 512, 0))
 
     def test_ready_is_sent_only_once_the_load_has_finished(self):
         release = threading.Event()

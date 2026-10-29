@@ -130,6 +130,26 @@ class CandidateTests(unittest.TestCase):
 
 
 class DatasetTests(unittest.TestCase):
+    def test_squad_questions_map_to_their_source_paragraph(self):
+        data = {"data": [{"paragraphs": [
+            {"context": "First paragraph", "qas": [{"id": "q1", "question": "First?"},
+                                                       {"id": "q2", "question": "Also first?"}]},
+            {"context": "Second paragraph", "qas": [{"id": "q3", "question": "Second?"}]},
+        ]}]}
+        corpus, queries, qrels = measure.load_squad(json.dumps(data).encode())
+        self.assertEqual(list(corpus.values()), ["First paragraph", "Second paragraph"])
+        self.assertEqual(queries, [("q1", "First?"), ("q2", "Also first?"), ("q3", "Second?")])
+        ids = list(corpus)
+        self.assertEqual(qrels, {"q1": {ids[0]: 1}, "q2": {ids[0]: 1}, "q3": {ids[1]: 1}})
+
+    def test_release_gate_compares_squad_scores(self):
+        rows = [("BM25", 200, 0.5, 0, 0, 0), ("BM25, reranked", 200, 0.49, 0, 0, 0)]
+        self.assertFalse(measure.quality_gate("squad", rows))
+        rows[1] = ("BM25, reranked", 200, 0.5, 0, 0, 0)
+        self.assertTrue(measure.quality_gate("squad", rows))
+        with self.assertRaisesRegex(ValueError, "requires squad"):
+            measure.quality_gate("arguana", rows)
+
     def test_the_beir_layout_is_read(self):
         data = archive(
             [{"_id": "d1", "title": "diet", "text": "Meat costs land."}, {"_id": "d2", "title": "", "text": "Bees."}],
@@ -190,6 +210,9 @@ class FitTests(unittest.TestCase):
 
 
 class TableTests(unittest.TestCase):
+    def test_p95_uses_nearest_rank(self):
+        self.assertEqual(measure.p95(list(range(1, 101))), 95)
+
     def test_the_table_has_one_row_per_order(self):
         table = measure.render([("BM25", 200, 0.41234, 0.3456, 0.97, 12.345),
                                 ("BM25, reranked", 200, 0.5, 0.40001, 0.97, 61.04)])

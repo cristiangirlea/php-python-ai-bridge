@@ -15,6 +15,14 @@ REPO = Path(__file__).resolve().parents[1]
 # Licences under which anyone may fetch the data, measure on it and publish the figures, commercial use included.
 FREE_LICENCES = {"CC-BY-4.0", "CC-BY-SA-4.0"}
 DATASETS = {
+    "squad": {
+        "file": "dev-v1.1.json",
+        "url": "https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v1.1.json",
+        "bytes": 4854279,
+        "sha256": "95aa6a52d5d6a735563366753ca50492a658031da74f301ac5238b03966972c9",
+        "licence": "CC-BY-SA-4.0",
+        "licence_source": "SQuAD dataset website",
+    },
     # BEIR's copy of ArguAna: its corpus, queries and test qrels in one zip, whose MD5 BEIR publishes too.
     "arguana": {
         "file": "arguana.zip",

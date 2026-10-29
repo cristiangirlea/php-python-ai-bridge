@@ -4,6 +4,7 @@ the worker, and the test-only tasks cannot appear whatever BRIDGE_TEST_TASKS say
 import functools
 import json
 import math
+import os
 import random
 import re
 import time
@@ -44,6 +45,14 @@ MIN_CANDIDATES = 20
 
 # What each backend really is: the name the worker reports, then what it does, in plain words. The names
 # must equal ai_bridge.tasks.MODEL_NAMES, which this package cannot import; tests/mcp/test_models.py checks.
+RERANK_NAMES = {
+    "tinybert": "cross-encoder/ms-marco-TinyBERT-L2-v2",
+    "minilm-l6": "Xenova/ms-marco-MiniLM-L-6-v2",
+    "bge-base": "Xenova/bge-reranker-base",
+}
+RERANK_CHOICE = os.environ.get("BRIDGE_RERANK_MODEL", "tinybert")
+if RERANK_CHOICE not in RERANK_NAMES:
+    raise SystemExit("BRIDGE_RERANK_MODEL must be tinybert, minilm-l6 or bge-base")
 BACKENDS = {
     "lexical": {
         "rerank": ("lexical-demo-not-a-model", "deterministic word overlap between the query and each document. "
@@ -54,8 +63,10 @@ BACKENDS = {
                    "and IPv6 addresses, phone numbers). No model runs, so names, organisations and places are not found."),
     },
     "onnx": {
-        "rerank": ("cross-encoder/ms-marco-TinyBERT-L2-v2", "through ONNX Runtime on one CPU thread, a two-layer "
-                   "cross-encoder. Its relevance judgement is well below your own on text you can already read."),
+        "rerank": (RERANK_NAMES[RERANK_CHOICE],
+                   "through ONNX Runtime on one CPU thread. The worker selects cross-encoder/ms-marco-TinyBERT-L2-v2, "
+                   "Xenova/ms-marco-MiniLM-L-6-v2 (int8), or Xenova/bge-reranker-base (int8) with BRIDGE_RERANK_MODEL; "
+                   "the result's model field identifies the running model. Choose by domain using docs/testing.md."),
         "embed": ("sentence-transformers/all-MiniLM-L6-v2", "through ONNX Runtime on CPU; English, truncated at "
                   "256 word pieces; unit-length mean-pooled vectors."),
         # The recall figures come from scripts/ner_measure.py's table in docs/testing.md; re-measure and update both.
@@ -80,7 +91,8 @@ TIMING = {
     "lexical": {task: "about 0.05 s of worker time (median of five warm jobs on one CPU, the polling floor; "
                       "docs/testing.md)" for task in ("rerank", "embed", "redact")},
     "onnx": {
-        "rerank": f"0.05 s of worker time for 32 documents and 0.2 s for 512, 0.8 s for the first job ({_WARM})",
+        "rerank": f"0.05 s of worker time for 32 documents and 0.2 s for 512 with TinyBERT only, "
+                  f"0.8 s for its first job ({_WARM}); other selections have separate measurements in docs/testing.md",
         "embed": f"0.2 s of worker time for 32 texts, 0.8 s for the first job ({_WARM})",
         "redact": f"0.7 s of worker time for 2000 characters with all three entity kinds, 2.3 s for the first job, "
                   f"which loads both models ({_WARM})",

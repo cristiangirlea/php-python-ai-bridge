@@ -8,6 +8,27 @@ from urllib.request import urlopen
 # One directory per model under /cache/models, named for the task that loads it. Hashes are SHA-256 of the exact
 # files at the revision.
 MODELS = {
+    "rerank-minilm-l6": {
+        "repository": "Xenova/ms-marco-MiniLM-L-6-v2",
+        "revision": "a09144355adeed5f58c8ed011d209bf8ee5a1fec",
+        "license": "Apache-2.0",
+        "files": {"tokenizer.json": "tokenizer.json", "onnx/model_quantized.onnx": "model.onnx"},
+        "hashes": {
+            "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+            "model.onnx": "e9d8ebf845c413e981c175bfe49a3bfa9b3dcce2a3ba54875ee5df5a58639fbe",
+        },
+    },
+    "rerank-bge-base": {
+        "limit": 300 * 1024 * 1024,
+        "repository": "Xenova/bge-reranker-base",
+        "revision": "280bcc27a84e0b898c251e06fddb25171bd9b101",
+        "license": "MIT",
+        "files": {"tokenizer.json": "tokenizer.json", "onnx/model_quantized.onnx": "model.onnx"},
+        "hashes": {
+            "tokenizer.json": "48564c5c7d3fa64d85d95e65414a542385f88b0f128fd8d4163fd7a57f2be05c",
+            "model.onnx": "dd98f3e67837d23210a6b7550c08cced4f61845b940ac45be3565840a10f3244",
+        },
+    },
     "rerank": {
         "repository": "cross-encoder/ms-marco-TinyBERT-L2-v2",
         "revision": "81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc",
@@ -54,8 +75,7 @@ MODELS = {
         },
     },
 }
-# Raised from 100 MiB for the int8 NER models, 103.5 MiB cased and 104.6 MiB uncased; the fp32 and 4-bit variants
-# were rejected.
+# Only the quantized BGE reranker needs more than the ordinary artifact cap.
 LIMIT = 128 * 1024 * 1024
 
 
@@ -63,6 +83,7 @@ def fetch(task: str, spec: dict) -> dict:
     directory = Path("/cache/models") / task
     directory.mkdir(parents=True, exist_ok=True)
     repository, revision = spec["repository"], spec["revision"]
+    limit = spec.get("limit", LIMIT)
     manifest = {"repository": repository, "revision": revision, "license": spec["license"], "files": {}}
     for source, destination in spec["files"].items():
         url = f"https://huggingface.co/{repository}/resolve/{revision}/{source}"
@@ -72,8 +93,8 @@ def fetch(task: str, spec: dict) -> dict:
         with urlopen(url, timeout=60) as response, temporary.open("wb") as output:
             while chunk := response.read(1024 * 1024):
                 total += len(chunk)
-                if total > LIMIT:
-                    raise ValueError(f"Model artifact exceeds the {LIMIT // (1024 * 1024)} MiB limit")
+                if total > limit:
+                    raise ValueError(f"Model artifact exceeds the {limit // (1024 * 1024)} MiB limit")
                 digest.update(chunk)
                 output.write(chunk)
         if digest.hexdigest() != spec["hashes"][destination]:

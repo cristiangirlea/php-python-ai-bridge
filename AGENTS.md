@@ -73,7 +73,7 @@ the proxy, `kill -s SIGKILL worker-a`, `start worker-a`, then `ha-check` recover
 state volumes stay mounted by the networkless `ha-state` keeper across kill/start; the driver removes them
 with `down -v` on exit. Locally the default image is PHP 8.5; `docs/testing.md`
 says how to pick another, what each layer establishes, and where CI runs. `model-smoke.yml` downloads
-about 330 MB of models and wheels and is not a required check: run it only for a change on its `paths:` list.
+about 630 MB of models, plus the pinned wheels and is not a required check: run it only for a change on its `paths:` list.
 
 ## Rules of this repository
 
@@ -86,7 +86,9 @@ records which tests actually ran. Never commit `.env`, model weights, caches or 
 downloaded model code, and never mount credentials into test containers. Keep the Composer PHP range, the CI image matrix,
 compose's default image and `docs/testing.md` consistent. Public documentation changes with the contract,
 and the figures the MCP tool descriptions quote come from `docs/testing.md`'s measured tables: re-measure
-and update both together. Path-scoped detail is in `.claude/rules/`.
+and update both together. `MODEL_NAMES` and the MCP server's `BACKENDS` agree for the same reranker selection;
+the MCP description lists all selectable models and the result identifies the worker's choice.
+Path-scoped detail is in `.claude/rules/`.
 
 ## Working rules
 

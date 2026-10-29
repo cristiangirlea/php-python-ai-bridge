@@ -37,9 +37,23 @@ REDACT_DEFAULTS = {"entities": ["PER"], "min_score": 0.85}
 # Label order of dslim/bert-base-NER and dslim/bert-base-NER-uncased, which share it; the smoke tests fail loudly if a
 # re-pinned model changes it.
 NER_LABELS = ("O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC")
-# What the ONNX backend loads from its model directory: one directory per model, each holding the tokenizer.json and
-# model.onnx that scripts/fetch_model.py writes. tests/python/test_fetch_model.py keeps the two lists in step.
+# Default ONNX directories, each holding the tokenizer.json and model.onnx that scripts/fetch_model.py writes.
 MODEL_DIRECTORIES = ("rerank", "embed", "redact", "redact-uncased")
+RERANK_MODELS = {
+    "tinybert": ("rerank", "cross-encoder/ms-marco-TinyBERT-L2-v2", 32),
+    "minilm-l6": ("rerank-minilm-l6", "Xenova/ms-marco-MiniLM-L-6-v2", 8),
+    "bge-base": ("rerank-bge-base", "Xenova/bge-reranker-base", 4),
+}
+
+
+def rerank_model() -> tuple[str, str, int]:
+    choice = os.environ.get("BRIDGE_RERANK_MODEL", "tinybert")
+    if choice not in RERANK_MODELS:
+        raise SystemExit("BRIDGE_RERANK_MODEL must be tinybert, minilm-l6 or bge-base")
+    return RERANK_MODELS[choice]
+
+
+MODEL_NAMES["onnx"]["rerank"] = rerank_model()[1]
 
 
 # Present only with BRIDGE_TEST_TASKS=1, for the fault tests.
@@ -139,18 +153,19 @@ def execute(task: str, payload: dict[str, Any], backend: str, model_dir: str, pr
     # Ceiling division bounds progress to at most 66 messages so a large set
     # cannot flood the coordinator pipe.
     step = -(-total // 64)
+    last = -step
 
     def report(completed: int) -> None:
-        if completed % step == 0 or completed == total:
+        nonlocal last
+        if completed == total or completed // step > last // step:
             progress(completed, total)
+            last = completed
 
     report(0)
     if backend == "onnx":
-        tokenizer, session, names = _onnx(Path(model_dir) / "rerank", 512)
-        # At most 17 batch reports, so they need no throttle, and the throttle's step rarely divides 32.
-        scores = _score_pairs(tokenizer, session, names, query, documents,
-                              lambda completed: progress(completed, total))
-        model = MODEL_NAMES["onnx"]["rerank"]
+        directory, model, batch_size = rerank_model()
+        tokenizer, session, names = _onnx(Path(model_dir) / directory, 512)
+        scores = _score_pairs(tokenizer, session, names, query, documents, report, batch_size=batch_size)
     else:
         words = set(re.findall(r"\w+", query.casefold()))
         scores = []
@@ -284,7 +299,11 @@ def _load_onnx(directory: Path, max_length: int, stride: int) -> tuple[Any, Any,
 
     tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
     tokenizer.enable_truncation(max_length=max_length, stride=stride)
-    tokenizer.enable_padding()
+    pad_token = "<pad>" if tokenizer.token_to_id("<pad>") is not None else "[PAD]"
+    pad_id = tokenizer.token_to_id(pad_token)
+    if pad_id is None:
+        raise ValueError("tokenizer has no pad token")
+    tokenizer.enable_padding(pad_token=pad_token, pad_id=pad_id)
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
     options.inter_op_num_threads = 1
@@ -296,7 +315,7 @@ def _load_onnx(directory: Path, max_length: int, stride: int) -> tuple[Any, Any,
 
 def missing_models(model_dir: str) -> list[str]:
     """The model directories under model_dir that lack either file, in MODEL_DIRECTORIES order."""
-    return [name for name in MODEL_DIRECTORIES
+    return [name for name in (rerank_model()[0], *MODEL_DIRECTORIES[1:])
             if not all((Path(model_dir) / name / file).is_file() for file in ("tokenizer.json", "model.onnx"))]
 
 

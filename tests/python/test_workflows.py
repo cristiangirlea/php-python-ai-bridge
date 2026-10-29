@@ -101,6 +101,43 @@ def inputs(step: list) -> list:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_publishing_requires_a_read_only_quality_gate(self):
+        found = jobs((REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8"))
+        self.assertIn("needs: [quality]", found["publish"])
+        gate = "\n".join(found["quality"])
+        self.assertIn("if: startsWith(github.ref, 'refs/tags/v')", found["quality"])
+        self.assertNotIn("continue-on-error", gate)
+        self.assertNotIn("secrets.", gate)
+        self.assertNotRegex(gate, r"python scripts/relevance_measure\.py[^\n]*\|\|\s*true")
+        self.assertIn("contents: read", gate)
+        self.assertNotIn(": write", gate)
+        self.assertIn("RELEVANCE_DATASET: squad", gate)
+        self.assertIn('RELEVANCE_GATE: "1"', gate)
+        self.assertIn("python scripts/relevance_measure.py", gate)
+        self.assertNotIn("if:", "\n".join(found["publish"]))
+        for name, lines in found.items():
+            if any(line.endswith(": write") for line in lines):
+                self.assertIn("needs: [quality]", lines, name)
+
+    def test_model_workers_disable_swap_and_release_passes_selection(self):
+        text = (REPO / "docker/compose.yaml").read_text(encoding="utf-8")
+        for name in ("model-worker", "model-worker-image"):
+            block = re.search(rf"^  {name}:.*?(?=^  [\w-]+:|\Z)", text, re.MULTILINE | re.DOTALL).group()
+            self.assertIn("mem_limit: 1536m", block)
+            self.assertIn("memswap_limit: 1536m", block)
+            self.assertIn("BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}", block)
+
+    def test_quantized_models_run_score_and_order_parity_in_model_job(self):
+        text = (REPO / ".github/workflows/model-smoke.yml").read_text(encoding="utf-8")
+        model = "\n".join(jobs(text)["model"])
+        self.assertIn("for choice in minilm-l6 bge-base", model)
+        self.assertIn("model-test sh -ec 'php tests/php/model_selected.php; php tests/php/model_parity.php'", model)
+
+    def test_mcp_model_client_receives_the_workers_selection(self):
+        text = (REPO / "docker/compose.yaml").read_text(encoding="utf-8")
+        block = re.search(r"^  mcp-model:.*?(?=^  [\w-]+:|\Z)", text, re.MULTILINE | re.DOTALL).group()
+        self.assertIn("BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}", block)
+
     def test_the_workflows_are_found(self):
         self.assertEqual([path.name for path in WORKFLOWS], ["codeql.yml", "model-smoke.yml", "publish.yml", "tests.yml"])
         for path in WORKFLOWS:
@@ -321,8 +358,7 @@ jobs:  # the jobs
             self.assertEqual(platforms, "linux/amd64,linux/arm64")
 
     def test_publishing_starts_only_from_a_version_tag(self):
-        # The whole `on:` block, so no other trigger can be added below the two; a manual run on a branch is
-        # refused by the first step, before anything is built or the registry is logged in to.
+        # Manual branch runs skip both jobs; publishing also keeps its version-tag guard.
         text = (REPO / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
         triggers = re.search(r"^on:\n(.*?)^\S", text, re.MULTILINE | re.DOTALL)
         self.assertEqual(triggers.group(1), "  push:\n    tags: ['v*']\n  workflow_dispatch:\n\n")
@@ -337,12 +373,15 @@ jobs:  # the jobs
         self.assertEqual(text.count("BENCH_RUNNER: GitHub-hosted ubuntu-latest\n"), 4)
         self.assertEqual(text.count("BENCH_RUNNER:"), 4)
 
-    def test_the_quality_job_runs_only_on_demand(self):
-        # It downloads the public datasets and runs some 2800 model jobs: worth a run when asked, not on every change.
+    def test_the_quality_job_runs_on_demand_and_for_release_tags(self):
         lines = jobs((REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8"))["quality"]
-        self.assertEqual(lines[0], "if: github.event_name == 'workflow_dispatch'")
+        self.assertEqual(lines[0], "if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'")
         self.assertTrue(any("run --rm --no-deps quality-fetcher" in line for line in lines))
         self.assertTrue(any("run --rm --no-deps -T model-quality" in line for line in lines))
+        text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
+        self.assertIn("  push:\n    tags: ['v*']\n", text)
+        self.assertTrue(any("RELEVANCE_DATASET: squad" in line for line in lines))
+        self.assertTrue(any('RELEVANCE_GATE: "1"' in line for line in lines))
 
     def test_the_load_measurement_runs_on_demand_only(self):
         # It takes about 45 minutes and measures, never gates: no pull request, push or schedule may start it.
@@ -374,7 +413,7 @@ jobs:  # the jobs
   schedule:
     - cron: "17 6 * * 1"
   # Any change that can alter model acquisition or inference. Not a required check: it downloads
-  # about 330 MB and needs the network, which the deterministic gate deliberately does not.
+  # model files and needs the network, which the deterministic gate deliberately does not.
   pull_request:
     paths:
       - scripts/fetch_model.py
@@ -390,9 +429,14 @@ jobs:  # the jobs
       - worker/ai_bridge/log.py
       - scripts/benchmark.py
       - scripts/ner_measure.py
+      - scripts/relevance_measure.py
+      - scripts/rerank_reference.py
+      - tests/fixtures/rerank-fp32.json
+      - tests/php/model_parity.php
       - scripts/public_data.py
       - tests/fixtures/ner-sample.json
       - tests/php/model.php
+      - tests/php/model_selected.php
       - tests/model_integration.py
       # What those smoke tests run through: the shared HTTP helpers, the PHP client and the demo route.
       - tests/integration.py
@@ -421,7 +465,7 @@ jobs:  # the jobs
         self.assertIn("if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'", found["packagist"])
         for name in ("model", "audit"):
             self.assertIn("if: github.event_name != 'push'", found[name])
-        for name in ("quality", "load"):
+        for name in ("load",):
             self.assertIn("if: github.event_name == 'workflow_dispatch'", found[name])
         job = "\n".join(found["packagist"])
         for forbidden in ("uses:", "container:", "services:", "env:", "secrets.", "github.token"):
