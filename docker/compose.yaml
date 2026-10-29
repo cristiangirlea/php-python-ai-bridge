@@ -166,6 +166,87 @@ services:
       XDG_DATA_HOME: /data
     command: [run, --config, /work/examples/tls/Caddyfile, --adapter, caddyfile]
 
+  # Keep each local-driver tmpfs mounted while its worker is stopped; no process here reads either table.
+  ha-state:
+    <<: *python
+    profiles: [ha]
+    network_mode: none
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ha-state-a:/state-a:ro
+      - ha-state-b:/state-b:ro
+    command: [python, -c, "import signal; signal.pause()"]
+
+  worker-a:
+    <<: *python
+    profiles: [ha]
+    environment:
+      <<: *python-env
+      BRIDGE_INSTANCE_ID: a
+      BRIDGE_STATE_DIR: /state
+      BRIDGE_TEST_TASKS: "1"
+      BRIDGE_LOG: json
+    volumes:
+      - ..:/work:ro
+      - ha-state-a:/state
+    depends_on: [ha-state]
+    networks: [isolated]
+    healthcheck: *worker-health
+    command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
+
+  worker-b:
+    <<: *python
+    profiles: [ha]
+    environment:
+      <<: *python-env
+      BRIDGE_INSTANCE_ID: b
+      BRIDGE_STATE_DIR: /state
+      BRIDGE_TEST_TASKS: "1"
+      BRIDGE_LOG: json
+    volumes:
+      - ..:/work:ro
+      - ha-state-b:/state
+    depends_on: [ha-state]
+    networks: [isolated]
+    healthcheck: *worker-health
+    command: [python, -m, ai_bridge.server, --host, 0.0.0.0]
+
+  ha-proxy:
+    <<: *php
+    profiles: [ha]
+    entrypoint: [sh, /work/scripts/run_frankenphp.sh]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532
+      - /runtime:rw,exec,nosuid,size=256m,uid=65532,gid=65532
+    environment:
+      HOME: /tmp
+      XDG_CONFIG_HOME: /tmp/config
+      XDG_DATA_HOME: /tmp/data
+    networks: [isolated]
+    healthcheck:
+      test: [CMD, curl, --silent, --max-time, "2", --output, /dev/null, "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+      start_interval: 1s
+    depends_on:
+      worker-a:
+        condition: service_healthy
+      worker-b:
+        condition: service_healthy
+    command: [run, --config, /work/examples/ha/Caddyfile, --adapter, caddyfile]
+
+  ha-check:
+    <<: *php
+    profiles: [ha]
+    networks: [isolated]
+    environment:
+      <<: *php-env
+      BRIDGE_URL: http://ha-proxy:8080
+    command: [php, tests/php/ha.php, roundtrip]
+
   python-tests:
     <<: *python
     profiles: [test]
@@ -768,6 +849,19 @@ networks:
     internal: true
 
 volumes:
+  # ha-state holds these mounts across worker kill/start; down -v discards their contents.
+  ha-state-a:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=64m,uid=65532,gid=65532,mode=0700"
+  ha-state-b:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=64m,uid=65532,gid=65532,mode=0700"
   drill-load-state:
     driver: local
     driver_opts:

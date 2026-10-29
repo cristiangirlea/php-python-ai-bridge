@@ -181,6 +181,19 @@ def scenario(index):
 
 def main():
     wait_ready()
+    try:
+        request("/jobs/a-" + "f" * 32)
+    except HTTPError as error:
+        assert error.code == 404 and json.load(error) == {"error": "http_error"}, "Prefixed ID must reach the worker"
+    else:
+        raise AssertionError("An unknown prefixed job must return 404")
+    # A wrong method distinguishes the matched job route from the example's catch-all 404.
+    try:
+        request("/jobs/a-" + "f" * 32, {})
+    except HTTPError as error:
+        assert error.code == 405 and json.load(error) == {"error": "method_not_allowed"}, "Prefixed job route must match"
+    else:
+        raise AssertionError("POST to a job status route must return 405")
     _, counted = metrics()
     _, _, before = request("/healthz")
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:

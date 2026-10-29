@@ -8,7 +8,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
-- `BRIDGE_RERANK_MODEL` selects a pinned ONNX reranker: `tinybert` (default), `minilm-l6` or `bge-base`, with measured SQuAD and ArguAna tables and an int8/fp32 parity check. SQuAD v1.1 is available for quality measurement, and the release model workflow compares its NDCG@10 with BM25. Model workers no longer swap past their memory limit.
+- `BRIDGE_RERANK_MODEL` selects a pinned ONNX reranker: `tinybert` (default), `minilm-l6` or `bge-base`, with batch sizes 32, 8 and 4, measured SQuAD and ArguAna tables and an int8/fp32 parity check. SQuAD v1.1 is available for quality measurement. Model workers no longer swap past their memory limit.
+- Optional `BRIDGE_INSTANCE_ID` prefixes on job IDs, accepted by the worker, PHP client and MCP client, with restored IDs preserved across instance-name changes. A two-instance `ha` Compose profile routes reads and cancels by prefix; its required CI drill verifies hard-crash failure, retained idempotency keys and bounded recovery with a new key.
 - A non-loopback startup warning and `BRIDGE_TRUST_NETWORK=1` to acknowledge the supported network boundary, with a fixed JSON `start` warning when structured logging is enabled.
 - Reproducible raw-socket request fuzzing: a fixed corpus followed by fresh seeded multi-byte flips, inserts, deletes and splices, with `BRIDGE_FUZZ_SECONDS` for longer runs and distinct-input counts; slow-client connection-budget recovery tests.
 - Body and header limits and read/write timeouts in the Caddy TLS example; oversized bodies are rejected before contacting the worker.
@@ -19,9 +20,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
-- Reranker acquisition downloads about 630 MB of models, plus the pinned wheels. The per-file cap is 150 MiB, raised to 300 MiB only for BGE.
-- The model workflow runs on version tags as well as its existing triggers. Publishing now waits for its own read-only SQuAD quality gate; a default below BM25 prevents both image and release publication.
-- TinyBERT is intended for question-to-passage reranking; it is below BM25 on ArguAna-style argument retrieval. Select and measure a reranker for the application's domain.
+- Rerank progress reports when completed batches cross step boundaries, including the final document.
+- Reranker acquisition downloads about 630 MB of models, plus the pinned wheels. The per-file cap is 128 MiB, raised to 300 MiB only for BGE's model.
+- The model workflow runs on version tags as well as its existing triggers. Publishing now waits for the read-only SQuAD quality gate in `publish.yml`; a default below BM25 prevents both image and release publication.
+- TinyBERT is intended for question-to-passage reranking; none of the three rerankers beats BM25 on ArguAna-style argument retrieval. Select and measure a reranker for the application's domain.
 - State the supported deployment: behind a TLS reverse proxy that normalises HTTP and enforces limits, or on loopback/a private interface for a co-located client.
 - Parser refusals use fixed JSON errors (400, 405 or 431); ambiguous framing, folded headers and control bytes are refused. Five-second header and body read budgets also stop clients that keep trickling bytes.
 - At the active limit, `Retry-After` estimates queue drain time from the median run time (start to finish) of the 100 most recent jobs that started.

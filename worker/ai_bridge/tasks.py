@@ -153,10 +153,13 @@ def execute(task: str, payload: dict[str, Any], backend: str, model_dir: str, pr
     # Ceiling division bounds progress to at most 66 messages so a large set
     # cannot flood the coordinator pipe.
     step = -(-total // 64)
+    last = -step
 
     def report(completed: int) -> None:
-        if completed % step == 0 or completed == total:
+        nonlocal last
+        if completed == total or completed // step > last // step:
             progress(completed, total)
+            last = completed
 
     report(0)
     if backend == "onnx":

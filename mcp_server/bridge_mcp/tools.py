@@ -50,6 +50,9 @@ RERANK_NAMES = {
     "minilm-l6": "Xenova/ms-marco-MiniLM-L-6-v2",
     "bge-base": "Xenova/bge-reranker-base",
 }
+RERANK_CHOICE = os.environ.get("BRIDGE_RERANK_MODEL", "tinybert")
+if RERANK_CHOICE not in RERANK_NAMES:
+    raise SystemExit("BRIDGE_RERANK_MODEL must be tinybert, minilm-l6 or bge-base")
 BACKENDS = {
     "lexical": {
         "rerank": ("lexical-demo-not-a-model", "deterministic word overlap between the query and each document. "
@@ -60,7 +63,7 @@ BACKENDS = {
                    "and IPv6 addresses, phone numbers). No model runs, so names, organisations and places are not found."),
     },
     "onnx": {
-        "rerank": (RERANK_NAMES[os.environ.get("BRIDGE_RERANK_MODEL", "tinybert")],
+        "rerank": (RERANK_NAMES[RERANK_CHOICE],
                    "through ONNX Runtime on one CPU thread. The worker selects cross-encoder/ms-marco-TinyBERT-L2-v2, "
                    "Xenova/ms-marco-MiniLM-L-6-v2 (int8), or Xenova/bge-reranker-base (int8) with BRIDGE_RERANK_MODEL; "
                    "the result's model field identifies the running model. Choose by domain using docs/testing.md."),

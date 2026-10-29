@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import relevance_measure as measure  # noqa: E402
 
 
-class RerankerReviewTests(unittest.TestCase):
+class SelectableRerankerTests(unittest.TestCase):
     def test_gate_refuses_another_dataset_before_contacting_worker(self):
         self.assertEqual(measure.GATE_DATASET, "squad")
         with patch.dict(os.environ, {"RELEVANCE_GATE": "1", "RELEVANCE_DATASET": "arguana"}), \

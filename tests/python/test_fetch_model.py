@@ -20,7 +20,7 @@ spec.loader.exec_module(fetch_model)
 class PinTests(unittest.TestCase):
     def test_only_bge_needs_the_larger_per_file_cap(self):
         self.assertEqual(fetch_model.MODELS["rerank-bge-base"]["limit"], 300 * 1024 * 1024)
-        self.assertEqual(fetch_model.LIMIT, 150 * 1024 * 1024)
+        self.assertEqual(fetch_model.LIMIT, 128 * 1024 * 1024)
         self.assertTrue(all(spec.get("limit", fetch_model.LIMIT) == fetch_model.LIMIT
                             for name, spec in fetch_model.MODELS.items() if name != "rerank-bge-base"))
 

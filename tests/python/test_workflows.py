@@ -105,6 +105,10 @@ class WorkflowTests(unittest.TestCase):
         found = jobs((REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8"))
         self.assertIn("needs: [quality]", found["publish"])
         gate = "\n".join(found["quality"])
+        self.assertIn("if: startsWith(github.ref, 'refs/tags/v')", found["quality"])
+        self.assertNotIn("continue-on-error", gate)
+        self.assertNotIn("secrets.", gate)
+        self.assertNotRegex(gate, r"python scripts/relevance_measure\.py[^\n]*\|\|\s*true")
         self.assertIn("contents: read", gate)
         self.assertNotIn(": write", gate)
         self.assertIn("RELEVANCE_DATASET: squad", gate)
@@ -323,6 +327,12 @@ jobs:  # the jobs
         self.assertIn("needs: [php, mcp, images, drills]", found["deterministic"])
         self.assertTrue(any('"$IMAGES_RESULT" = success' in line for line in found["deterministic"]))
 
+    def test_the_required_mcp_job_runs_instance_routing_and_hard_crash_recovery(self):
+        found = jobs((REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"))
+        self.assertIn("needs: [php, mcp, images, drills]", found["deterministic"])
+        self.assertIn("run: sh scripts/ha_check.sh", found["mcp"])
+        self.assertTrue(any("--profile ha config -q" in line for line in found["mcp"]))
+
     def test_the_gate_requires_failure_drills_and_promtool(self):
         found = jobs((REPO / ".github/workflows/tests.yml").read_text(encoding="utf-8"), "tests.yml")
         gate = "\n".join(found["deterministic"])
@@ -348,8 +358,7 @@ jobs:  # the jobs
             self.assertEqual(platforms, "linux/amd64,linux/arm64")
 
     def test_publishing_starts_only_from_a_version_tag(self):
-        # The whole `on:` block, so no other trigger can be added below the two; a manual run on a branch is
-        # refused by the first step, before anything is built or the registry is logged in to.
+        # Manual branch runs skip both jobs; publishing also keeps its version-tag guard.
         text = (REPO / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
         triggers = re.search(r"^on:\n(.*?)^\S", text, re.MULTILINE | re.DOTALL)
         self.assertEqual(triggers.group(1), "  push:\n    tags: ['v*']\n  workflow_dispatch:\n\n")
@@ -424,10 +433,6 @@ jobs:  # the jobs
       - scripts/rerank_reference.py
       - tests/fixtures/rerank-fp32.json
       - tests/php/model_parity.php
-      - tests/python/test_reranker_review.py
-      - tests/python/test_relevance_measure.py
-      - tests/python/test_fetch_model.py
-      - tests/python/test_public_data.py
       - scripts/public_data.py
       - tests/fixtures/ner-sample.json
       - tests/php/model.php

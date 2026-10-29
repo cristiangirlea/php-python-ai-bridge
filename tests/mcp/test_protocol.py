@@ -14,6 +14,41 @@ TOKEN = "test-only-bridge-token-never-use-in-production"
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_both_job_id_forms_and_invalid_ids(self):
+        valid = ['a' * 32, 'a-' + 'f' * 32, '9-az--' + '0' * 32, 'z' * 16 + '-' + 'a' * 32]
+        invalid = ['A-' + 'a' * 32, '-a-' + 'a' * 32, 'a_b-' + 'a' * 32,
+                   'z' * 17 + '-' + 'a' * 32, 'a-' + 'a' * 31, 'a-' + 'A' * 32,
+                   'a-' + 'a' * 33, 'a-' + 'a' * 32 + '\n', '../healthz']
+        for job_id in valid + invalid:
+            body = {'id': job_id, 'task': 'rerank', 'status': 'queued', 'result': None,
+                    'error': None, 'progress': None, 'timeout_ms': 30000}
+            with self.subTest(job_id=job_id):
+                if job_id in valid:
+                    self.assertEqual(Bridge._id(job_id), job_id)
+                    self.assertEqual(Bridge._job(body)['id'], job_id)
+                else:
+                    with self.assertRaises(BridgeError):
+                        Bridge._job(body)
+                    for method in (self.bridge.get, self.bridge.cancel):
+                        with self.assertRaises(ValueError):
+                            method(job_id)
+
+    def test_prefixed_worker_submit_poll_result_and_cancel(self):
+        service = BridgeServer(('127.0.0.1', 0), TOKEN, Settings(instance_id='mcp-1', test_tasks=True))
+        thread = threading.Thread(target=service.serve_forever, daemon=True)
+        thread.start()
+        try:
+            bridge = Bridge('http://127.0.0.1:%d' % service.server_address[1], TOKEN)
+            job = bridge.submit('test.delay', {'seconds': 2}, 5000)
+            self.assertRegex(job['id'], r'^mcp-1-[a-f0-9]{32}$')
+            self.assertEqual(bridge.get(job['id'])['id'], job['id'])
+            self.assertEqual(bridge.cancel(job['id'])['status'], 'cancelled')
+            self.assertEqual(bridge.run('test.delay', {'seconds': 0.01, 'value': 7}, deadline_s=5)['value'], 7)
+        finally:
+            service.shutdown()
+            thread.join()
+            service.server_close()
+
     @classmethod
     def setUpClass(cls):
         cls.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=16, test_tasks=True))

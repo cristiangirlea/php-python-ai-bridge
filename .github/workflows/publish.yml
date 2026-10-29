@@ -1,7 +1,6 @@
 name: Publish images
 
-# A version tag publishes the worker images and the source archive. A manual run publishes too, so it must be
-# started on a version tag: the first step refuses a branch.
+# Manual branch runs skip the quality gate and publishing; version tags publish only after the gate passes.
 on:
   push:
     tags: ['v*']
@@ -104,6 +103,7 @@ jobs:
 
   # Publishing must wait for this tag's default reranker to meet the question-to-passage quality floor.
   quality:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:

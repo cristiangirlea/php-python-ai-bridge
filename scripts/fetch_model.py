@@ -76,7 +76,7 @@ MODELS = {
     },
 }
 # Only the quantized BGE reranker needs more than the ordinary artifact cap.
-LIMIT = 150 * 1024 * 1024
+LIMIT = 128 * 1024 * 1024
 
 
 def fetch(task: str, spec: dict) -> dict:

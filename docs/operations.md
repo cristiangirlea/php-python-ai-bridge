@@ -27,7 +27,40 @@ Compose's worker enables JSON logging for these checks. The oversized POST leave
 
 Give each client its own token through `BRIDGE_TOKENS_FILE` or `BRIDGE_TOKENS` (section 4), each under its own name, and the MCP server a token of its own. Better still, give the MCP server a dedicated worker, as compose's `mcp-worker` is: an agent can be prompt-injected into filling a worker's capacity ([security](security.md)).
 
-**N instances behind a load balancer.** Instances share nothing: each holds its own jobs, results, idempotency keys and capacity, and nothing routes a request to another instance. A job ID is answered only by the instance that holds it; any other instance answers 404, exactly as for an unknown job. So `GET /v1/jobs/{id}` and the cancel must reach the instance that took the `POST`. A job ID is 32 random hex characters (`uuid.uuid4().hex` in `jobs.py`) with no instance mark, so a balancer cannot route by it: either the client keeps the instance it submitted to (store its address beside the job ID and address it directly for polls), or the balancer pins each client to one instance by something the client sends on every request. An idempotency key is scoped to one instance too: a resubmission that lands elsewhere creates a second job.
+**N instances behind a load balancer.** Set a unique `BRIDGE_INSTANCE_ID` on each worker (1-16 characters
+of `[a-z0-9-]`, starting with a letter or digit). New IDs are `<instance-id>-<32 lowercase hex>`; unset,
+they remain 32 lowercase hex. Each instance answers only jobs in its own table, including restored jobs
+with an old prefix after an instance-name change. Preserve routes for those old prefixes until retention.
+An absent job, including one with another instance's prefix, is the same 404 as an unknown job.
+Turning on `BRIDGE_INSTANCE_ID` where retained jobs exist leaves their unprefixed IDs needing a route, or sticky polling, until retention ends.
+
+Compose's `ha` profile is the worked example: `worker-a` and `worker-b` share one token but have separate
+state volumes and limits, under the same hardening block as the other workers. `ha-proxy`, Caddy in the
+pinned FrankenPHP image with `examples/ha/Caddyfile`, sends `POST /v1/jobs` round robin to both workers;
+`path_regexp` matchers route GET and cancel with `a-` to worker-a and `b-` to worker-b. Health and readiness
+can reach either. There are no published ports; HTTP stays on the internal network. Use the operator's
+TLS proxy for cross-host clients, as the TLS example shows. Test-only `test.delay` is enabled on these
+two workers for cancellation and the crash drill; leave it disabled in a deployment.
+
+There is **no shared job store and no failover of a running job**. An instance that dies loses execution
+of the jobs it held. With its state directory surviving, unfinished jobs become `failed/service_restarted`
+on startup, and retained results and keys remain; if the directory is lost, the IDs return 404. The
+[client recovery recipe](integration.md#clients-behind-an-instance-router) resubmits with a new key and
+capped attempts. Idempotency keys are instance-local too: round robin can send an uncertain POST retry
+elsewhere and create duplicate work, so use submission affinity when that guarantee is needed.
+
+```sh
+sh scripts/ha_check.sh
+```
+
+The driver uses only the disposable `bridge-instances` Compose project: it starts the HA services,
+runs the PHP client's routing checks through `http://ha-proxy:8080`, prepares a running keyed job on
+worker-a, runs `docker compose ... kill -s SIGKILL worker-a` and `start worker-a`, then checks the
+failure, retained key and successful recovery through the same URL. Its exit trap runs `down -v`,
+including on failure. Both state directories are distinct named tmpfs volumes; the networkless
+`ha-state` keeper holds their mounts across individual worker stops (a tmpfs with no mounts would be
+emptied). This is restart-drill state, not host-crash durability: use separate persistent volumes for
+real retained results, and do not use this project's name for another deployment.
 
 **Published images.** A `v*` tag publishes `ghcr.io/cristiangirlea/php-python-ai-bridge-worker` (demo backends, standard library only) and `ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx` (the hash-locked model wheels, no models), for linux/amd64 and linux/arm64 (`.github/workflows/publish.yml`). Both run as UID 65532 on port 8090. The ONNX image never holds models: its `fetch` entrypoint downloads the pinned, hash-checked files into a volume mounted at `/cache`, once, with network; the worker then reads them without network:
 
@@ -42,7 +75,7 @@ Compose's `release` profile runs both images under the compose limits: `BRIDGE_I
 `BRIDGE_RERANK_MODEL` selects the ONNX reranker: `tinybert` (default), `minilm-l6`, or `bge-base`.
 The selected model's files must be present in the model directory at startup. An unknown value stops startup.
 The alternatives have different memory and latency costs; measure them on the target host and data before use.
-MCP tool descriptions name the default; the result's `model` field identifies the model actually used.
+MCP tool descriptions name the model selected by the MCP server's own `BRIDGE_RERANK_MODEL` and list all three choices; a result's `model` field identifies the worker's model.
 
 **Memory and CPU per child.** Each child loads its own copy of its backend's models ([memory](testing.md#measured-model-worker-memory-informational)). On the `onnx` backend one child holding all four models and running the widest rerank batch peaked at 1286 MiB, and the container at 1464 MiB, of which about 180 MiB is the container itself (the server, the resource tracker and the wheels in the `/deps` tmpfs). The compose `model-worker` limit of 1536 MiB therefore allows `BRIDGE_CONCURRENCY=1` and no more; two children need up to about 2.7 GiB before any margin. Over 4290 jobs of the load mix the container peak stayed at 1022 MiB ([load](testing.md#measured-throughput-and-latency-under-load-informational)). With one CPU, that single child served about 3.5 jobs/s of the rerank, embed and redact mix with admission relaxed; warm medians are 0.05 s for a rerank of 32 documents, 0.21 s for 512, 0.16 s for an embed of 32 texts and 0.68 s for a redaction of 2000 characters, ([latency](testing.md#measured-latency-informational)). That table's cold first jobs (0.79 s for rerank, 2.31 s for redaction) come from the earlier design, in which a child loaded each model on its first job of that kind; today a child of the `onnx` backend loads its models when it starts, before it reports ready (`_serve` in `jobs.py`), so loading delays readiness, not a job, and that start time has no measurement. The lexical worker (`worker`: one CPU, 512 MiB, `BRIDGE_CONCURRENCY=2`) has no memory measurement; with admission relaxed it reached 18 jobs/s from one client thread and 115 jobs/s from sixteen, with no error. A warm child holds two threads, so `pids_limit: 128` is far from reached ([task counts](testing.md#measured-task-counts-under-a-cancellation-burst-informational)).
 
@@ -213,11 +246,11 @@ respectively. All model workers have a 1536 MiB memory limit with swap disabled
 Use [the candidate tables](testing.md#reranker-comparison-on-squad-v11) for each model's
 measured memory, median and p95 job time. On SQuAD, TinyBERT reaches NDCG@10 0.899 at
 0.42 s p95, MiniLM 0.942 at 2.14 s and BGE 0.650 at 9.45 s, against BM25's 0.843; all stay
-under 1.4 GiB. The candidate selection budget is p95 below
+under 1.4 GiB on SQuAD; the measured worst case across both datasets is 1434 MiB (BGE on ArguAna). The candidate selection budget is p95 below
 2 seconds for one sequential job reranking the BM25 top 100 passages, with 200 queries
 and the worker's usual input limits; it is separate from the sustained-load target
-above. TinyBERT is below BM25 on ArguAna-style argument retrieval, so its question-to-passage
-result is not evidence for that domain. Benchmark the application's own retrieval data
+above. None of the three beats BM25 on ArguAna-style argument retrieval, so the question-to-passage
+results are not evidence for that domain. Benchmark the application's own retrieval data
 before choosing a larger reranker. MiniLM and BGE are Xenova int8 conversions; the
 [fp32 parity record](../tests/fixtures/rerank-fp32.md) states their score drift and limits.
 

@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 MAX_BYTES = 262144
 TERMINAL = frozenset({"succeeded", "failed", "timed_out", "cancelled"})
 STATUSES = TERMINAL | {"queued", "running"}
-JOB_ID = re.compile(r"[a-f0-9]{32}")
+JOB_ID = re.compile(r"(?:[a-z0-9][a-z0-9-]{0,15}-)?[a-f0-9]{32}")
 ERROR_CODE = re.compile(r"[a-z_]{1,40}")
 # Delay seconds only, as the PHP client reads them; an HTTP date would need the two clocks to agree.
 RETRY_AFTER = re.compile(r"[ \t]*([0-9]{1,6})[ \t]*")

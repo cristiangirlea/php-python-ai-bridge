@@ -40,6 +40,8 @@ READY_SECONDS = 30.0
 BACKOFF_SECONDS = 1.0
 MAX_JOBS_PER_WORKER = 1000
 IDEMPOTENCY_KEY = re.compile(r"[\x21-\x7e]{1,128}")
+INSTANCE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,15}")
+JOB_ID = r"(?:[a-z0-9][a-z0-9-]{0,15}-)?[a-f0-9]{32}"
 # Each backend's warm-up, as the (directory, max_length, stride) keys tasks._onnx caches by; a test keeps both in step.
 WARM_UP = {"onnx": (("rerank", 512, 0), ("embed", 256, 0), ("redact", 512, 64), ("redact-uncased", 512, 64))}
 # The owner is a token's name, never its value; _open_db gives a table from before owners the column, rows to "default".
@@ -80,6 +82,8 @@ class Settings:
     owners: tuple[str, ...] = (DEFAULT_OWNER,)
     # The most queued, running and retained jobs one owner may hold; None means no per-owner cap.
     owner_capacity: int | None = None
+    # Only new jobs carry this routing hint; restored jobs keep their original IDs.
+    instance_id: str | None = None
 
 
 def _serve(connection: Connection, backend: str, model_dir: str) -> None:
@@ -165,6 +169,9 @@ class _Worker:
 class JobStore:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
+        instance = self.settings.instance_id
+        if instance is not None and (type(instance) is not str or not INSTANCE_ID.fullmatch(instance)):
+            raise ValueError("BRIDGE_INSTANCE_ID must be 1-16 lowercase letters, digits or hyphens, starting with a letter or digit")
         if (type(self.settings.concurrency) is not int or type(self.settings.capacity) is not int
                 or type(self.settings.max_jobs) is not int or type(self.settings.result_capacity) is not int
                 or not 1 <= self.settings.concurrency <= 8 or not 1 <= self.settings.capacity <= 1024
@@ -319,6 +326,8 @@ class JobStore:
             raise CapacityError("result capacity reached", self._retry_after())
         now = time.monotonic()
         job_id = uuid.uuid4().hex
+        if self.settings.instance_id is not None:
+            job_id = self.settings.instance_id + "-" + job_id
         job = {
             "id": job_id, "task": task, "status": "queued", "result": None,
             "error": None, "progress": None, "timeout_ms": timeout_ms,

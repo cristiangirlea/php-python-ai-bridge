@@ -59,7 +59,7 @@ $handler = static function () use ($client, &$handled): void {
                 $job = $client->submitRerank($body['query'], $body['documents'], topK: $body['top_k'] ?? null);
             }
             http_response_code(202);
-        } elseif (preg_match('#\A/jobs/([a-f0-9]{32})(/cancel)?\z#', $path ?? '', $matches)) {
+        } elseif (preg_match('#\A/jobs/((?:[a-z0-9][a-z0-9-]{0,15}-)?[a-f0-9]{32})(/cancel)?\z#', $path ?? '', $matches)) {
             if ($method === 'GET' && !isset($matches[2])) {
                 $job = $client->get($matches[1]);
             } elseif ($method === 'POST' && isset($matches[2])) {

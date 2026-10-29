@@ -12,11 +12,14 @@ export RELEVANCE_GATE=0
 C=(docker compose -p bridge-reranker -f docker/compose.yaml)
 mkdir -p .cache/rerank-measure
 trap '"${C[@]}" --profile model down' EXIT
+foreign_containers() {
+    docker ps --format '{{.Names}}' | sed '/^bridge-reranker-/d' | { grep -Ev "${BENCH_STANDING:-^$}" || true; }
+}
 quiet() {
     local began=$SECONDS foreign
     while :; do
         # Services that always run on the host are named in BENCH_STANDING (an extended regex) and never wait.
-        foreign=$(docker ps --format '{{.Names}}' | sed '/^bridge-reranker-/d' | { grep -Ev "${BENCH_STANDING:-^$}" || true; })
+        foreign=$(foreign_containers)
         if [ -z "$foreign" ]; then
             echo "Quiet host after $((SECONDS - began)) seconds" >&2
             return
@@ -42,6 +45,11 @@ for choice in tinybert minilm-l6 bge-base; do
         swap=$(docker exec "$worker" cat /sys/fs/cgroup/memory.swap.max)
         printf '\nPeak cgroup memory: %s bytes; cgroup swap limit: %s bytes\n' "$peak" "$swap" \
             | tee -a ".cache/rerank-measure/$choice-$dataset.md"
+        foreign=$(foreign_containers)
+        if [ -n "$foreign" ]; then
+            echo "Foreign containers after measurement; timings refused: $foreign" >&2
+            exit 1
+        fi
         "${C[@]}" --profile model down
     done
 done
