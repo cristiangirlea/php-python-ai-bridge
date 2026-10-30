@@ -8,7 +8,7 @@ import json
 import os
 import queue
 import re
-import select
+import selectors
 import signal
 import socket
 import sqlite3
@@ -246,7 +246,7 @@ class _BusyDrain:
     def _close(self, connection: socket.socket) -> None:
         try:
             connection.close()
-        except OSError:
+        except Exception:
             pass
         finally:
             self._slots.release()
@@ -255,38 +255,51 @@ class _BusyDrain:
         pending: dict[socket.socket, tuple[float, int]] = {}
         try:
             while not self._stopped.is_set():
-                while True:
-                    try:
-                        connection, deadline = self._queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    pending[connection] = (deadline, LINGER_BYTES)
-                for connection, (deadline, _) in list(pending.items()):
-                    if time.monotonic() >= deadline:
-                        del pending[connection]
-                        self._close(connection)
-                if not pending:
-                    self._stopped.wait(0.02)
-                    continue
-                timeout = min(0.02, max(0, min(deadline for deadline, _ in pending.values()) - time.monotonic()))
                 try:
-                    ready, _, _ = select.select(list(pending), [], [], timeout)
-                except OSError:
-                    continue
-                for connection in ready:
-                    deadline, left = pending[connection]
-                    try:
-                        part = connection.recv(min(left, 65536)) if time.monotonic() < deadline else b""
-                    except BlockingIOError:
+                    while True:
+                        try:
+                            connection, deadline = self._queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        pending[connection] = (deadline, LINGER_BYTES)
+                    if not pending:
+                        self._stopped.wait(0.02)
                         continue
-                    except OSError:
-                        part = b""
-                    left -= len(part)
-                    if not part or not left:
-                        del pending[connection]
+                    with selectors.DefaultSelector() as selector:
+                        for connection in list(pending):
+                            try:
+                                selector.register(connection, selectors.EVENT_READ, connection)
+                            except Exception:
+                                del pending[connection]
+                                self._close(connection)
+                        if not pending:
+                            continue
+                        timeout = min(0.02, max(0, min(deadline for deadline, _ in pending.values()) - time.monotonic()))
+                        for key, _ in selector.select(timeout):
+                            connection = key.data
+                            deadline, left = pending[connection]
+                            try:
+                                part = connection.recv(min(left, 65536)) if time.monotonic() < deadline else b""
+                            except BlockingIOError:
+                                continue
+                            except Exception:
+                                part = b""
+                            left -= len(part)
+                            if not part or not left:
+                                del pending[connection]
+                                self._close(connection)
+                            else:
+                                pending[connection] = (deadline, left)
+                except Exception:
+                    # An unattributed selector failure must not leave sockets on a dead drain thread.
+                    for connection in pending:
                         self._close(connection)
-                    else:
-                        pending[connection] = (deadline, left)
+                    pending.clear()
+                finally:
+                    for connection, (deadline, _) in list(pending.items()):
+                        if time.monotonic() >= deadline:
+                            del pending[connection]
+                            self._close(connection)
         finally:
             for connection in pending:
                 self._close(connection)
