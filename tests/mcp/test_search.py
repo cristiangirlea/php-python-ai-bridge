@@ -235,5 +235,5 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(index, "load_index", side_effect=slow_load), patch.object(self.bridge, "run", run):
                 result = await self.call({"query": "needle", "index_path": "index"}, server=server)
         self.assertTrue(result.is_error)
-        self.assertEqual(len(budgets), 1)
-        self.assertLessEqual(budgets[0], 0, "loading must consume the call's budget before the embed job")
+        self.assertEqual(budgets, [], "an expired load must not submit an embed job")
+        self.assertIn("loading the index used the whole 0.1 s budget", result.content[0].text)

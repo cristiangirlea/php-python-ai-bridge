@@ -8,7 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
-- MCP indexes reject dimensions above 4096 and vector data above 32 MiB before opening the vectors file, bound reads if the file grows, and never retain an index above the cache budget. The builder enforces the same limits, and search loading consumes the call's deadline.
+- MCP indexes bound dimensions to 4096 and vector data to 76,800,000 bytes (50,000 x 384 float32 values), read vectors into one buffer, reject non-regular files without blocking, and guard JSON complexity before parsing. The 64 MiB sidecar cap is unchanged: 50,000 chunks at the default 1000-character size and 200-character overlap still fit for ordinary text, including the measured escaped-text fixture. No formerly valid index is refused because of a lower chunk count or sidecar byte cap; previously accepted indexes with excessive JSON structure (including extension metadata) are now refused above 50,008 objects/arrays, 600,128 structural tokens or 64 nesting levels. The builder enforces the same file and complexity limits and names the sidecar byte limit in its error. Cache loads are serialized, stale entries are dropped, and both file bytes and parsed objects are budgeted; full default-size indexes above the 128 MiB parsed-object budget are loaded for each call rather than cached. Search loading consumes the call's deadline and submits no job when it exhausts that budget.
 
 ### Changed
 

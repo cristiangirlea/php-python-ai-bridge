@@ -8,7 +8,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+import weakref
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -149,19 +151,228 @@ class FormatTests(unittest.TestCase):
     def test_oversized_vector_bytes_are_refused_before_opening_vectors(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
         chunk = {"source": 0, "start": 0, "end": 1, "text": "t"}
-        self.edit(sidecar, dimensions=4096, count=2049, chunks=[chunk] * 2049)
+        count = index.MAX_VECTOR_BYTES // (4096 * 4) + 1
+        self.edit(sidecar, dimensions=4096, count=count, chunks=[chunk] * count)
         (self.out / index.VECTORS).unlink()
         with self.assertRaisesRegex(index.InvalidIndex, "vector bytes"):
             index.load_index(sidecar)
 
-    def test_a_growing_vectors_file_is_read_with_a_bound_and_refused(self):
+    def test_statically_oversized_vectors_are_never_read(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
-        original_open = Path.open
+        with (self.out / index.VECTORS).open("wb") as handle:
+            handle.truncate(8 * 1024**3)
+        original = os.fdopen
+        handles = []
+
+        def opened(fd, *args, **kwargs):
+            handle = original(fd, *args, **kwargs)
+            wrapped = MagicMock(wraps=handle)
+            wrapped.__enter__.return_value = wrapped
+            wrapped.__exit__.side_effect = lambda *_: handle.close()
+            handles.append(wrapped)
+            return wrapped
+
+        with patch.object(os, "fdopen", opened), self.assertRaises(index.InvalidIndex):
+            index.load_index(sidecar)
+        self.assertEqual(len(handles), 2)
+        handles[-1].read.assert_not_called()
+        handles[-1].readinto.assert_not_called()
+
+    def test_sidecar_expansion_is_guarded_before_json_parsing(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        for payload in ('{"x":[' + '[],' * 50010 + '[]]}',
+                        '{"x":[' + '0,' * 600130 + '0]}'):
+            with self.subTest(kind=payload[6:8]):
+                payload = '{"padding":"' + 'x' * (16 * 1024 * 1024) + '",' + payload[1:]
+                self.assertLess(len(payload), index.MAX_SIDECAR_BYTES)
+                sidecar.write_text(payload, encoding="utf-8")
+                with patch.object(index.json, "loads", wraps=json.loads) as parse:
+                    started = time.monotonic()
+                    with self.assertRaisesRegex(index.InvalidIndex, "complexity"):
+                        index.load_index(sidecar)
+                    self.assertLess(time.monotonic() - started, 3)
+                parse.assert_not_called()
+
+    def test_deep_sidecar_is_invalid_instead_of_recursion_error(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        sidecar.write_text('[' * 2000 + '0' + ']' * 2000, encoding="utf-8")
+        started = time.monotonic()
+        with self.assertRaisesRegex(index.InvalidIndex, "complexity"):
+            index.load_index(sidecar)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_decoder_recursion_error_is_an_invalid_index(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        with patch.object(index.json, "loads", side_effect=RecursionError):
+            with self.assertRaises(index.InvalidIndex):
+                index.load_index(sidecar)
+
+    def test_writer_refuses_an_oversized_sidecar_without_replacing_files(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        before = sidecar.read_bytes()
+        with patch.object(index, "MAX_SIDECAR_BYTES", 1):
+            with self.assertRaisesRegex(index.BuildError, "1-byte sidecar limit.*--chunk-chars"):
+                self.write([[0.0, 1.0, 0.0]])
+        self.assertEqual(sidecar.read_bytes(), before)
+        self.assertEqual(list(index.load_index(sidecar).vectors), [1.0, 0.0, 0.0])
+
+    def test_json_guard_ignores_punctuation_and_escaped_quotes_in_text(self):
+        text = '[{,:\\"' * 1000
+        sidecar = self.write([[1.0, 0.0, 0.0]],
+                             chunks=[{"source": 0, "start": 0, "end": len(text), "text": text}])
+        self.assertEqual(index.load_index(sidecar).chunks[0]["text"], text)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFOs")
+    def test_nonregular_files_are_refused_without_blocking(self):
+        for filename in (index.SIDECAR, index.VECTORS):
+            with self.subTest(filename=filename):
+                sidecar = self.write([[1.0, 0.0, 0.0]])
+                path = self.out / filename
+                path.unlink()
+                os.mkfifo(path)
+                errors = []
+
+                def load(sidecar, errors):
+                    try:
+                        index.load_index(sidecar)
+                    except Exception as error:
+                        errors.append(error)
+
+                thread = threading.Thread(target=load, args=(sidecar, errors), daemon=True)
+                thread.start()
+                thread.join(1)
+                blocked = thread.is_alive()
+                if blocked:
+                    # Release a regressed blocking opener so the test leaves no thread behind.
+                    fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+                    os.close(fd)
+                    thread.join(1)
+                self.assertFalse(blocked, "opening a FIFO must not block")
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], index.InvalidIndex)
+                path.unlink()
+
+    def test_growing_sidecar_read_is_bounded(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        original = os.fdopen
         reads = []
 
-        def open_file(path, *args, **kwargs):
-            handle = original_open(path, *args, **kwargs)
-            if path.name != index.VECTORS:
+        def opened(fd, *args, **kwargs):
+            handle = original(fd, *args, **kwargs)
+            wrapped = MagicMock(wraps=handle)
+            wrapped.__enter__.return_value = wrapped
+            wrapped.__exit__.side_effect = lambda *_: handle.close()
+
+            def read(size=-1):
+                reads.append(size)
+                with sidecar.open("ab") as growing:
+                    growing.write(b" " * 1024)
+                return handle.read(size)
+
+            wrapped.read.side_effect = read
+            return wrapped
+
+        with patch.object(index, "MAX_SIDECAR_BYTES", sidecar.stat().st_size), patch.object(os, "fdopen", opened):
+            with self.assertRaisesRegex(index.InvalidIndex, "larger"):
+                index.load_index(sidecar)
+        self.assertEqual(reads, [sidecar.stat().st_size - 1024 + 1])
+
+    def test_full_chunk_count_loads_and_stays_cached(self):
+        count = 50000
+        self.assertEqual(index.MAX_VECTOR_BYTES, count * 384 * 4)
+        self.assertGreaterEqual(index.CACHE_BYTES, index.MAX_SIDECAR_BYTES + index.MAX_VECTOR_BYTES)
+        text = ('A searchable passage with "quoted" words and a backslash \\.\n' * 20)[:1000]
+        chunks = [{"source": number // 20000, "start": (number % 20000) * 800,
+                   "end": (number % 20000) * 800 + 1000, "text": text} for number in range(count)]
+        # Three dimensions leave room for default-sized escaped text in the test container's 64m tmpfs.
+        sidecar = self.write([[1.0, 0.0, 0.0]] * count, chunks=chunks, sources=["a.txt", "b.txt", "c.txt"])
+        cache = index.IndexCache()
+        with patch.object(index, "load_index", wraps=index.load_index) as load:
+            first = cache.get(sidecar)
+            self.assertEqual(first.count, count)
+            self.assertIs(cache.get(sidecar), first)
+            self.assertEqual(load.call_count, 1)
+
+    def test_cache_accounts_for_parsed_objects_as_well_as_file_bytes(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        with patch.object(index, "CACHE_RESIDENT_BYTES", 1, create=True):
+            cache = index.IndexCache()
+            cache.get(sidecar)
+            self.assertFalse(cache._items)
+
+    def test_cache_drops_a_stale_key_after_an_over_budget_rebuild(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        cache = index.IndexCache(limit_bytes=sidecar.stat().st_size + 12)
+        cache.get(sidecar)
+        self.write([[1.0, 0.0, 0.0]] * 2)
+        cache.get(sidecar)
+        self.assertNotIn((sidecar.resolve(), None), cache._items)
+
+    def test_cache_serializes_concurrent_loads(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        cache = index.IndexCache()
+        original = index.load_index
+        entered, release = threading.Event(), threading.Event()
+        overlap = []
+        active = 0
+        errors = []
+
+        def load(*args):
+            nonlocal active
+            active += 1
+            overlap.append(active)
+            entered.set()
+            release.wait(2)
+            try:
+                return original(*args)
+            finally:
+                active -= 1
+
+        def get(within):
+            try:
+                cache.get(sidecar, within)
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(index, "load_index", load):
+            first = threading.Thread(target=get, args=(None,))
+            second = threading.Thread(target=get, args=(self.out,))
+            first.start()
+            self.assertTrue(entered.wait(1))
+            second.start()
+            time.sleep(0.1)
+            release.set()
+            first.join(3)
+            second.join(3)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(overlap, [1, 1])
+
+    def test_cache_retry_releases_failed_load_buffers(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        cache = index.IndexCache()
+        original = index.load_index
+        buffers = []
+
+        def load(*args):
+            if not buffers:
+                buffer = array.array("f", [1.0])
+                buffers.append(weakref.ref(buffer))
+                raise index.InvalidIndex("checksum mismatch")
+            self.assertIsNone(buffers[0](), "the first exception must release its array before the retry")
+            return original(*args)
+
+        with patch.object(index, "load_index", load), patch.object(index, "_pause"):
+            cache.get(sidecar)
+
+    def test_a_growing_vectors_file_is_read_with_a_bound_and_refused(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        original_open = os.fdopen
+        reads = []
+
+        def open_file(fd, *args, **kwargs):
+            handle = original_open(fd, *args, **kwargs)
+            if os.fstat(fd).st_size != 12:
                 return handle
             wrapped = MagicMock(wraps=handle)
             wrapped.__enter__.return_value = wrapped
@@ -169,20 +380,26 @@ class FormatTests(unittest.TestCase):
 
             def read(size=-1):
                 reads.append(size)
-                with original_open(path, "ab") as growing:
-                    growing.write(b"x" * 1024)
                 return handle.read(size)
 
+            def readinto(buffer):
+                reads.append(buffer.nbytes)
+                with (self.out / index.VECTORS).open("ab") as growing:
+                    growing.write(b"x" * 1024)
+                return handle.readinto(buffer)
+
             wrapped.read.side_effect = read
+            wrapped.readinto.side_effect = readinto
             return wrapped
 
-        with patch.object(Path, "open", open_file), self.assertRaisesRegex(index.InvalidIndex, "changed"):
+        with patch.object(os, "fdopen", open_file), self.assertRaisesRegex(index.InvalidIndex, "changed"):
             index.load_index(sidecar)
-        self.assertEqual(reads, [13], "read only the declared 12 bytes plus one growth sentinel")
+        self.assertEqual(reads, [12, 1], "fill the single array, then read one growth sentinel")
 
     def test_an_index_at_both_limits_loads(self):
-        dimensions, vector_bytes = 4096, 32 * 1024 * 1024
-        count = vector_bytes // (dimensions * 4)
+        dimensions = 4096
+        count = index.MAX_VECTOR_BYTES // (dimensions * 4)
+        vector_bytes = count * dimensions * 4
         sidecar = self.write([[1.0, 0.0, 0.0]])
         vector_path = self.out / index.VECTORS
         # Holes represent zero components without allocating a large fixture on disk or in memory.
@@ -205,7 +422,8 @@ class FormatTests(unittest.TestCase):
 
     def test_writer_refuses_loader_limits_before_opening_files(self):
         chunk = {"source": 0, "start": 0, "end": 1, "text": "t"}
-        for dimensions, count, message in ((4097, 1, "dimensions"), (4096, 2049, "vector bytes"),
+        for dimensions, count, message in ((4097, 1, "dimensions"),
+                                           (4096, index.MAX_VECTOR_BYTES // (4096 * 4) + 1, "vector bytes"),
                                            (3, index.MAX_INDEX_CHUNKS + 1, "chunks")):
             with self.subTest(dimensions=dimensions, count=count), patch.object(Path, "open") as opened:
                 with self.assertRaisesRegex(index.BuildError, message):

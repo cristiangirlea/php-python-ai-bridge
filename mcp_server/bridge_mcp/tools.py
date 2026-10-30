@@ -538,6 +538,8 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         deadline = time.monotonic() + seconds
         _check_texts([query], "query", 1)
         loaded = await anyio.to_thread.run_sync(lambda: _index_from(root, index_path, cache))
+        if time.monotonic() >= deadline:
+            raise ToolError(f"loading the index used the whole {seconds:g} s budget")
         assert root is not None  # _index_from refuses every path without one
         # Vectors from different models are not comparable, so the gate comes before any job is spent.
         if loaded.model != names["embed"]:

@@ -529,3 +529,62 @@ larger numerical drift, not identical scoring. These eight pairs do not show tha
 int8 conversion caused its low corpus NDCG; a full fp32 corpus comparison would be
 needed to attribute that loss. The tests compare score tolerances and ordering, and
 the model workflow runs both selected-model PHP checks and parity checks.
+
+## MCP index loading memory
+
+Measured on 2026-10-30 on `fix/index-limits`, base commit `266381a` with the
+uncommitted loader fixes (the run was deliberately staged without a new commit).
+The tested `mcp_server/bridge_mcp/index.py` Git blob is
+`2bb058b96ab61b821cc9e3a36ab5ef51976da3b0`; the measurement script blob is
+`a96a9eda0b2d8da7d7bcb4cc1dc06b2e19183cec`.
+The real compose `mcp` service inherits `mem_limit: 512m`; the measurement script
+also checks `/sys/fs/cgroup/memory.max` is 536,870,912 bytes.
+
+Each fixture was written with `write_index`: 50,000 chunks, 384 dimensions,
+76,800,000 vector bytes and a 56,372,047-byte sidecar (84.00% of the 64 MiB cap).
+Each chunk holds 1000 characters of prose containing quotes, backslashes and
+newlines, encoded as 1066 text bytes by `write_index`. Chunking metadata uses the
+builder's default 1000-character windows and 200-character overlap; offsets
+advance by 800 across three sources, each under the 16 MiB source limit.
+The script builds both fixtures before loading, imports the MCP tools and creates
+the server, loads the two different indexes in sequence, releases the caller's
+reference after each load, and reads the cgroup's cumulative
+`memory.peak`. The peak includes offline wheel installation in `/deps` tmpfs,
+fixture construction, Python objects, vectors and cache; it is not process RSS.
+
+| Point | memory.peak bytes | MiB | Cached indexes |
+| --- | ---: | ---: | ---: |
+| After one full index load | 226,521,088 | 216.03 | 0 |
+| After two different full indexes in sequence | 226,623,488 | 216.13 | 0 |
+
+Both stay below the 440 MiB acceptance threshold and the 512 MiB container limit.
+No further cap tightening was needed: the existing conservative 128 MiB
+parsed-object cache budget excludes each full fixture (151,797,590 accounted
+object bytes), although its 133,172,047 file bytes fit the 160 MiB file-byte
+budget. Both indexes load successfully without being retained, so their vectors
+and parsed text are released between calls. Default-built capacity remains
+50,000 chunks at 384 dimensions for this text; the 64 MiB sidecar byte cap is
+unchanged from the base commit. The separate object accounting also prevents
+many tiny files from retaining disproportionately large Python heaps.
+These observations cover the stated fixture and sequential loads; structural
+and byte guards separately bound malicious sidecars before decoding.
+
+Reproduce from Git Bash, after `mkdir -p .cache` and setting a fresh random
+`BRIDGE_TOKEN` without printing it; `mcp-fetcher` must have populated the pinned
+wheels. `/measure` is an additional writable mount of the ignored cache directory,
+because the service's ordinary `/cache` mount remains read-only:
+
+```sh
+export MSYS_NO_PATHCONV=1
+docker compose -p bridge-index -f docker/compose.yaml run --rm --no-deps \
+  -v "$PWD/.cache:/measure:rw" mcp sh -ec \
+  'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python scripts/mcp_index_memory.py /measure'
+docker compose -p bridge-index -f docker/compose.yaml --profile test --profile mcp --profile mcp-fetch --profile py-dev down
+```
+
+The script removes both large fixtures on exit and asserts that both peaks stay
+at or below 440 MiB. The unit test for the full 50,000-chunk count uses the same
+1000-character escaped text and three dimensions to keep its files below the
+test service's 64m `/tmp`; that smaller vector array lets it verify a cache hit.
+The separate maximum-dimension test keeps 4096 dimensions, whose sparse nonzero rows touch
+few enough pages to fit the test service's 64m `/tmp`.
