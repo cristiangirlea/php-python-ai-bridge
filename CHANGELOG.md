@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
+- Build provenance for the release source archive, with a `.sigstore.json` bundle attached alongside the archive and verification instructions.
 - OpenSSF Scorecard scans on `main`, weekly and on demand, with SARIF results in the Security tab and a README badge. The security policy lists the project's scans, and CodeQL now also scans GitHub Actions workflows.
 
 ### Changed
