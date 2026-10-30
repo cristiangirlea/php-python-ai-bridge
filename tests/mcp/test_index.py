@@ -590,7 +590,7 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(index.search(loaded, [1.0, 0.0, 0.0], 3), [(0, 1.0), (2, 1.0), (1, 0.0)])
         self.assertEqual(index.search(loaded, [0.0, 1.0, 0.0], 1), [(1, 1.0)])
 
-    def test_the_cache_reloads_on_change_and_evicts_the_oldest(self):
+    def test_the_cache_reloads_on_change_and_retains_only_the_latest_index(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
         cache = index.IndexCache()
         with patch.object(index, "load_index", wraps=index.load_index) as load:

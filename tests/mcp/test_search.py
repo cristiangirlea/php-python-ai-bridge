@@ -1,5 +1,6 @@
 """bridge_search through the SDK's in-memory client, against a real in-process worker and a built index."""
 
+import array
 import asyncio
 import json
 import os
@@ -278,6 +279,41 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
             result = await self.call({"query": "needle", "index_path": "index"}, server=server)
         self.assertFalse(result.is_error, result.content)
         self.assertEqual(load.call_count, 1)
+
+    async def test_failed_load_releases_buffers_before_the_next_search_loads(self):
+        original = index.load_index
+        for phase, fail_at in (("facts", 1), ("select", 2)):
+            for error_type in (index.InvalidIndex, OSError):
+                with self.subTest(phase=phase, error_type=error_type):
+                    references, errors = [], []
+                    attempts = 0
+                    last_failure = fail_at + (1 if error_type is OSError else 0)
+
+                    def load(*args, fail_at=fail_at, last_failure=last_failure, references=references,
+                             errors=errors, error_type=error_type, **kwargs):
+                        nonlocal attempts
+                        attempts += 1
+                        if fail_at <= attempts <= last_failure:
+                            if attempts == last_failure:
+                                buffer = array.array("f", [1.0])
+                                references.append(weakref.ref(buffer))
+                            error = error_type("failed index load")
+                            errors.append(error)
+                            raise error
+                        if references:
+                            self.assertIsNone(references[0](), "failed loads must release buffers before another load")
+                        return original(*args, **kwargs)
+
+                    server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=10000)
+                    with patch.object(index, "load_index", load), \
+                         patch.object(index.IndexCache, "_cached", return_value=None), patch.object(index, "_pause"):
+                        failed = await self.call({"query": "needle", "index_path": "index"}, server=server)
+                        self.assertTrue(failed.is_error)
+                        self.assertIn("failed index load" if error_type is index.InvalidIndex else "OSError",
+                                      failed.content[0].text)
+                        self.assertEqual(len(errors), last_failure - fail_at + 1)
+                        result = await self.call({"query": "needle", "index_path": "small"}, server=server)
+                        self.assertFalse(result.is_error, result.content)
 
     async def test_parallel_searches_release_indexes_while_worker_jobs_wait(self):
         paths = [self.copy_index(f"parallel_{number}") for number in range(3)]

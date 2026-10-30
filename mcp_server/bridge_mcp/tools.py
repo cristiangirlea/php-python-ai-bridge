@@ -335,8 +335,11 @@ def _index_from(root: Path | None, path_text: str, cache: index_files.IndexCache
                             "python -m bridge_mcp.index build.")
         return cache.get(sidecar, within=root)
     except index_files.InvalidIndex as error:
+        # Suppressed exception contexts must not retain failed loads across index steps.
+        traceback.clear_frames(error.__traceback__)
         raise ToolError(f"{path_text!r} is not a usable index: {error}.") from None
     except OSError as error:
+        traceback.clear_frames(error.__traceback__)
         raise ToolError(f"Cannot read the index at {path_text!r}: {type(error).__name__}.") from None
 
 
