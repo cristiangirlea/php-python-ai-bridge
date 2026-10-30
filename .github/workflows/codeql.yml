@@ -10,13 +10,16 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
-# CodeQL does not support PHP; PHPStan and hostile-peer tests cover the client in tests.yml.
+# GitHub's hosted runners, as in tests.yml: the repository is public. GitHub's CodeQL does not support PHP, so
+# Python and the workflows only; the PHP client is covered by PHPStan at level max and the hostile-peer tests in tests.yml.
 jobs:
   analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

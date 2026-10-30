@@ -781,7 +781,10 @@ jobs:  # the jobs
     def test_codeql_runs_on_main_pull_requests_and_weekly_with_least_privilege(self):
         text = (REPO / ".github" / "workflows" / "codeql.yml").read_text(encoding="utf-8")
         self.assertIn("on:\n  push:\n    branches: [main]\n  pull_request:\n  schedule:\n", text)
-        self.assertIn("permissions:\n  contents: read\n  security-events: write\n", text)
+        # Write access only on the job that uploads results, so no top-level write token.
+        self.assertIn("\npermissions:\n  contents: read\n\n", text)
+        self.assertIn("    permissions:\n      contents: read\n      security-events: write\n", text)
+        self.assertEqual(text.count("security-events: write"), 1)
         self.assertIn("languages: python, actions\n", text)
 
 
