@@ -43,13 +43,16 @@ MAX_VECTOR_BYTES = MAX_INDEX_CHUNKS * 384 * 4
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 # Default fixture: 50000 * (1000 text + 66 JSON escapes + 63 framing) + 512 header = 56450512; 64 MiB leaves headroom.
 MAX_SIDECAR_BYTES = 64 * 1024 * 1024
+MAX_JSON_TEXT_BYTES = 2 * MAX_SIDECAR_BYTES
 CACHE_BYTES = 160 * 1024 * 1024
 # File bytes alone undercount Python objects, particularly for many tiny cached indexes.
-CACHE_RESIDENT_BYTES = 128 * 1024 * 1024
+CACHE_RESIDENT_BYTES = 192 * 1024 * 1024
 MAX_JSON_CONTAINERS = MAX_INDEX_CHUNKS + 8
 MAX_JSON_TOKENS = MAX_INDEX_CHUNKS * 12 + 128
 MAX_JSON_DEPTH = 64
-_JSON_TOKENS = re.compile(rb'["\\\[\]{},:]')
+_JSON_TOKENS = re.compile(rb'"[^"\\]*+(?:\\.[^"\\]*+)*+"|[\[\]{},:]')
+_JSON_WIDTH4 = re.compile(rb'[\xf0-\xf4]|\\u[dD][89aAbB][0-9a-fA-F]{2}')
+_JSON_WIDE = re.compile(rb'[\xc4-\xf4]|\\u(?:[1-9a-fA-F][0-9a-fA-F]{3}|0[1-9a-fA-F][0-9a-fA-F]{2})')
 MAX_CHUNK_CHARACTERS = 8192
 # The worker embeds at most 32 texts per job, and the encoded request must stay under 262144 bytes.
 EMBED_BATCH = 32
@@ -167,29 +170,36 @@ def _vector_bytes(dimensions: int, count: int) -> int:
     return expected
 
 
+def _text_width(data: bytes) -> int:
+    # One wide character widens an entire CPython string, including the decoder's input.
+    first = _JSON_WIDE.search(data)
+    if first is None:
+        return 1
+    return 4 if _JSON_WIDTH4.search(data, first.start()) else 2
+
+
+def _guard_text(size: int, width: int) -> None:
+    if size * width > MAX_JSON_TEXT_BYTES:
+        kind = "an index with characters outside the Basic Multilingual Plane" if width == 4 else "an index"
+        raise InvalidIndex(f"{kind} may hold at most {MAX_JSON_TEXT_BYTES // width // 1024**2:g} MiB of text "
+                           f"in {SIDECAR}; index fewer files or reduce --chunk-chars")
+
+
 def _guard_json(data: bytes) -> None:
     """Count structure before the decoder can allocate objects; punctuation inside strings is inert."""
-    quoted = False
-    escaped_until = containers = tokens = depth = 0
+    _guard_text(len(data), _text_width(data))
+    containers = tokens = depth = 0
     for match in _JSON_TOKENS.finditer(data):
-        if match.start() < escaped_until:
+        token = data[match.start()]
+        if token == 34:
             continue
-        token = match[0]
-        if quoted:
-            if token == b"\\":
-                escaped_until = match.start() + 2
-            elif token == b'"':
-                quoted = False
-            continue
-        if token == b'"':
-            quoted = True
-        elif token in (b"[", b"{"):
+        if token in (91, 123):
             containers += 1
             depth += 1
             tokens += 1
-        elif token in (b"]", b"}"):
+        elif token in (93, 125):
             depth -= 1
-        elif token in (b",", b":"):
+        elif token in (44, 58):
             tokens += 1
         _check(containers <= MAX_JSON_CONTAINERS and tokens <= MAX_JSON_TOKENS and depth <= MAX_JSON_DEPTH,
                f"{SIDECAR} exceeds the JSON complexity limit")
@@ -206,7 +216,7 @@ def _json_size(value: Any) -> int:
 
 
 def _open_regular(path: Path) -> BufferedReader:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     try:
         _check(stat.S_ISREG(os.fstat(descriptor).st_mode), f"{path.name} must be a regular file")
         return os.fdopen(descriptor, "rb")
@@ -247,15 +257,21 @@ def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunkin
                 "chunking": chunking, "vectors": {"file": VECTORS, "dtype": "float32", "byte_order": "little",
                                                   "sha256": digest.hexdigest()},
                 "sources": sources, "chunks": chunks}
-        data = json.dumps(meta, ensure_ascii=False, allow_nan=False).encode("utf-8")
-        if len(data) > MAX_SIDECAR_BYTES:
-            raise BuildError(f"{SIDECAR} exceeds the {MAX_SIDECAR_BYTES}-byte sidecar limit; "
-                             "index fewer files or reduce --chunk-chars")
         try:
-            _guard_json(data)
+            size, width = 0, 1
+            with sidecar_tmp.open("wb") as output:
+                for part in json.JSONEncoder(ensure_ascii=False, allow_nan=False).iterencode(meta):
+                    data = part.encode("utf-8")
+                    size += len(data)
+                    if size > MAX_SIDECAR_BYTES:
+                        raise BuildError(f"{SIDECAR} exceeds the {MAX_SIDECAR_BYTES}-byte sidecar limit; "
+                                         "index fewer files or reduce --chunk-chars")
+                    width = max(width, _text_width(data))
+                    _guard_text(size, width)
+                    output.write(data)
+            _guard_json(sidecar_tmp.read_bytes())
         except InvalidIndex as error:
             raise BuildError(str(error)) from None
-        sidecar_tmp.write_bytes(data)
         os.replace(vectors_tmp, out / VECTORS)
         os.replace(sidecar_tmp, out / SIDECAR)
         return meta
@@ -279,7 +295,7 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
             del data
             meta = json.loads(text)
             del text
-    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         if isinstance(error, InvalidIndex):
             raise
         raise InvalidIndex(f"{SIDECAR} cannot be read as JSON ({type(error).__name__})") from None
@@ -307,16 +323,13 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
     vectors_path = (sidecar.parent / name).resolve()
     if within is not None:
         _check(vectors_path.is_relative_to(Path(within).resolve()), "the vectors file is outside the allowed directory")
-    try:
-        with _open_regular(vectors_path) as handle:
-            vectors_stamp = _fstamp(handle)
-            _check(vectors_stamp[3] == expected, f"{name} does not hold {count} x {dimensions} float32 values")
-            vectors = array.array("f", [0.0]) * (expected // 4)
-            view = memoryview(vectors).cast("B")
-            _check(handle.readinto(view) == expected and handle.read(1) == b"", f"{name} changed while it was read")
-            _check(hashlib.sha256(view).hexdigest() == described.get("sha256"), f"{name} does not match its SHA-256")
-    except OSError as error:
-        raise InvalidIndex(f"{name} cannot be read ({type(error).__name__})") from None
+    with _open_regular(vectors_path) as handle:
+        vectors_stamp = _fstamp(handle)
+        _check(vectors_stamp[3] == expected, f"{name} does not hold {count} x {dimensions} float32 values")
+        vectors = array.array("f", [0.0]) * (expected // 4)
+        view = memoryview(vectors).cast("B")
+        _check(handle.readinto(view) == expected and handle.read(1) == b"", f"{name} changed while it was read")
+        _check(hashlib.sha256(view).hexdigest() == described.get("sha256"), f"{name} does not match its SHA-256")
     if sys.byteorder == "big":
         vectors.byteswap()
     rows = memoryview(vectors)
@@ -376,10 +389,10 @@ class IndexCache:
                 self._items.pop(key, None)
             try:
                 loaded = load_index(sidecar, within)
-            except InvalidIndex:
+            except OSError:
                 pass
             if loaded is None:
-                # Retry after separate renames, outside except so its traceback releases the failed buffer.
+                # Only retry I/O failures, outside except so its traceback releases the failed buffer.
                 _pause(0.2)
                 loaded = load_index(sidecar, within)
             if loaded.size > self.limit_bytes or loaded.resident_bytes > CACHE_RESIDENT_BYTES:

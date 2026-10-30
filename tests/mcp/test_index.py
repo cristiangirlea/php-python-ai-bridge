@@ -207,6 +207,128 @@ class FormatTests(unittest.TestCase):
             with self.assertRaises(index.InvalidIndex):
                 index.load_index(sidecar)
 
+    def test_wide_sidecars_are_refused_before_decoding_or_parsing(self):
+        class Undecodable(bytes):
+            def decode(self, *args, **kwargs):
+                raise AssertionError("the width guard must run before decoding")
+
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        for marker, width in ((b"\xf0\x9f\x98\x80", 4), (b"\\ud83d\\ude00", 4),
+                              (b"\xe4\xb8\xad", 2), (b"\xc4\x80", 2), (b"\\u0100", 2)):
+            with self.subTest(marker=marker):
+                payload = b'{"model":"' + marker + b'a' * 1024 + b'"}'
+                handle = MagicMock()
+                handle.__enter__.return_value = handle
+                handle.read.return_value = Undecodable(payload)
+                with patch.object(index, "MAX_JSON_TEXT_BYTES", len(payload) * width - 1, create=True), \
+                     patch.object(index, "_open_regular", return_value=handle), \
+                     patch.object(index, "_fstamp", return_value=(0, 0, 0, len(payload))), \
+                     patch.object(index.json, "loads") as parse:
+                    with self.assertRaisesRegex(index.InvalidIndex, "text"):
+                        index.load_index(sidecar)
+                    parse.assert_not_called()
+
+    def test_non_bmp_sidecar_exactly_at_the_width_budget_loads(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]], model="m\U0001f600")
+        budget = 2 * index.MAX_SIDECAR_BYTES // 4
+        with sidecar.open("ab") as handle:
+            handle.write(b" " * (budget - sidecar.stat().st_size))
+        self.assertEqual(sidecar.stat().st_size * 4, 2 * index.MAX_SIDECAR_BYTES)
+        self.assertEqual(index.load_index(sidecar).model, "m\U0001f600")
+
+    def test_writer_enforces_the_same_width_budget_without_replacing_files(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        before = sidecar.read_bytes()
+        with patch.object(index, "MAX_JSON_TEXT_BYTES", 1024, create=True):
+            with self.assertRaisesRegex(index.BuildError, "outside the Basic Multilingual Plane.*text"):
+                self.write([[0.0, 1.0, 0.0]], model="m\U0001f600" + "a" * 1024)
+        self.assertEqual(sidecar.read_bytes(), before)
+        self.assertFalse(list(self.out.glob("*.tmp")))
+
+    def test_escape_heavy_sidecar_is_one_match_per_string(self):
+        payload = b'{"model":"' + b"\\n" * ((index.MAX_SIDECAR_BYTES - 12) // 2) + b'"}'
+        self.assertGreaterEqual(len(payload), index.MAX_SIDECAR_BYTES - 2)
+        original = index._JSON_TOKENS
+        iterations = 0
+
+        def matches(data):
+            nonlocal iterations
+            for match in original.finditer(data):
+                iterations += 1
+                self.assertLessEqual(iterations, 5, "scan a whole JSON string in C")
+                yield match
+
+        with patch.object(index, "_JSON_TOKENS") as scanner:
+            scanner.finditer.side_effect = matches
+            index._guard_json(payload)
+        self.assertEqual(iterations, 5)
+
+    def test_cache_validation_failure_is_not_retried(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        with patch.object(index, "load_index", side_effect=index.InvalidIndex("bad text")) as load, \
+             patch.object(index, "_pause") as pause:
+            with self.assertRaises(index.InvalidIndex):
+                index.IndexCache().get(sidecar)
+        self.assertEqual(load.call_count, 1)
+        pause.assert_not_called()
+
+    def test_cache_resident_budget_keeps_one_default_index(self):
+        self.assertEqual(index.CACHE_RESIDENT_BYTES, 192 * 1024**2)
+        self.assertEqual(index.CACHE_BYTES, 160 * 1024**2)
+
+    def test_cache_evicts_under_object_budget_with_two_real_entries(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        other = Path(self.temp.name) / "other"
+        index.write_index(other, model="m", backend="lexical", dimensions=3, chunking={},
+                          sources=["a.txt"], chunks=[{"source": 0, "start": 0, "end": 1, "text": "t"}],
+                          rows=[[1.0, 0.0, 0.0]])
+        first = index.load_index(sidecar)
+        second = index.load_index(other / index.SIDECAR)
+        self.assertLess(first.size + second.size, index.CACHE_BYTES)
+        with patch.object(index, "CACHE_RESIDENT_BYTES", max(first.resident_bytes, second.resident_bytes)):
+            cache = index.IndexCache()
+            cache.get(sidecar)
+            self.assertEqual(len(cache._items), 1)
+            cache.get(other / index.SIDECAR)
+            self.assertEqual(list(cache._items), [(other.joinpath(index.SIDECAR).resolve(), None)])
+
+    def test_cache_hit_proceeds_while_another_key_loads(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        cache = index.IndexCache()
+        first = cache.get(sidecar)
+        entered, release, hit = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+
+        def load(*args):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("blocked loader was not released")
+            return first
+
+        def get(path, is_hit=False):
+            try:
+                self.assertIs(cache.get(path), first)
+                if is_hit:
+                    hit.set()
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(index, "load_index", load):
+            loading = threading.Thread(target=get, args=(self.out / "other.json",))
+            hitting = threading.Thread(target=get, args=(sidecar, True))
+            loading.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                hitting.start()
+                self.assertTrue(hit.wait(1), "a cached key must not wait for another load")
+            finally:
+                release.set()
+                loading.join(4)
+                if hitting.ident is not None:
+                    hitting.join(4)
+        self.assertFalse(loading.is_alive() or hitting.is_alive())
+        self.assertEqual(errors, [])
+
     def test_writer_refuses_an_oversized_sidecar_without_replacing_files(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
         before = sidecar.read_bytes()
@@ -358,7 +480,7 @@ class FormatTests(unittest.TestCase):
             if not buffers:
                 buffer = array.array("f", [1.0])
                 buffers.append(weakref.ref(buffer))
-                raise index.InvalidIndex("checksum mismatch")
+                raise OSError("read raced with replacement")
             self.assertIsNone(buffers[0](), "the first exception must release its array before the retry")
             return original(*args)
 

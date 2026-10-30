@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
+- Build provenance for the release source archive, with a `.sigstore.json` bundle attached alongside the archive and verification instructions.
 - OpenSSF Scorecard scans on `main`, weekly and on demand, with SARIF results in the Security tab and a README badge. The security policy lists the project's scans, and CodeQL now also scans GitHub Actions workflows.
 
 ### Changed
@@ -16,7 +17,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
-- MCP indexes bound dimensions to 4096 and vector data to 76,800,000 bytes (50,000 x 384 float32 values), read vectors into one buffer, reject non-regular files without blocking, and guard JSON complexity before parsing. The 64 MiB sidecar cap is unchanged: 50,000 chunks at the default 1000-character size and 200-character overlap still fit for ordinary text, including the measured escaped-text fixture. No formerly valid index is refused because of a lower chunk count or sidecar byte cap; previously accepted indexes with excessive JSON structure (including extension metadata) are now refused above 50,008 objects/arrays, 600,128 structural tokens or 64 nesting levels. The builder enforces the same file and complexity limits and names the sidecar byte limit in its error. Cache loads are serialized, stale entries are dropped, and both file bytes and parsed objects are budgeted; full default-size indexes above the 128 MiB parsed-object budget are loaded for each call rather than cached. Search loading consumes the call's deadline and submits no job when it exhausts that budget.
+- MCP indexes bound dimensions to 4096 and vector data to 76,800,000 bytes (50,000 x 384 float32 values), allowing at most 25,000 chunks at 768 dimensions or 4,687 at 4096. Previously accepted indexes from 768+ dimension models over that vector cap are refused. Vectors load into one buffer, non-regular files are refused without blocking where supported, and JSON structure is bounded before parsing (50,008 containers, 600,128 structural tokens, 64 nesting levels). The 64 MiB sidecar file cap remains, with a separate 128 MiB width-weighted text budget: ASCII and Basic Multilingual Plane text can still reach 64 MiB, while text containing emoji or other non-BMP characters, raw or Unicode-escaped, is capped at 32 MiB. Large previously accepted non-BMP indexes over this budget are refused. The builder streams JSON under the same limits. Each string is scanned in C, and validation failures are not retried. Serialized cache loads, stale-entry removal, 160 MiB of file bytes and 192 MiB of parsed objects keep one full measured default index cached, evicting it for a second. Concurrent searches can still retain evicted indexes; the limits guide documents that memory risk. Search loading consumes the call's deadline and submits no job when it exhausts that budget.
 
 ## [0.5.0] - 2026-10-29
 

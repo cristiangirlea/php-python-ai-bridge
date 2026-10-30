@@ -532,59 +532,71 @@ the model workflow runs both selected-model PHP checks and parity checks.
 
 ## MCP index loading memory
 
-Measured on 2026-10-30 on `fix/index-limits`, base commit `266381a` with the
-uncommitted loader fixes (the run was deliberately staged without a new commit).
+Measured on 2026-10-30 on `fix/index-limits`, starting at commit `d33ea19`
+with `origin/main` (`abb3783`) merged and the loader changes below applied.
 The tested `mcp_server/bridge_mcp/index.py` Git blob is
-`2bb058b96ab61b821cc9e3a36ab5ef51976da3b0`; the measurement script blob is
-`a96a9eda0b2d8da7d7bcb4cc1dc06b2e19183cec`.
-The real compose `mcp` service inherits `mem_limit: 512m`; the measurement script
-also checks `/sys/fs/cgroup/memory.max` is 536,870,912 bytes.
+`e3e8875331a1caee1c88e9277fd3192715899382`; the measurement script blob is
+`0a3ef7e7015ad549fab4388a63e7296558bb28e8`.
+Each scenario starts a fresh real compose `mcp` container; the script checks
+`memory.max` is 536,870,912 bytes (512 MiB) and reads cgroup `memory.peak`.
+The peak includes wheel installation in `/deps` tmpfs, fixture construction,
+the MCP runtime, Python objects, vectors and cache; it is not process RSS.
 
-Each fixture was written with `write_index`: 50,000 chunks, 384 dimensions,
-76,800,000 vector bytes and a 56,372,047-byte sidecar (84.00% of the 64 MiB cap).
-Each chunk holds 1000 characters of prose containing quotes, backslashes and
-newlines, encoded as 1066 text bytes by `write_index`. Chunking metadata uses the
-builder's default 1000-character windows and 200-character overlap; offsets
-advance by 800 across three sources, each under the 16 MiB source limit.
-The script builds both fixtures before loading, imports the MCP tools and creates
-the server, loads the two different indexes in sequence, releases the caller's
-reference after each load, and reads the cgroup's cumulative
-`memory.peak`. The peak includes offline wheel installation in `/deps` tmpfs,
-fixture construction, Python objects, vectors and cache; it is not process RSS.
+The ASCII fixture uses `write_index` with 50,000 chunks, 384 dimensions,
+76,800,000 vector bytes and a 56,372,047-byte sidecar. Each chunk has 1000
+characters of prose with quotes, backslashes and newlines (1066 escaped text
+bytes). Default 1000-character windows overlap by 200; offsets advance by 800
+across three sources, each under the 16 MiB source limit. The non-BMP fixture
+puts an emoji in every 1000-character chunk (1069 escaped text bytes), fitting
+29,615 chunks and 45,488,640 vector bytes. Builder-written padding metadata
+brings its sidecar to exactly 33,554,432 bytes: the new 32 MiB non-BMP limit.
+The same pre-decode width guard is used by the streaming builder: sidecar byte
+length times width 1, 2 or 4 must fit 128 MiB; the file cap remains 64 MiB.
 
-| Point | memory.peak bytes | MiB | Cached indexes |
+| Scenario | memory.peak bytes | MiB | Cached indexes after each load |
 | --- | ---: | ---: | ---: |
-| After one full index load | 226,521,088 | 216.03 | 0 |
-| After two different full indexes in sequence | 226,623,488 | 216.13 | 0 |
+| (a) One full default ASCII index | 226,959,360 | 216.45 | 1 |
+| (b) One cached full ASCII index while a second loads | 369,991,680 | 352.85 | 1 |
+| (c) Non-BMP index at its width budget, then cached while ASCII loads | 401,485,824 | 382.89 | 1 |
 
-Both stay below the 440 MiB acceptance threshold and the 512 MiB container limit.
-No further cap tightening was needed: the existing conservative 128 MiB
-parsed-object cache budget excludes each full fixture (151,797,590 accounted
-object bytes), although its 133,172,047 file bytes fit the 160 MiB file-byte
-budget. Both indexes load successfully without being retained, so their vectors
-and parsed text are released between calls. Default-built capacity remains
-50,000 chunks at 384 dimensions for this text; the 64 MiB sidecar byte cap is
-unchanged from the base commit. The separate object accounting also prevents
-many tiny files from retaining disproportionately large Python heaps.
-These observations cover the stated fixture and sequential loads; structural
-and byte guards separately bound malicious sidecars before decoding.
+All three peaks stay below 440 MiB. No tighter text or cache budget was needed:
+192 MiB of conservative parsed-object accounting keeps either fixture cached
+(151,797,590 ASCII object bytes; 179,381,725 non-BMP object bytes). The separate
+160 MiB file-byte budget also applies. The script verifies a cache hit after
+each load and eviction of the previous full index when loading the second.
+It releases caller references between loads; concurrent searches can retain
+evicted objects and exceed these peaks, as described in [the limits](mcp.md).
+These measurements establish the stated fixtures, not arbitrary concurrent load.
+
+The escape-heavy scan fixture is valid JSON of exactly 67,108,864 bytes with
+33,554,426 escaped newlines inside one string. The old scanner took 4.499 s
+and 33,554,433 Python regex-match iterations; the new width and structure guard
+took 0.615 s (7.32 times faster), with five matches, one per whole string or
+structural token. The regression test checks that iteration bound, not wall
+time. Invalid-index validation failures are never retried; I/O failures alone
+get one retry after 0.2 s.
 
 Reproduce from Git Bash, after `mkdir -p .cache` and setting a fresh random
-`BRIDGE_TOKEN` without printing it; `mcp-fetcher` must have populated the pinned
-wheels. `/measure` is an additional writable mount of the ignored cache directory,
-because the service's ordinary `/cache` mount remains read-only:
+`BRIDGE_TOKEN` without printing it; run `mcp-fetcher` first for the pinned wheels.
+`/measure` is an additional writable mount of the ignored cache directory:
 
 ```sh
 export MSYS_NO_PATHCONV=1
-docker compose -p bridge-index -f docker/compose.yaml run --rm --no-deps \
-  -v "$PWD/.cache:/measure:rw" mcp sh -ec \
-  'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python scripts/mcp_index_memory.py /measure'
+for scenario in ascii ascii-pair unicode-pair; do
+  docker compose -p bridge-index -f docker/compose.yaml run --rm --no-deps \
+    -v "$PWD/.cache:/measure:rw" mcp sh -ec \
+    'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python scripts/mcp_index_memory.py /measure "$1"' sh "$scenario"
+done
+docker compose -p bridge-index -f docker/compose.yaml run --rm --no-deps mcp sh -ec \
+  'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python scripts/mcp_index_memory.py scan'
 docker compose -p bridge-index -f docker/compose.yaml --profile test --profile mcp --profile mcp-fetch --profile py-dev down
 ```
 
-The script removes both large fixtures on exit and asserts that both peaks stay
-at or below 440 MiB. The unit test for the full 50,000-chunk count uses the same
-1000-character escaped text and three dimensions to keep its files below the
-test service's 64m `/tmp`; that smaller vector array lets it verify a cache hit.
-The separate maximum-dimension test keeps 4096 dimensions, whose sparse nonzero rows touch
-few enough pages to fit the test service's 64m `/tmp`.
+The script removes the large fixtures on exit, asserts every peak is at most
+440 MiB, and checks the scan's measured speedup is at least five. Unit tests
+also prove raw and escaped wide text is refused before decoding or parsing,
+a non-BMP sidecar exactly at its width budget loads, the builder preserves an
+old index on refusal, two real entries evict under the object budget, and a
+cached key remains available while another key loads. The full-count unit test
+uses three dimensions to keep its files under the test container's 64m `/tmp`;
+the maximum-dimension test uses sparse vectors at 4096 dimensions.
