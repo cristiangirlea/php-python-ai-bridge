@@ -8,9 +8,10 @@ does not protect, and [the operations guide](docs/operations.md) for the support
 
 ## Reporting a vulnerability
 
-Report it privately through GitHub's private vulnerability reporting on this repository: open the
-**Security** tab and choose **Report a vulnerability**. Please do not open a public issue, pull request or
-discussion for it, and do not send it by email.
+Report it privately through GitHub's private vulnerability reporting on this repository:
+<https://github.com/cristiangirlea/php-python-ai-bridge/security/advisories/new> (or open the **Security**
+tab and choose **Report a vulnerability**). Please do not open a public issue, pull request or discussion for
+it, and do not send it by email.
 
 Include the affected version or commit, the component, the steps or input that reproduce it, and what an
 attacker gains. Do not include real personal data or credentials in the report.
@@ -20,6 +21,17 @@ attacker gains. Do not include real personal data or credentials in the report.
 - An acknowledgement within 7 days.
 - A fix, or a statement of why no fix will be made, within 90 days of the report.
 - Credit in the advisory, if you want it, once a fix or statement is published.
+
+## What scans the project
+
+- CodeQL scans Python and GitHub Actions on every pull request and push to `main`, and weekly.
+- Dependabot alerts have automatic security updates enabled; version updates for Actions, pip and Composer run weekly.
+- `pip-audit` and `composer audit` check the dependency locks in the weekly `audit` job of `model-smoke.yml`.
+- Secret scanning with push protection checks for supported secrets.
+- OpenSSF Scorecard runs weekly, on pushes to `main` and on manual dispatch; ruleset changes are picked up by the weekly run.
+
+Code-scanning, dependency and secret-scanning results appear under the repository's **Security** tab;
+the dependency audit's output is in the workflow logs under **Actions**. These tools do not replace an outside review.
 
 ## Scope
 

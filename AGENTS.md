@@ -22,7 +22,7 @@ and `docs/testing.md` are the guides. Everything builds, tests and downloads ins
 | `tests/mcp/` | The MCP server's suite, offline against hash-pinned wheels; its fixtures and LLM evaluations. |
 | `tests/*.py` | Cross-boundary tests: `integration.py` (through the FrankenPHP worker), `model_integration.py`, `mcp_model_probe.py`, and `hostile_server.py`, a broken peer. |
 | `docker/compose.yaml` | Every service, profile and limit. |
-| `.github/workflows/` | `tests.yml`, the deterministic gate, and `model-smoke.yml`, the real models (not required). |
+| `.github/workflows/` | `tests.yml`, the deterministic gate; `model-smoke.yml`, the real models (not required); `publish.yml`, images and releases on tags; `codeql.yml` and `scorecard.yml`, the security scans. |
 
 ## Build and test
 

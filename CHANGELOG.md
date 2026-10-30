@@ -6,13 +6,17 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- MCP indexes bound dimensions to 4096 and vector data to 76,800,000 bytes (50,000 x 384 float32 values), read vectors into one buffer, reject non-regular files without blocking, and guard JSON complexity before parsing. The 64 MiB sidecar cap is unchanged: 50,000 chunks at the default 1000-character size and 200-character overlap still fit for ordinary text, including the measured escaped-text fixture. No formerly valid index is refused because of a lower chunk count or sidecar byte cap; previously accepted indexes with excessive JSON structure (including extension metadata) are now refused above 50,008 objects/arrays, 600,128 structural tokens or 64 nesting levels. The builder enforces the same file and complexity limits and names the sidecar byte limit in its error. Cache loads are serialized, stale entries are dropped, and both file bytes and parsed objects are budgeted; full default-size indexes above the 128 MiB parsed-object budget are loaded for each call rather than cached. Search loading consumes the call's deadline and submits no job when it exhausts that budget.
+- OpenSSF Scorecard scans on `main`, weekly and on demand, with SARIF results in the Security tab and a README badge. The security policy lists the project's scans, and CodeQL now also scans GitHub Actions workflows.
 
 ### Changed
 
 - Worker image publishing now builds natively on amd64 and arm64, pushes untagged digests and pulls and starts those exact images before creating multi-architecture version tags. Build provenance and SBOMs remain attached, with release attestations on the combined index digests; digest handoff uses job outputs without Actions artifacts.
+
+### Fixed
+
+- MCP indexes bound dimensions to 4096 and vector data to 76,800,000 bytes (50,000 x 384 float32 values), read vectors into one buffer, reject non-regular files without blocking, and guard JSON complexity before parsing. The 64 MiB sidecar cap is unchanged: 50,000 chunks at the default 1000-character size and 200-character overlap still fit for ordinary text, including the measured escaped-text fixture. No formerly valid index is refused because of a lower chunk count or sidecar byte cap; previously accepted indexes with excessive JSON structure (including extension metadata) are now refused above 50,008 objects/arrays, 600,128 structural tokens or 64 nesting levels. The builder enforces the same file and complexity limits and names the sidecar byte limit in its error. Cache loads are serialized, stale entries are dropped, and both file bytes and parsed objects are budgeted; full default-size indexes above the 128 MiB parsed-object budget are loaded for each call rather than cached. Search loading consumes the call's deadline and submits no job when it exhausts that budget.
 
 ## [0.5.0] - 2026-10-29
 
