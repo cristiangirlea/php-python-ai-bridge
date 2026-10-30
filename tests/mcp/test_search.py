@@ -1,11 +1,13 @@
 """bridge_search through the SDK's in-memory client, against a real in-process worker and a built index."""
 
+import asyncio
 import json
 import os
 import shutil
 import tempfile
 import threading
 import unittest
+import weakref
 from pathlib import Path
 from unittest.mock import patch
 
@@ -237,3 +239,114 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_error)
         self.assertEqual(budgets, [], "an expired load must not submit an embed job")
         self.assertIn("loading the index used the whole 0.1 s budget", result.content[0].text)
+
+    async def test_parallel_searches_release_indexes_while_worker_jobs_wait(self):
+        paths = [self.copy_index(f"parallel_{number}") for number in range(3)]
+        sample = index.load_index(paths[0] / index.SIDECAR)
+        budget = sample.resident_bytes
+        del sample
+        original_load, original_run = index.load_index, self.bridge.run
+        references, observed = [], []
+        entered = {task: threading.Event() for task in ("embed", "rerank")}
+        release = {task: threading.Event() for task in entered}
+        counts = dict.fromkeys(entered, 0)
+        lock = threading.Lock()
+
+        def load(*args, **kwargs):
+            loaded = original_load(*args, **kwargs)
+            references.append(weakref.ref(loaded))
+            return loaded
+
+        def run(task, *args, **kwargs):
+            with lock:
+                counts[task] += 1
+                if counts[task] == 3:
+                    entered[task].set()
+            if not release[task].wait(10):
+                raise AssertionError(f"{task} jobs were not released")
+            return original_run(task, *args, **kwargs)
+
+        async def wait_for_jobs(task):
+            while not entered[task].is_set():
+                await asyncio.sleep(0.01)
+
+        with patch.object(index, "CACHE_RESIDENT_BYTES", budget), \
+             patch.object(index, "load_index", load), patch.object(self.bridge, "run", run):
+            server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=30000)
+            calls = [asyncio.create_task(self.call({"query": "needle", "index_path": path.name}, server=server))
+                     for path in paths]
+            try:
+                for task in entered:
+                    await asyncio.wait_for(wait_for_jobs(task), 8)
+                    observed.append((task, sum(reference() is not None for reference in references)))
+                    release[task].set()
+            finally:
+                for event in release.values():
+                    event.set()
+                results = await asyncio.gather(*calls)
+        for task, alive in observed:
+            self.assertLessEqual(alive, 2, f"{task} waits must not retain evicted indexes")
+        for result in results:
+            self.assertFalse(result.is_error, result.content)
+
+    async def test_reload_after_embed_uses_the_same_deadline(self):
+        original = tools._index_from
+        calls = []
+        with patch.object(tools, "time") as clock:
+            clock.monotonic.return_value = 100.0
+
+            def load(*args):
+                loaded = original(*args)
+                calls.append(1)
+                if len(calls) == 2:
+                    clock.monotonic.return_value = 101.0
+                return loaded
+
+            server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=100)
+            with patch.object(tools, "_index_from", load), patch.object(self.bridge, "run", wraps=self.bridge.run) as run:
+                result = await self.call({"query": "needle", "index_path": "index"}, server=server)
+        self.assertTrue(result.is_error)
+        self.assertIn("loading the index used the whole 0.1 s budget", result.content[0].text)
+        self.assertEqual([call.args[0] for call in run.call_args_list], ["embed"])
+
+    async def test_reload_rechecks_dimensions_before_scoring(self):
+        original = tools._index_from
+        calls = []
+
+        def load(*args):
+            loaded = original(*args)
+            calls.append(1)
+            if len(calls) == 2:
+                loaded.dimensions += 1
+            return loaded
+
+        server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=10000)
+        with patch.object(tools, "_index_from", load), patch.object(index, "search") as search, \
+             patch.object(self.bridge, "run", wraps=self.bridge.run) as run:
+            result = await self.call({"query": "needle", "index_path": "index"}, server=server)
+        self.assertTrue(result.is_error)
+        self.assertIn("The worker changed since start-up; check bridge_health.", result.content[0].text)
+        search.assert_not_called()
+        self.assertEqual([call.args[0] for call in run.call_args_list], ["embed"])
+
+    async def test_scoring_exception_tracebacks_release_evicted_indexes(self):
+        original = index.load_index
+        references, errors = [], []
+
+        def load(*args, **kwargs):
+            loaded = original(*args, **kwargs)
+            references.append(weakref.ref(loaded))
+            return loaded
+
+        def search(loaded, *args):
+            error = RuntimeError("scoring failed")
+            errors.append(error)
+            raise error
+
+        with patch.object(index, "CACHE_RESIDENT_BYTES", 1), patch.object(index, "load_index", load):
+            server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=10000)
+            with patch.object(index, "search", search):
+                result = await self.call({"query": "needle", "index_path": "index"}, server=server)
+        self.assertTrue(result.is_error)
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(all(reference() is None for reference in references), "saved errors must not pin indexes")

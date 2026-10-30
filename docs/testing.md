@@ -558,15 +558,25 @@ length times width 1, 2 or 4 must fit 128 MiB; the file cap remains 64 MiB.
 | (a) One full default ASCII index | 226,959,360 | 216.45 | 1 |
 | (b) One cached full ASCII index while a second loads | 369,991,680 | 352.85 | 1 |
 | (c) Non-BMP index at its width budget, then cached while ASCII loads | 401,485,824 | 382.89 | 1 |
+| (d) Three concurrent searches over different full default ASCII indexes | 445,083,648 | 424.46 | 1 |
 
-All three peaks stay below 440 MiB. No tighter text or cache budget was needed:
+All four peaks stay below 440 MiB. No tighter text or cache budget was needed:
 192 MiB of conservative parsed-object accounting keeps either fixture cached
 (151,797,590 ASCII object bytes; 179,381,725 non-BMP object bytes). The separate
 160 MiB file-byte budget also applies. The script verifies a cache hit after
 each load and eviction of the previous full index when loading the second.
-It releases caller references between loads; concurrent searches can retain
-evicted objects and exceed these peaks, as described in [the limits](mcp.md).
-These measurements establish the stated fixtures, not arbitrary concurrent load.
+Scenarios (a)-(c) release caller references between loads. Scenario (d), measured
+on 2026-10-30 at commit `88730b8` with the search changes applied, calls the real
+MCP server through its SDK client over three different full ASCII indexes.
+The tested `tools.py` blob is `49a7981e4513a9960ee2b9659b1c3171c17b12be`;
+the extended script blob is `8a45906de1195c3bf91837d4868308900063ea8a`.
+Its stub worker blocks embed and rerank jobs on separate events until all three
+calls are waiting in each phase. Exactly one loaded index remains alive at
+each barrier; weak references also assert at most two during every load.
+Searches serialize metadata reading, loading and candidate selection, copying
+only the selected candidates before a worker wait; no search pins an evicted
+index across those waits. These measurements establish the stated fixtures,
+not a bound on all memory used by arbitrary numbers of calls or candidates.
 
 The escape-heavy scan fixture is valid JSON of exactly 67,108,864 bytes with
 33,554,426 escaped newlines inside one string. The old scanner took 4.499 s
@@ -582,7 +592,7 @@ Reproduce from Git Bash, after `mkdir -p .cache` and setting a fresh random
 
 ```sh
 export MSYS_NO_PATHCONV=1
-for scenario in ascii ascii-pair unicode-pair; do
+for scenario in ascii ascii-pair unicode-pair search-triple; do
   docker compose -p bridge-index -f docker/compose.yaml run --rm --no-deps \
     -v "$PWD/.cache:/measure:rw" mcp sh -ec \
     'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python scripts/mcp_index_memory.py /measure "$1"' sh "$scenario"
