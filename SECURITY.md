@@ -8,9 +8,10 @@ does not protect, and [the operations guide](docs/operations.md) for the support
 
 ## Reporting a vulnerability
 
-Report it privately through GitHub's private vulnerability reporting on this repository: open the
-**Security** tab and choose **Report a vulnerability**. Please do not open a public issue, pull request or
-discussion for it, and do not send it by email.
+Report it privately through GitHub's private vulnerability reporting on this repository:
+<https://github.com/cristiangirlea/php-python-ai-bridge/security/advisories/new> (or open the **Security**
+tab and choose **Report a vulnerability**). Please do not open a public issue, pull request or discussion for
+it, and do not send it by email.
 
 Include the affected version or commit, the component, the steps or input that reproduce it, and what an
 attacker gains. Do not include real personal data or credentials in the report.
