@@ -28,6 +28,8 @@ MAX_BODY = 262144
 MAX_REQUEST_LINE = 8192
 MAX_HEADER_BLOCK = 16384
 READ_SECONDS = 5
+LINGER_SECONDS = 2
+LINGER_BYTES = MAX_BODY + 65536
 # How long a stop waits for a held drain thread's line: past it, the stop goes ahead without one.
 DRAIN_LINE_WAIT = 5
 # What a request line names as the route: the template a path matches, never the path itself.
@@ -94,6 +96,15 @@ class _Head:
                 break
             raw.extend(part)
         return bytes(raw)
+
+    def linger(self) -> None:
+        self._deadline = min(self._deadline, time.monotonic() + LINGER_SECONDS)
+        left = LINGER_BYTES
+        while left:
+            part = self.read(min(left, 65536))
+            if not part:
+                break
+            left -= len(part)
 
     def readline(self, limit: int = -1) -> bytes:
         if self._done:
@@ -326,9 +337,22 @@ class Handler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         super().setup()
         self.connection.settimeout(READ_SECONDS)
+        self._unread_input = True
         # _Head is not a BufferedIOBase: it forwards every other attribute to the stream it wraps.
         self._reader = _Head(self.rfile, self.connection)
         self.rfile = self._reader  # type: ignore[assignment]
+
+    def finish(self) -> None:
+        try:
+            if self.close_connection and self._status is not None and self._unread_input:
+                # Deliver the refusal before discarding unread input, which would otherwise reset the socket on close.
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_WR)
+                self._reader.linger()
+        except OSError:
+            pass
+        finally:
+            super().finish()
 
     def handle_one_request(self) -> None:
         logged = log.enabled()
@@ -384,6 +408,7 @@ class Handler(BaseHTTPRequestHandler):
                 or (lengths and not re.fullmatch(r"[0-9]{1,7}", lengths[0]))):
             self.send_error(400)
             return False
+        self._unread_input = bool(lengths and int(lengths[0]))
         return True
 
     def log_message(self, *_: Any) -> None:
@@ -442,6 +467,7 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(size)
         if len(raw) != size:
             raise ValueError("Incomplete request body")
+        self._unread_input = False
 
         def reject_constant(_: str) -> None:
             raise ValueError("Non-finite JSON numbers are unsupported")

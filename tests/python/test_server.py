@@ -465,6 +465,117 @@ class ConnectionLimitTests(unittest.TestCase):
                         b"GET " + path + b" HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + TOKEN.encode() + b"\r\n"
                         + extra + b"\r\n")
 
+    def refused_head(self, length=262144):
+        return (b"POST /v1/jobs HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer wrong\r\n"
+                b"Content-Length: %d\r\n\r\n" % length)
+
+    def receive_reply(self, peer, status, code):
+        received = bytearray()
+        while b"\r\n\r\n" not in received:
+            part = peer.recv(4096)
+            self.assertTrue(part, "the response head was truncated")
+            received.extend(part)
+        head, body = bytes(received).split(b"\r\n\r\n", 1)
+        self.assertTrue(head.startswith(b"HTTP/1.0 %d " % status), head)
+        headers = dict(line.split(b": ", 1) for line in head.split(b"\r\n")[1:])
+        size = int(headers[b"Content-Length"])
+        while len(body) < size:
+            part = peer.recv(size - len(body))
+            self.assertTrue(part, "the JSON body was truncated")
+            body += part
+        self.assertEqual(len(body), size)
+        self.assertEqual(headers[b"Connection"], b"close")
+        self.assertEqual(headers[b"Content-Type"], b"application/json")
+        self.assertEqual(json.loads(body)["error"]["code"], code)
+        if code == "unauthorized":
+            self.assertEqual(body, b'{"error":{"code":"unauthorized","message":"Service authentication required"}}')
+        self.assertEqual(peer.recv(1), b"", "the response write side was not shut down")
+
+    def test_wrong_token_can_upload_a_limit_body_before_or_after_the_full_401(self):
+        for body_first in (False, True):
+            with self.subTest(body_first=body_first), socket.create_connection(self.server.server_address, timeout=4) as peer:
+                # A small send buffer makes a reset during the late upload observable inside sendall.
+                peer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+                peer.sendall(self.refused_head())
+                if body_first:
+                    peer.sendall(b"x" * 262144)
+                self.receive_reply(peer, 401, "unauthorized")
+                if not body_first:
+                    peer.sendall(b"x" * 262144)
+                peer.shutdown(socket.SHUT_WR)
+        settle(self.server)
+
+    def test_parser_and_size_refusals_can_receive_a_late_body(self):
+        cases = [(self.refused_head(262145).replace(b"Bearer wrong", b"Bearer " + TOKEN.encode()),
+                  413, "body_too_large"),
+                 (b"POST /v1/jobs HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", 400, "invalid_request"),
+                 (b"broken\r\n", 400, "invalid_request"),
+                 (b"GET /" + b"x" * 8192 + b" HTTP/1.1\r\n", 431, "headers_too_large"),
+                 (b"POST /v1/jobs HTTP/1.1\r\nX: " + b"x" * 16384 + b"\r\n", 431, "headers_too_large")]
+        for head, status, code in cases:
+            with self.subTest(status=status, head=head[:30]), socket.create_connection(self.server.server_address, timeout=4) as peer:
+                peer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+                peer.sendall(head)
+                self.receive_reply(peer, status, code)
+                peer.sendall(b"x" * 262144)
+                peer.shutdown(socket.SHUT_WR)
+        settle(self.server)
+
+    def test_trickling_after_a_refusal_holds_all_32_slots_only_until_the_deadline(self):
+        with contextlib.ExitStack() as stack:
+            peers = [stack.enter_context(socket.create_connection(self.server.server_address, timeout=4))
+                     for _ in range(32)]
+            started = time.monotonic()
+            for peer in peers:
+                peer.sendall(self.refused_head())
+            for peer in peers:
+                self.receive_reply(peer, 401, "unauthorized")
+            self.assertEqual(self.server.slots._value, 0, "lingering must still hold the connection slots")
+            self.assertEqual(exchange(self.server.server_address)[0], 503)
+            pending = set(peers)
+            while self.server.slots._value != 32:
+                self.assertLess(time.monotonic() - started, 2.8, "trickling extended the linger deadline")
+                for peer in list(pending):
+                    try:
+                        peer.sendall(b"x")
+                    except (BrokenPipeError, ConnectionResetError):
+                        pending.remove(peer)
+                time.sleep(0.05)
+            self.assertGreater(time.monotonic() - started, 1.5)
+            self.assertEqual(self.get()[0], 200)
+
+    def test_linger_stops_at_its_byte_cap_without_waiting_for_eof(self):
+        with socket.create_connection(self.server.server_address, timeout=4) as peer:
+            peer.sendall(self.refused_head())
+            self.receive_reply(peer, 401, "unauthorized")
+            time.sleep(0.05)
+            self.assertEqual(self.server.slots._value, 31)
+            peer.sendall(b"x" * (262144 + 65536))
+            settle(self.server, timeout=1)
+
+    def test_linger_does_not_extend_the_existing_head_phase_budget(self):
+        with socket.create_connection(self.server.server_address, timeout=4) as peer:
+            started = time.monotonic()
+            peer.sendall(self.refused_head()[:-2])
+            time.sleep(4)
+            peer.sendall(b"\r\n")
+            self.receive_reply(peer, 401, "unauthorized")
+            time.sleep(0.05)
+            self.assertEqual(self.server.slots._value, 31)
+            settle(self.server, timeout=1.5)
+            self.assertLess(time.monotonic() - started, 5.5)
+
+    def test_a_fully_read_invalid_body_and_a_bodyless_get_skip_lingering(self):
+        requests = [(b"POST /v1/jobs HTTP/1.1\r\nAuthorization: Bearer " + TOKEN.encode()
+                     + b"\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n{", 400, "invalid_request"),
+                    (b"GET /missing HTTP/1.1\r\nAuthorization: Bearer " + TOKEN.encode() + b"\r\n\r\n",
+                     404, "not_found")]
+        for head, status, code in requests:
+            with self.subTest(status=status), socket.create_connection(self.server.server_address, timeout=4) as peer:
+                peer.sendall(head)
+                self.receive_reply(peer, status, code)
+                settle(self.server, timeout=1)
+
     def test_a_full_connection_budget_answers_503_without_reading(self):
         idle = [socket.create_connection(self.server.server_address, timeout=2) for _ in range(32)]
         try:
@@ -1848,6 +1959,7 @@ class PeerResetTests(unittest.TestCase):
             thread.start()
             try:
                 for head in (b"GET /healthz HTTP/1.1\r\nHost: x\r\n",
+                             b"POST /v1/jobs HTTP/1.1\r\nAuthorization: Bearer wrong\r\nContent-Length: 262144\r\n\r\n",
                              b"GET /healthz HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + TOKEN.encode() + b"\r\n\r\n"):
                     connection = socket.create_connection(bridge.server_address, timeout=2)
                     connection.sendall(head)
