@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
+- The model wheels move to `onnxruntime` 1.31.1 in `requirements-model.txt` and `requirements-model.lock`, with hash-pinned CPython 3.12 wheels for Linux x86_64 and aarch64; the other model dependencies stay at their current versions.
 - Worker image publishing now builds natively on amd64 and arm64, pushes untagged digests and pulls and starts those exact images before creating multi-architecture version tags. Build provenance and SBOMs remain attached, with release attestations on the combined index digests; digest handoff uses job outputs without Actions artifacts.
 
 ### Fixed
