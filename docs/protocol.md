@@ -2,6 +2,8 @@
 
 Every route requires `Authorization: Bearer <service token>`. JSON requests require a single `Content-Length`, `Content-Type: application/json`, a maximum of 262144 bytes, and unique object keys. Transfer-Encoding in any casing, including an empty value, is unsupported. Repeated or malformed Content-Length is refused on every route. Request lines and headers require CRLF; folded headers, missing header names/colons and control bytes other than horizontal tabs in header values are refused with 400. HTTP/1.0 and HTTP/1.1 are accepted; other versions are 400 and unsupported methods are 405. An empty request line or EOF before any request closes without a reply. Pipelined bytes after the first request are never handled. A request line may hold at most 8192 bytes and the header block at most 16384 (every header line with its line end, not counting the blank line that ends the block); either over its limit is answered 431 with `{"error":{"code":"headers_too_large",...}}` before authentication, since the request was not read whole. All routes close the HTTP connection after a response.
 
+After a response that may leave unread request data, the handler shuts down the socket's write side and discards at most 327680 bytes for up to 2 seconds within the remaining five-second read-phase budget, holding its connection slot until it closes so an early refusal can reach an uploading client without a reset.
+
 | Route | Result |
 | --- | --- |
 | `GET /healthz` | 200 with protocol version and configured backend; process liveness only, not model readiness |
