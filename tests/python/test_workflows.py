@@ -203,7 +203,7 @@ class WorkflowTests(unittest.TestCase):
         ])
         self.assertEqual(inputs(found[0]), ["persist-credentials: false"])
         self.assertEqual(inputs(found[1]), [
-            "results_file: results.sarif", "results_format: sarif", "publish_results: true",
+            "results_file: results.sarif", "results_format: sarif", "publish_results: true", "file_mode: git",
         ])
         self.assertEqual(inputs(found[2]), ["sarif_file: results.sarif"])
 
