@@ -20,12 +20,13 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import threading
 import time
-from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from io import BufferedReader
 from pathlib import Path
 from typing import IO, Any
 
@@ -35,10 +36,19 @@ FORMAT = "bridge-index/1"
 SIDECAR = "index.json"
 VECTORS = "vectors.f32"
 MAX_INDEX_CHUNKS = 50000
+# Both current backends embed at 384 dimensions; 4096 leaves room for larger models.
+MAX_DIMENSIONS = 4096
+MAX_VECTOR_BYTES = MAX_INDEX_CHUNKS * 384 * 4
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
-# Parsing a sidecar costs several times its size in memory, and the mcp container has 512 MiB.
+# Default fixture: 50000 * (1000 text + 66 JSON escapes + 63 framing) + 512 header = 56450512; 64 MiB leaves headroom.
 MAX_SIDECAR_BYTES = 64 * 1024 * 1024
-CACHE_BYTES = 128 * 1024 * 1024
+MAX_JSON_TEXT_BYTES = 2 * MAX_SIDECAR_BYTES
+MAX_JSON_CONTAINERS = MAX_INDEX_CHUNKS + 8
+MAX_JSON_TOKENS = MAX_INDEX_CHUNKS * 12 + 128
+MAX_JSON_DEPTH = 64
+_JSON_TOKENS = re.compile(rb'"[^"\\]*+(?:\\.[^"\\]*+)*+"|[\[\]{},:]')
+_JSON_WIDTH4 = re.compile(rb'[\xf0-\xf4]|\\u[dD][89aAbB][0-9a-fA-F]{2}')
+_JSON_WIDE = re.compile(rb'[\xc4-\xf4]|\\u(?:[1-9a-fA-F][0-9a-fA-F]{3}|0[1-9a-fA-F][0-9a-fA-F]{2})')
 MAX_CHUNK_CHARACTERS = 8192
 # The worker embeds at most 32 texts per job, and the encoded request must stay under 262144 bytes.
 EMBED_BATCH = 32
@@ -146,10 +156,68 @@ def _check(condition: bool, message: str) -> None:
         raise InvalidIndex(message)
 
 
+def _vector_bytes(dimensions: int, count: int) -> int:
+    _check(type(dimensions) is int and 1 <= dimensions <= MAX_DIMENSIONS,
+           f"dimensions must be an integer from 1 to {MAX_DIMENSIONS}")
+    _check(type(count) is int and 1 <= count <= MAX_INDEX_CHUNKS, f"an index holds 1-{MAX_INDEX_CHUNKS} chunks")
+    expected = count * dimensions * 4
+    _check(expected <= MAX_VECTOR_BYTES, f"vector bytes exceed the {MAX_VECTOR_BYTES} byte limit")
+    return expected
+
+
+def _text_width(data: bytes) -> int:
+    # One wide character widens an entire CPython string, including the decoder's input.
+    first = _JSON_WIDE.search(data)
+    if first is None:
+        return 1
+    return 4 if _JSON_WIDTH4.search(data, first.start()) else 2
+
+
+def _guard_text(size: int, width: int) -> None:
+    if size * width > MAX_JSON_TEXT_BYTES:
+        kind = "an index with characters outside the Basic Multilingual Plane" if width == 4 else "an index"
+        raise InvalidIndex(f"{kind} may hold at most {MAX_JSON_TEXT_BYTES // width // 1024**2:g} MiB of text "
+                           f"in {SIDECAR}; index fewer files or reduce --chunk-chars")
+
+
+def _guard_json(data: bytes) -> None:
+    """Count structure before the decoder can allocate objects; punctuation inside strings is inert."""
+    _guard_text(len(data), _text_width(data))
+    containers = tokens = depth = 0
+    for match in _JSON_TOKENS.finditer(data):
+        token = data[match.start()]
+        if token == 34:
+            continue
+        if token in (91, 123):
+            containers += 1
+            depth += 1
+            tokens += 1
+        elif token in (93, 125):
+            depth -= 1
+        elif token in (44, 58):
+            tokens += 1
+        _check(containers <= MAX_JSON_CONTAINERS and tokens <= MAX_JSON_TOKENS and depth <= MAX_JSON_DEPTH,
+               f"{SIDECAR} exceeds the JSON complexity limit")
+
+
+def _open_regular(path: Path) -> BufferedReader:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        _check(stat.S_ISREG(os.fstat(descriptor).st_mode), f"{path.name} must be a regular file")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunking: dict[str, Any], sources: list[str],
                 chunks: list[dict[str, Any]], rows: Iterable[Iterable[float]]) -> dict[str, Any]:
     """Stream `rows` into vectors.f32, then write index.json. Nothing is replaced unless both were written; the
     two renames are separate, so a reader between them sees a checksum mismatch and must retry."""
+    try:
+        _vector_bytes(dimensions, len(chunks))
+    except InvalidIndex as error:
+        raise BuildError(str(error)) from None
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     vectors_tmp, sidecar_tmp = out / (VECTORS + ".tmp"), out / (SIDECAR + ".tmp")
@@ -157,6 +225,8 @@ def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunkin
     try:
         with vectors_tmp.open("wb") as output:
             for row in rows:
+                if count >= len(chunks):
+                    raise BuildError(f"more vectors than the {len(chunks)} chunks")
                 values = array.array("f", row)
                 if len(values) != dimensions:
                     raise BuildError(f"a vector has {len(values)} components, expected {dimensions}")
@@ -172,7 +242,21 @@ def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunkin
                 "chunking": chunking, "vectors": {"file": VECTORS, "dtype": "float32", "byte_order": "little",
                                                   "sha256": digest.hexdigest()},
                 "sources": sources, "chunks": chunks}
-        sidecar_tmp.write_text(json.dumps(meta, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+        try:
+            size, width = 0, 1
+            with sidecar_tmp.open("wb") as output:
+                for part in json.JSONEncoder(ensure_ascii=False, allow_nan=False).iterencode(meta):
+                    data = part.encode("utf-8")
+                    size += len(data)
+                    if size > MAX_SIDECAR_BYTES:
+                        raise BuildError(f"{SIDECAR} exceeds the {MAX_SIDECAR_BYTES}-byte sidecar limit; "
+                                         "index fewer files or reduce --chunk-chars")
+                    width = max(width, _text_width(data))
+                    _guard_text(size, width)
+                    output.write(data)
+            _guard_json(sidecar_tmp.read_bytes())
+        except InvalidIndex as error:
+            raise BuildError(str(error)) from None
         os.replace(vectors_tmp, out / VECTORS)
         os.replace(sidecar_tmp, out / SIDECAR)
         return meta
@@ -185,12 +269,18 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
     """Read and verify an index. With `within`, its vectors file must also resolve inside that directory."""
     sidecar = Path(sidecar)
     try:
-        with sidecar.open("rb") as handle:
+        with _open_regular(sidecar) as handle:
             sidecar_stamp = _fstamp(handle)
             _check(sidecar_stamp[3] <= MAX_SIDECAR_BYTES, f"{SIDECAR} is larger than "
                    f"{MAX_SIDECAR_BYTES // (1024 * 1024)} MiB")
-            meta = json.loads(handle.read().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as error:
+            data = handle.read(MAX_SIDECAR_BYTES + 1)
+            _check(len(data) <= MAX_SIDECAR_BYTES, f"{SIDECAR} is larger than {MAX_SIDECAR_BYTES} bytes")
+            _guard_json(data)
+            text = data.decode("utf-8")
+            del data
+            meta = json.loads(text)
+            del text
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         if isinstance(error, InvalidIndex):
             raise
         raise InvalidIndex(f"{SIDECAR} cannot be read as JSON ({type(error).__name__})") from None
@@ -198,8 +288,7 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
     model, backend, dimensions, count = meta.get("model"), meta.get("backend"), meta.get("dimensions"), meta.get("count")
     _check(isinstance(model, str) and model != "", "the index names no model")
     _check(isinstance(backend, str) and backend != "", "the index names no backend")
-    _check(type(dimensions) is int and dimensions >= 1, "dimensions must be a positive integer")
-    _check(type(count) is int and 1 <= count <= MAX_INDEX_CHUNKS, f"an index holds 1-{MAX_INDEX_CHUNKS} chunks")
+    expected = _vector_bytes(dimensions, count)
     sources, chunks, chunking = meta.get("sources"), meta.get("chunks"), meta.get("chunking")
     _check(isinstance(chunking, dict), "chunking must be an object")
     _check(isinstance(sources, list) and all(isinstance(item, str) and item for item in sources),
@@ -219,18 +308,13 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
     vectors_path = (sidecar.parent / name).resolve()
     if within is not None:
         _check(vectors_path.is_relative_to(Path(within).resolve()), "the vectors file is outside the allowed directory")
-    expected = count * dimensions * 4
-    try:
-        with vectors_path.open("rb") as handle:
-            vectors_stamp = _fstamp(handle)
-            _check(vectors_stamp[3] == expected, f"{name} does not hold {count} x {dimensions} float32 values")
-            data = handle.read()
-    except OSError as error:
-        raise InvalidIndex(f"{name} cannot be read ({type(error).__name__})") from None
-    _check(len(data) == expected, f"{name} changed while it was read")
-    _check(hashlib.sha256(data).hexdigest() == described.get("sha256"), f"{name} does not match its SHA-256")
-    vectors = array.array("f")
-    vectors.frombytes(data)
+    with _open_regular(vectors_path) as handle:
+        vectors_stamp = _fstamp(handle)
+        _check(vectors_stamp[3] == expected, f"{name} does not hold {count} x {dimensions} float32 values")
+        vectors = array.array("f", [0.0]) * (expected // 4)
+        view = memoryview(vectors).cast("B")
+        _check(handle.readinto(view) == expected and handle.read(1) == b"", f"{name} changed while it was read")
+        _check(hashlib.sha256(view).hexdigest() == described.get("sha256"), f"{name} does not match its SHA-256")
     if sys.byteorder == "big":
         vectors.byteswap()
     rows = memoryview(vectors)
@@ -266,41 +350,42 @@ def _stamp(path: Path) -> tuple[int, int, int, int]:
 
 
 class IndexCache:
-    """Loaded indexes keyed by resolved sidecar path, bounded by the bytes of their files, and reloaded when
-    either file is replaced or changes. Loading happens outside the lock, so a hit never waits for a load."""
+    """Retain one valid index, dropping it before loading a different or changed index."""
 
-    def __init__(self, limit_bytes: int = CACHE_BYTES):
-        self.limit_bytes = limit_bytes
-        self._items: OrderedDict[tuple[Path, Path | None], LoadedIndex] = OrderedDict()
+    def __init__(self) -> None:
+        self._items: dict[tuple[Path, Path | None], LoadedIndex] = {}
         self._lock = threading.Lock()
 
     def get(self, sidecar: Path, within: Path | None = None) -> LoadedIndex:
         sidecar = Path(sidecar).resolve()
         key = (sidecar, within)
         with self._lock:
-            loaded = self._items.get(key)
+            loaded = self._cached(key)
+            if loaded is not None:
+                return loaded
+            # Release the old parsed objects before the next load allocates its transient buffers.
+            self._items.clear()
+            try:
+                loaded = load_index(sidecar, within)
+            except OSError:
+                pass
+            if loaded is None:
+                # Only retry I/O failures, outside except so its traceback releases the failed buffer.
+                _pause(0.2)
+                loaded = load_index(sidecar, within)
+            self._items[key] = loaded
+            return loaded
+
+    def _cached(self, key: tuple[Path, Path | None]) -> LoadedIndex | None:
+        sidecar, _ = key
+        loaded = self._items.get(key)
         if loaded is not None:
             try:
                 if loaded.stamps == (_stamp(sidecar), _stamp(loaded.vectors_path)):
-                    with self._lock:
-                        if key in self._items:
-                            self._items.move_to_end(key)
                     return loaded
             except OSError:
                 pass
-        try:
-            loaded = load_index(sidecar, within)
-        except InvalidIndex:
-            # A rebuild replaces the two files one after the other; a load between the renames sees a
-            # checksum mismatch. One retry after a pause separates that from a genuinely broken index.
-            _pause(0.2)
-            loaded = load_index(sidecar, within)
-        with self._lock:
-            self._items[key] = loaded
-            self._items.move_to_end(key)
-            while len(self._items) > 1 and sum(item.size for item in self._items.values()) > self.limit_bytes:
-                self._items.popitem(last=False)
-        return loaded
+        return None
 
 
 # ------------------------------------------------------------------------------------------------ building

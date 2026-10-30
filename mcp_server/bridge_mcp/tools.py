@@ -7,7 +7,9 @@ import math
 import os
 import random
 import re
+import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict, cast
 
@@ -153,6 +155,15 @@ class Search(TypedDict):
     chunks: int
     considered: int
     results: list[SearchHit]
+
+
+class _SearchCandidate(TypedDict):
+    chunk: int
+    similarity: float
+    text: str
+    start: int
+    end: int
+    source: str
 
 
 class Pair(TypedDict):
@@ -324,8 +335,11 @@ def _index_from(root: Path | None, path_text: str, cache: index_files.IndexCache
                             "python -m bridge_mcp.index build.")
         return cache.get(sidecar, within=root)
     except index_files.InvalidIndex as error:
+        # Suppressed exception contexts must not retain failed loads across index steps.
+        traceback.clear_frames(error.__traceback__)
         raise ToolError(f"{path_text!r} is not a usable index: {error}.") from None
     except OSError as error:
+        traceback.clear_frames(error.__traceback__)
         raise ToolError(f"Cannot read the index at {path_text!r}: {type(error).__name__}.") from None
 
 
@@ -379,6 +393,8 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
     seconds = timeout_ms / 1000
     timing = TIMING[backend]
     cache = index_files.IndexCache()
+    # Serialize index-reading steps so scoring cannot pin an evicted index during another load.
+    index_step = threading.Lock()
     mcp = MCPServer("bridge_mcp", title="PHP-Python AI bridge", version="0.1",
                     instructions=INSTRUCTIONS.format(backend=backend, **described))
 
@@ -534,49 +550,92 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         top_k: Annotated[int, Field(description="How many chunks to return.", ge=1, le=MAX_SEARCH_TOP_K)] = 5,
         rerank: Annotated[bool, Field(description="Rerank the candidates with the worker's rerank task.")] = True,
     ) -> Search:
+        # Loading, embedding and reranking all consume the same call budget.
+        deadline = time.monotonic() + seconds
         _check_texts([query], "query", 1)
-        loaded = await anyio.to_thread.run_sync(lambda: _index_from(root, index_path, cache))
+
+        def enter_index_step() -> None:
+            if not index_step.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                raise ToolError(f"loading the index used the whole {seconds:g} s budget")
+
+        def facts() -> tuple[str, int, int]:
+            enter_index_step()
+            loaded = None
+            try:
+                loaded = _index_from(root, index_path, cache)
+                if time.monotonic() >= deadline:
+                    raise ToolError(f"loading the index used the whole {seconds:g} s budget")
+                return loaded.model, loaded.dimensions, loaded.count
+            finally:
+                del loaded
+                index_step.release()
+
+        model, dimensions, count = await anyio.to_thread.run_sync(facts)
         assert root is not None  # _index_from refuses every path without one
         # Vectors from different models are not comparable, so the gate comes before any job is spent.
-        if loaded.model != names["embed"]:
-            raise ToolError(f"The index at {index_path!r} was built with {loaded.model!r}; this worker embeds with "
+        if model != names["embed"]:
+            raise ToolError(f"The index at {index_path!r} was built with {model!r}; this worker embeds with "
                             f"{names['embed']!r} (bridge_health reports it). Rebuild the index against this worker.")
-        # One budget for the whole call: the embed job and the rerank job share the deadline.
-        deadline = time.monotonic() + seconds
         result = await run("embed", {"texts": [query]}, ctx, deadline)
         query_vector = _vectors(result, 1)[0]
-        if (result["model"], result["dimensions"]) != (loaded.model, loaded.dimensions):
+        if (result["model"], result["dimensions"]) != (model, dimensions):
             raise ToolError(f"The worker embedded the query with {result['model']!r}, but the index was built with "
-                            f"{loaded.model!r}. The worker changed since start-up; check bridge_health.")
-        wanted = min(loaded.count, max(CANDIDATE_FACTOR * top_k, MIN_CANDIDATES))
-        candidates = await anyio.to_thread.run_sync(lambda: index_files.search(loaded, query_vector, wanted))
+                            f"{model!r}. The worker changed since start-up; check bridge_health.")
+
+        def select() -> tuple[str, int, list[_SearchCandidate]]:
+            enter_index_step()
+            loaded = None
+            try:
+                loaded = _index_from(root, index_path, cache)
+                if time.monotonic() >= deadline:
+                    raise ToolError(f"loading the index used the whole {seconds:g} s budget")
+                if (result["model"], result["dimensions"]) != (loaded.model, loaded.dimensions):
+                    raise ToolError(f"The worker embedded the query with {result['model']!r}, but the index was built with "
+                                    f"{loaded.model!r}. The worker changed since start-up; check bridge_health.")
+                wanted = min(loaded.count, max(CANDIDATE_FACTOR * top_k, MIN_CANDIDATES))
+                candidates: list[_SearchCandidate] = []
+                for number, similarity in index_files.search(loaded, query_vector, wanted):
+                    chunk = loaded.chunks[number]
+                    candidates.append({"chunk": number, "similarity": similarity, "text": chunk["text"],
+                                       "start": chunk["start"], "end": chunk["end"],
+                                       "source": _source(loaded, root, chunk["source"])})
+                return loaded.model, loaded.count, candidates
+            except Exception as error:
+                # Failed scoring frames must release their index before another step starts.
+                traceback.clear_frames(error.__traceback__)
+                raise
+            finally:
+                del loaded
+                index_step.release()
+
+        model, count, candidates = await anyio.to_thread.run_sync(select)
         rerank_model = None
-        ordered: list[tuple[int, float, float | None]] = [(number, similarity, None) for number, similarity in candidates]
+        ordered: list[tuple[_SearchCandidate, float | None]] = [(candidate, None) for candidate in candidates]
         if rerank:
             # Keep the query and the candidates inside the worker's character budget and the request's byte
             # limit; multi-byte text reaches the bytes first.
             characters, encoded, kept = MAX_TOTAL_CHARACTERS - len(query), REQUEST_BYTES - _encoded(query), []
-            for number, similarity in candidates:
-                text = loaded.chunks[number]["text"]
+            for candidate in candidates:
+                text = candidate["text"]
                 characters -= len(text)
                 encoded -= _encoded(text) + 1
                 if characters < 0 or encoded < 0:
                     break
-                kept.append((number, similarity))
+                kept.append(candidate)
             candidates = kept
-            texts = [loaded.chunks[number]["text"] for number, _ in candidates]
+            texts = [candidate["text"] for candidate in candidates]
             wanted_k = min(top_k, len(candidates))
             reranked = await run("rerank", {"query": query, "documents": texts, "top_k": wanted_k}, ctx, deadline)
             rerank_model = reranked["model"]
-            ordered = [(candidates[item["index"]][0], candidates[item["index"]][1], item["score"])
+            ordered = [(candidates[item["index"]], item["score"])
                        for item in _rankings(reranked, len(texts), wanted_k)]
         results: list[SearchHit] = []
-        for number, similarity, score in ordered[:top_k]:
-            chunk = loaded.chunks[number]
-            results.append({"source": _source(loaded, root, chunk["source"]), "chunk": number,
-                            "start": chunk["start"], "end": chunk["end"], "similarity": round(similarity, 4),
-                            "rerank_score": score, "snippet": _snippet(chunk["text"], query)})
-        return {"embed_model": loaded.model, "rerank_model": rerank_model, "chunks": loaded.count,
+        for candidate, score in ordered[:top_k]:
+            results.append({"source": candidate["source"], "chunk": candidate["chunk"],
+                            "start": candidate["start"], "end": candidate["end"],
+                            "similarity": round(candidate["similarity"], 4),
+                            "rerank_score": score, "snippet": _snippet(candidate["text"], query)})
+        return {"embed_model": model, "rerank_model": rerank_model, "chunks": count,
                 "considered": len(candidates), "results": results}
 
     return mcp

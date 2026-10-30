@@ -68,7 +68,7 @@ CI checks the actual PHP minor before testing so a misconfigured image cannot si
 
 ## What the tests establish
 
-PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4.25 and 8.5.10 with the pinned FrankenPHP 1.12.7 images. For every pull request and every push to `main`, CI runs the Python worker, PHP contract/HTTP, FrankenPHP and syntax layers below on each of the four branches, and the MCP server layer once in its own job, which does not depend on PHP. The optional ONNX layer runs only on PHP 8.5, weekly, on pull requests that touch the model path, on version tags, and on demand. Publishing also runs its own read-only SQuAD gate, then native amd64 and arm64 build jobs that push untagged images and test them by digest; only after all three jobs pass are the multi-architecture tags and release created. The PHP contract/HTTP counts below were observed locally on 2026-10-29 on PHP 8.2.33, 8.3.33, 8.4.25 and 8.5.10; the PSR-18, MCP and HA counts were observed that day on the default PHP 8.5.10 image; the worker count reflects the current suite. A local pass does not imply a hosted CI run, so consult the PR's Actions checks for remote results.
+PHP branch support was verified locally on 2026-09-17 on PHP 8.2.33, 8.3.33, 8.4.25 and 8.5.10 with the pinned FrankenPHP 1.12.7 images. For every pull request and every push to `main`, CI runs the Python worker, PHP contract/HTTP, FrankenPHP and syntax layers below on each of the four branches, and the MCP server layer once in its own job, which does not depend on PHP. The optional ONNX layer runs only on PHP 8.5, weekly, on pull requests that touch the model path, on version tags, and on demand. Publishing also runs its own read-only SQuAD gate, then native amd64 and arm64 build jobs that push untagged images and test them by digest; only after all three jobs pass are the multi-architecture tags and release created. The PHP contract/HTTP counts below were observed locally on 2026-10-29 on PHP 8.2.33, 8.3.33, 8.4.25 and 8.5.10; the PSR-18 and HA counts were observed that day on the default PHP 8.5.10 image; the MCP count was observed on 2026-10-30; the worker count reflects the current suite. A local pass does not imply a hosted CI run, so consult the PR's Actions checks for remote results.
 
 The hostile peer's `$hostile->wait(str_repeat('c', 32), 50, 1)` also passed 50 consecutive calls on 2026-10-29 inside `php-integration` on the CI-pinned PHP 8.2.33 image, with `python-tests` running in parallel in a separate Compose project. The repetition covered that wait check; the full HTTP suite ran once per PHP version.
 
@@ -81,7 +81,7 @@ The hostile peer's `$hostile->wait(str_repeat('c', 32), 50, 1)` also passed 50 c
 | Worker images | On every pull request and push to `main`, the `images` matrix natively builds both Dockerfiles on GitHub-hosted amd64 (`ubuntu-latest`) and arm64 (`ubuntu-24.04-arm`), imports the worker and the ONNX libraries (`onnxruntime`, `tokenizers`, `numpy`), runs both CLIs with `--help`, and probes authenticated `/healthz` on the lexical backend. Both legs are required by `deterministic`. Publishing builds both images natively on amd64 and arm64 after the quality gate, pushes them by digest only, then pulls each digest and repeats these startup checks in the same job. The published amd64 and arm64 images are the ones that were started: a final job combines those tested digests into multi-architecture version tags (plus `latest` for stable releases) and attests each resulting index digest. Digests pass through job outputs; no Actions artifacts are uploaded. No models are fetched and no model inference is tested by these checks. |
 | Failure drills | `sh scripts/failure_drills.sh`: seven no-model Docker drills on dedicated `drills` peers, plus an explicit `SKIP start-crash-loop` covered by injected worker unit tests; checks child death/replacement, missing models, full state with live reads, open token-file refusal, a drain deadline, connection exhaustion/recovery and 20 accepted jobs across SIGTERM/restart; required by `deterministic` |
 | Prometheus rules | Compose service `promtool` runs `promtool check rules deploy/prometheus/alerts.yml` and `promtool test rules deploy/prometheus/alerts.test.yml` offline in `prom/prometheus:v3.7.3` pinned by digest: seven rules; required by `deterministic`; syntax and synthetic alert behavior, not a live alert-delivery test |
-| MCP server | 130 tests, offline with hash-pinned wheels: the protocol client against an in-process worker (legacy and instance-prefixed IDs, malformed IDs refused, and its ID regex equal to the worker's), every tool through the SDK's in-memory client with test tasks enabled, the entry point as a subprocess, result validators on synthetic data, the index builder (chunking, the format and each corruption it refuses, building against the worker, caching, its command line) `bridge_search` (the model gate, path confinement, reloads, rerank on and off), the reachability of every answer in the LLM evaluation, that a default search sees only part of its corpus and that its two-step question takes two steps, that the demo worker reaches none of the semantic evaluation's answers, that a tool waits out a full worker for its Retry-After within the call's budget or with its own backoff without one, before each of a search's jobs and within one budget, and says so when it stays full, the evaluation runner's command, isolation checks, scoring and per-backend launcher and index check without starting `claude`, a check that the server's model names match the worker's, that every path parameter says where it resolves and every position in a result says what it counts, and a check that every timing claim in a tool description is a measured median |
+| MCP server | 165 tests, offline with hash-pinned wheels: the protocol client against an in-process worker (legacy and instance-prefixed IDs, malformed IDs refused, and its ID regex equal to the worker's), every tool through the SDK's in-memory client with test tasks enabled, the entry point as a subprocess, result validators on synthetic data, the index builder (chunking, the format and each corruption it refuses, building against the worker, loader limits, the width guard at exact budgets, single-entry cache eviction and retention, its command line) `bridge_search` (the model gate, path confinement, reloads, rerank on and off, one real load across facts/select, deadline-bounded lock waits without loads or jobs, parallel index release before worker waits), the reachability of every answer in the LLM evaluation, that a default search sees only part of its corpus and that its two-step question takes two steps, that the demo worker reaches none of the semantic evaluation's answers, that a tool waits out a full worker for its Retry-After within the call's budget or with its own backoff without one, before each of a search's jobs and within one budget, and says so when it stays full, the evaluation runner's command, isolation checks, scoring and per-backend launcher and index check without starting `claude`, a check that the server's model names match the worker's, that every path parameter says where it resolves and every position in a result says what it counts, and a check that every timing claim in a tool description is a measured median |
 | PHP contracts + HTTP | 283 checks per PHP run, a full fault-worker's Retry-After read through the client among them and a two-token `tokens-worker` where another token's read and cancel are 404 and the same idempotency key is two jobs (on which `tests/integration.py` then fills one token's `BRIDGE_OWNER_CAPACITY` of 8 while the other still submits up to the worker's retained-result capacity of 12); this **includes** the 239 contract checks (Retry-After from a loopback peer, present, absent, malformed and repeated, and a header block over 16 KiB refused), not 283 + 239; the contract checks include the pure cURL timeout classifier (the total/connect timer boundary, established and unestablished connections, and other errors), real silent and refused loopback peers, a fake transport's view of each request, deadline-capped timeouts and refused connections at 1, 3 and 5 ms before, at and after the deadline under a controlled clock, shorter and equal request budgets, token-free errors, and that no file in `src/` outside `Laravel/` and `Symfony/` names a framework |
 | PSR-18 transport | The 239 contract checks plus 51 through `Psr18Transport` and in-repo fakes of the PSR-7, PSR-17 and PSR-18 interfaces (`tests/php/psr18_fakes.php`): a round trip with its method, URL, headers and body, a body at the 262144-byte cap and one over it read one byte past the cap and no further, five redirect statuses refused unread, a non-JSON or missing content type, malformed JSON, a 429's Retry-After from one header, a repeated one and none, a client exception and a body read failure as `transport_error` without their text; polling timeouts, refused connections, DNS failures and resets remain `transport_error` before, at and after the wait deadline because PSR-18 cannot enforce its budget or identify timeouts; 290 checks by `php-psr18-tests` with `.cache/php-vendor` on the include path, once, in the MCP server job; `php-tests` skips them with one printed line; no real Symfony HttpClient or Guzzle runs |
 | FrankenPHP | 12 jobs submitted by six concurrent test threads through a reused PHP worker, a 512-document `top_k` request, embedding and redaction round trips, and invalid-input, missing-job and multibyte boundary checks; then, directly against `tokens-worker`, the same ownership checks as the PHP layer and the `owner` metrics |
@@ -529,3 +529,99 @@ larger numerical drift, not identical scoring. These eight pairs do not show tha
 int8 conversion caused its low corpus NDCG; a full fp32 corpus comparison would be
 needed to attribute that loss. The tests compare score tolerances and ordering, and
 the model workflow runs both selected-model PHP checks and parity checks.
+
+## MCP index loading memory
+
+Measured on 2026-10-30 on `fix/index-limits`, based on commit `50ab6ac`
+with the single-entry cache and deadline-bounded index-step lock changes applied.
+The tested Git blobs identify the exact measurement sources:
+`index.py` = `2827c942518c180a08f2ddb72927abeef192ade0`,
+`tools.py` = `56bf4b820cecec7f80d244d5445155dcd227a801`, and
+`scripts/mcp_index_memory.py` = `23a0e477a49b0816a54bd3875de27e6479b7ea1e`.
+Each scenario starts a fresh real compose `mcp` container; the script checks
+`memory.max` is 536,870,912 bytes (512 MiB) and reads cgroup `memory.peak`.
+The peak includes wheel installation in `/deps` tmpfs, fixture construction,
+the MCP runtime, Python objects, vectors and cache; it is not process RSS.
+
+The ASCII fixture uses `write_index` with 50,000 chunks, 384 dimensions,
+76,800,000 vector bytes and a 56,375,931-byte sidecar. Each chunk has 1000
+characters of prose with quotes, backslashes and newlines (1066 escaped text
+bytes). Default 1000-character windows overlap by 200; offsets advance by 800
+across three sources, each under the 16 MiB source limit. The non-BMP fixture
+puts an emoji in every 1000-character chunk (1069 escaped text bytes), fitting
+29,202 chunks and 44,854,272 vector bytes. Builder-written padding metadata
+brings its sidecar to exactly 33,554,432 bytes: the 32 MiB non-BMP limit.
+The mostly-ASCII width-2 fixture puts one U+0100 character in each 4000-character
+chunk, with 200-character overlap (4267 escaped text bytes per chunk). It fits
+15,437 chunks and 23,711,232 vector bytes; padding metadata brings its sidecar
+to exactly 67,108,864 bytes (64 MiB). Its offsets also stay within 16 MiB per
+source. All fixtures pass the real loader's validation.
+
+| Scenario | memory.peak bytes | MiB | Cached indexes after each load |
+| --- | ---: | ---: | ---: |
+| (a) One full default ASCII index | 228,175,872 | 217.61 | 1 |
+| (b) ASCII cached, then a second full ASCII index loads | 253,747,200 | 241.99 | 1 |
+| (c) Non-BMP at its width budget cached, then ASCII loads | 346,804,224 | 330.74 | 1 |
+| (d) ASCII cached, then non-BMP at its width budget loads | 346,820,608 | 330.75 | 1 |
+| (e) Non-BMP cached, then the 64 MiB width-2 index with 4000-character chunks loads | 348,844,032 | 332.68 | 1 |
+| (f) Three concurrent searches over different full default ASCII indexes | 302,583,808 | 288.57 | 1 |
+
+All six peaks stay below 440 MiB, so `MAX_JSON_TEXT_BYTES` remains 128 MiB.
+The 64 MiB sidecar cap, width-weighted text budget, JSON complexity limits and
+76,800,000-byte vector cap still protect each load. Separate file-byte and
+parsed-object cache budgets have been removed: every accepted index is retained,
+including a full default width-2 index. The cache holds at most one index and
+drops it before a different or changed index loads, so the old cached index
+does not add to the next load's transient allocation. Alternating indexes reload
+each time. The script checks a cache hit immediately after every load.
+Scenarios (a)-(e) release caller references between loads.
+
+Scenario (f) calls the real MCP server through its SDK client over three
+different full ASCII indexes. Its stub worker blocks embed and rerank jobs on
+separate events until all three calls are waiting in each phase. Exactly one
+loaded index remains alive at each barrier; weak references assert exactly one
+at the end of every load as well. The embed barrier peaked at 263,102,464 bytes
+(250.91 MiB); the rerank barrier and completed calls reached the table's peak.
+Searches serialize metadata reading, loading and candidate selection, copying
+only the selected candidates before a worker wait. Waiting for either index
+step uses the call's deadline; a timed-out lock wait loads no index and submits
+no further job. These measurements establish the stated fixtures, not a bound
+on all memory used by arbitrary numbers of calls or candidates.
+
+The escape-heavy scan fixture is valid JSON of exactly 67,108,864 bytes with
+33,554,426 escaped newlines inside one string. Re-measured in the same service,
+the old scanner took 4.634 s and 33,554,433 Python regex-match iterations; the
+current width and structure guard took 0.672 s (6.90 times faster), with five
+matches, one per whole string or structural token. The regression test checks
+that iteration bound, not wall time. Invalid-index validation failures are never
+retried; I/O failures alone get one retry after 0.2 s.
+
+Reproduce from Git Bash, after `mkdir -p .cache` and setting a fresh random
+`BRIDGE_TOKEN` without printing it; run `mcp-fetcher` first for the pinned wheels.
+`/measure` is an additional writable mount of the ignored cache directory:
+
+```sh
+export MSYS_NO_PATHCONV=1
+for scenario in ascii ascii-pair unicode-pair ascii-unicode-pair unicode-wide-pair search-triple; do
+  docker compose -p bridge-index -f docker/compose.yaml run --rm --no-deps \
+    -v "$PWD/.cache:/measure:rw" mcp sh -ec \
+    'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python scripts/mcp_index_memory.py /measure "$1"' sh "$scenario" || exit
+done
+
+docker compose -p bridge-index -f docker/compose.yaml run --rm --no-deps mcp sh -ec \
+  'python -m pip install -q --require-hashes --no-compile --no-index --find-links=/cache/wheels --only-binary=:all: --target /deps -r requirements-mcp.lock && python scripts/mcp_index_memory.py scan'
+
+docker compose -p bridge-index -f docker/compose.yaml --profile test --profile mcp --profile mcp-fetch --profile py-dev down
+```
+
+The script removes the large fixtures on exit and asserts every peak is at most
+440 MiB. Unit tests prove eviction happens before the loader runs, a full
+50,000 x 1000 width-2 index at 384 dimensions is retained, and a search's
+facts/select steps cost one real load when no other search replaces the entry.
+Small fixtures pin exact width-1 and width-2 budgets for raw UTF-8 and Unicode
+escapes, width-4 refusal at a width-2 budget, and conservative width 2 for a
+literal backslash followed by `u0100`. The suite also covers expired lock waits
+without loading or jobs, parallel release before worker waits, and builder
+refusal preserving an old index. The width-2 retention test supplies vector
+reads in memory to fit the suite's 64m `/tmp`; the other full-count unit test
+uses three dimensions, and the maximum-dimension test uses sparse vectors.

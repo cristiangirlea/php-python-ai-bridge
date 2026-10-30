@@ -15,6 +15,10 @@ All notable changes to this project are documented in this file. The format foll
 
 - Worker image publishing now builds natively on amd64 and arm64, pushes untagged digests and pulls and starts those exact images before creating multi-architecture version tags. Build provenance and SBOMs remain attached, with release attestations on the combined index digests; digest handoff uses job outputs without Actions artifacts.
 
+### Fixed
+
+- MCP indexes bound dimensions to 4096 and vector data to 76,800,000 bytes (50,000 x 384 float32 values), allowing at most 25,000 chunks at 768 dimensions or 4,687 at 4096. Previously accepted indexes from 768+ dimension models over that vector cap are refused. Vectors load into one buffer, non-regular files are refused without blocking where supported, and JSON structure is bounded before parsing (50,008 containers, 600,128 structural tokens, 64 nesting levels). The 64 MiB sidecar file cap remains, with a separate 128 MiB width-weighted text budget: ASCII and Basic Multilingual Plane text can still reach 64 MiB, while text containing emoji or other non-BMP characters, raw or Unicode-escaped, is capped at 32 MiB. Large previously accepted non-BMP indexes over this budget are refused. The builder streams JSON under the same limits. Each string is scanned in C, and validation failures are not retried. Index steps are serialized and release the index before worker waits. Only one valid index is cached and dropped before a different or changed index loads, so searches alternating between indexes reload on every switch, even for small indexes. A search, including one whose index is cached, waits for another search's load to finish, and that wait counts against its own deadline. Search loading and index-step lock waits consume the call's deadline; an expired lock wait loads nothing and submits no job.
+
 ## [0.5.0] - 2026-10-29
 
 ### Added
