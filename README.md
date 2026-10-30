@@ -4,7 +4,7 @@ A framework-independent PHP client and a small Python task service. Submit docum
 
 Includes a FrankenPHP worker-mode example, deterministic fault tests, and an optional real ONNX reranker. No hosted AI account is required.
 
-Since 0.4.0 it is supported as an internal service for applications that own their host and network: one or more worker instances, each answering only the jobs it took, on a private network behind the operator's TLS and the application's own authentication, with the job table kept across a restart by `BRIDGE_STATE_DIR`. It is not for exposing the worker publicly, nor for throughput beyond the measured figures (one ONNX child on one CPU served about 3.5 jobs/s of the rerank, embed and redact mix, and an instance admits at most `BRIDGE_CAPACITY` jobs per `BRIDGE_RETENTION_SECONDS`) without more instances; [the operations guide](docs/operations.md) has the topologies and the sizing.
+Since 0.4.0 it is supported as an internal service for applications that own their host and network: one or more worker instances, each answering only the jobs it took, on a private network behind the operator's TLS and the application's own authentication, with the job table kept across a restart by `BRIDGE_STATE_DIR`. It is not for exposing the worker publicly, nor for throughput beyond the measured figures (one ONNX child on one CPU served about 1.3 jobs/s of the rerank, embed and redact mix at the default limits, and an instance's sustained admission is `BRIDGE_RESULT_CAPACITY` / `BRIDGE_RETENTION_SECONDS`, 384 / 300 s ≈ 1.28 jobs/s by default) without more instances; [the operations guide](docs/operations.md) has the topologies and the sizing.
 
 ## What is implemented
 
