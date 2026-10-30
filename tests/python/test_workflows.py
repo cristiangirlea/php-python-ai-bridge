@@ -356,12 +356,51 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(f'TAGS: ${{{{ steps.version.outputs.{name} }}}}', publish)
             self.assertIn(f'docker buildx imagetools create "${{tags[@]}}" "$IMAGE{suffix}@$AMD64_DIGEST" "$IMAGE{suffix}@$ARM64_DIGEST"', publish)
             self.assertIn(f'''docker buildx imagetools inspect "$IMAGE{suffix}:$VERSION" --format '{{{{json .Manifest}}}}' ''', publish)
-        attestations = [step for step in job_steps(text, "publish") if action(step).startswith("actions/attest-build-provenance@")]
+        attestations = [step for step in job_steps(text, "publish")
+                        if action(step).startswith("actions/attest-build-provenance@")
+                        and "push-to-registry: true" in inputs(step)]
         self.assertEqual(len(attestations), 2)
         for step, name, suffix in zip(attestations, ("worker", "onnx"), ("", "-onnx")):
             self.assertIn(f"subject-name: ${{{{ env.IMAGE }}}}{suffix}", inputs(step))
             self.assertIn(f"subject-digest: ${{{{ steps.{name}.outputs.digest }}}}", inputs(step))
             self.assertIn("push-to-registry: true", inputs(step))
+
+    def test_publish_attests_the_source_archive_before_upload(self):
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        found = job_steps(text, "publish")
+        archive = next(step for step in found if any("git archive" in line for line in step))
+        self.assertIn("        id: archive", archive)
+        self.assertIn("          VERSION: ${{ steps.version.outputs.version }}", archive)
+        script = run_scripts("\n".join(archive))[0]
+        self.assertIn('archive="php-python-ai-bridge-$VERSION.tar.gz"', script)
+        self.assertIn('git archive --format=tar.gz --prefix="php-python-ai-bridge-$VERSION/" -o "$archive" "$GITHUB_SHA"', script)
+        self.assertIn('echo "path=$archive" >> "$GITHUB_OUTPUT"', script)
+        attestations = [step for step in found if "subject-path: ${{ steps.archive.outputs.path }}" in inputs(step)]
+        self.assertEqual(len(attestations), 1)
+        attest = attestations[0]
+        self.assertEqual(action(attest), "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2")
+        self.assertIn("        id: archive-attestation", attest)
+        self.assertEqual(inputs(attest), ["subject-path: ${{ steps.archive.outputs.path }}"])
+        upload = next(step for step in found if any("gh release upload" in line for line in step))
+        self.assertLess(found.index(archive), found.index(attest))
+        self.assertLess(found.index(attest), found.index(upload))
+
+    def test_publish_uploads_the_archive_and_its_sigstore_bundle_after_release_creation(self):
+        text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+        upload = next(step for step in job_steps(text, "publish") if any("gh release upload" in line for line in step))
+        self.assertIn("          ARCHIVE: ${{ steps.archive.outputs.path }}", upload)
+        self.assertIn("          BUNDLE: ${{ steps.archive-attestation.outputs.bundle-path }}", upload)
+        self.assertIn("          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}", upload)
+        self.assertIn("          GH_REPO: ${{ github.repository }}", upload)
+        self.assertIn("          PRERELEASE: ${{ steps.version.outputs.prerelease }}", upload)
+        script = run_scripts("\n".join(upload))[0]
+        self.assertIn('cp "$BUNDLE" "$ARCHIVE.sigstore.json"', script)
+        self.assertIn('if ! gh release view "$TAG" > /dev/null 2>&1; then', script)
+        self.assertIn('if [ "$PRERELEASE" = true ]; then flags="--prerelease"; fi', script)
+        create = 'gh release create "$TAG" --verify-tag --notes-from-tag --title "$TAG" $flags'
+        self.assertIn(create, script)
+        self.assertIn('fi\n          gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sigstore.json" --clobber', script)
+        self.assertLess(script.index(create), script.index("gh release upload"))
 
     def test_publishing_permissions_are_scoped_to_each_job(self):
         text = (REPO / ".github/workflows/publish.yml").read_text(encoding="utf-8")

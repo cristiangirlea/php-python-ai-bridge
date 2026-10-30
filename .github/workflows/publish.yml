@@ -304,21 +304,34 @@ jobs:
           subject-digest: ${{ steps.onnx.outputs.digest }}
           push-to-registry: true
       # The archive is what Composer installs: .gitattributes leaves the worker, Docker and test files out of it.
-      - name: Attach the source archive to the release
+      - name: Build the source archive
+        id: archive
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
           VERSION: ${{ steps.version.outputs.version }}
-          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           archive="php-python-ai-bridge-$VERSION.tar.gz"
           git archive --format=tar.gz --prefix="php-python-ai-bridge-$VERSION/" -o "$archive" "$GITHUB_SHA"
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+      - name: Attest the source archive
+        id: archive-attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.archive.outputs.path }}
+      - name: Attach the source archive and attestation to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ARCHIVE: ${{ steps.archive.outputs.path }}
+          BUNDLE: ${{ steps.archive-attestation.outputs.bundle-path }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          cp "$BUNDLE" "$ARCHIVE.sigstore.json"
           if ! gh release view "$TAG" > /dev/null 2>&1; then
             flags=""
             if [ "$PRERELEASE" = true ]; then flags="--prerelease"; fi
             gh release create "$TAG" --verify-tag --notes-from-tag --title "$TAG" $flags
           fi
-          gh release upload "$TAG" "$archive" --clobber
+          gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sigstore.json" --clobber
 
   # Publishing must wait for this tag's default reranker to meet the question-to-passage quality floor.
   quality:

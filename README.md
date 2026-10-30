@@ -82,6 +82,8 @@ docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -v bridge-m
 
 Compose's `release` profile runs the same images under the limits above: `BRIDGE_IMAGE_TAG=<version> docker compose -f docker/compose.yaml --profile release up -d worker-image` (or `model-worker-image`, which reads `.cache/models` from the `fetcher`). Each image carries build provenance and an SBOM; `gh attestation verify oci://ghcr.io/cristiangirlea/php-python-ai-bridge-worker:<version> --owner cristiangirlea` checks it. Publishing builds both images natively on amd64 and arm64, pulls and starts each by its pushed digest without models, then tags those tested images.
 
+The release workflow also attaches `php-python-ai-bridge-<version>.tar.gz` and its build provenance bundle, `php-python-ai-bridge-<version>.tar.gz.sigstore.json`. Verify the downloaded archive with `gh attestation verify php-python-ai-bridge-<version>.tar.gz --owner cristiangirlea`. These steps only run on a `v*` tag.
+
 ### Run the real model
 
 Acquire dependencies and model data in the bounded, network-enabled fetcher:
