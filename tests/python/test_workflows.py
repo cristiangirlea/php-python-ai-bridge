@@ -161,6 +161,52 @@ def inputs(step: list) -> list:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_scorecard_runs_on_main_weekly_and_protection_changes_without_pull_requests(self):
+        text = (REPO / ".github/workflows/scorecard.yml").read_text(encoding="utf-8")
+        triggers = re.search(r"^on:\n(.*?)^\S", text, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(triggers)
+        self.assertEqual(triggers.group(1), """  push:
+    branches: [main]
+  schedule:
+    - cron: "23 7 * * 1"
+  branch_protection_rule:
+    types: [created, edited, deleted]
+  workflow_dispatch:
+
+""")
+        self.assertNotIn("pull_request", text)
+
+    def test_scorecard_scopes_permissions_and_keeps_the_publishing_job_isolated(self):
+        text = (REPO / ".github/workflows/scorecard.yml").read_text(encoding="utf-8")
+        self.assertIn("\npermissions:\n  contents: read\n\njobs:\n", text)
+        found = jobs(text)
+        self.assertEqual(list(found), ["analysis"])
+        self.assertEqual(found["analysis"][:found["analysis"].index("steps:")], [
+            "runs-on: ubuntu-latest", "timeout-minutes: 10", "permissions:",
+            "contents: read", "security-events: write", "id-token: write",
+        ])
+        for key in ("env", "defaults", "container", "services", "run"):
+            self.assertNotRegex(text, rf"(?m)^\s*(?:- )?{key}:")
+        self.assertNotIn("upload-artifact", text)
+        self.assertNotIn("secrets.", text)
+
+    def test_scorecard_uses_only_the_three_pinned_actions_and_publishes_sarif(self):
+        text = (REPO / ".github/workflows/scorecard.yml").read_text(encoding="utf-8")
+        found = job_steps(text, "analysis")
+        codeql = (REPO / ".github/workflows/codeql.yml").read_text(encoding="utf-8")
+        existing = [action(step) for step in steps(codeql)]
+        self.assertEqual([action(step) for step in found], [
+            next(value for value in existing if value.startswith("actions/checkout@")),
+            "ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0",
+            next(value for value in existing if value.startswith("github/codeql-action/analyze@"))
+            .replace("/analyze@", "/upload-sarif@"),
+        ])
+        self.assertEqual(inputs(found[0]), ["persist-credentials: false"])
+        self.assertEqual(inputs(found[1]), [
+            "results_file: results.sarif", "results_format: sarif", "publish_results: true",
+        ])
+        self.assertEqual(inputs(found[2]), ["sarif_file: results.sarif"])
+
     def test_no_workflow_interpolates_expressions_into_run_scripts(self):
         for path in WORKFLOWS:
             for script in run_scripts(path.read_text(encoding="utf-8")):
@@ -350,7 +396,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("BRIDGE_RERANK_MODEL: ${BRIDGE_RERANK_MODEL:-tinybert}", block)
 
     def test_the_workflows_are_found(self):
-        self.assertEqual([path.name for path in WORKFLOWS], ["codeql.yml", "model-smoke.yml", "publish.yml", "tests.yml"])
+        self.assertEqual([path.name for path in WORKFLOWS], [
+            "codeql.yml", "model-smoke.yml", "publish.yml", "scorecard.yml", "tests.yml",
+        ])
         for path in WORKFLOWS:
             self.assertTrue(jobs(path.read_text(encoding="utf-8"), path.name), path.name)
 
@@ -409,7 +457,7 @@ jobs:  # the jobs
                 check_hosted_runners(path.read_text(encoding="utf-8"), path.name)
 
     def test_runner_exceptions_are_scoped_and_reject_other_labels(self):
-        for workflow in ("tests.yml", "publish.yml", "model-smoke.yml", "codeql.yml"):
+        for workflow in ("tests.yml", "publish.yml", "model-smoke.yml", "codeql.yml", "scorecard.yml"):
             for name in ("images", "arm64", "build-amd64", "build-arm64", "php", "quality"):
                 for label in ("ubuntu-latest", "ubuntu-24.04-arm", "self-hosted", "windows-latest",
                               "${{ vars.CI_RUNNER }}", "${{ matrix.runner }}", "[ubuntu-latest]", ""):
@@ -733,8 +781,11 @@ jobs:  # the jobs
     def test_codeql_runs_on_main_pull_requests_and_weekly_with_least_privilege(self):
         text = (REPO / ".github" / "workflows" / "codeql.yml").read_text(encoding="utf-8")
         self.assertIn("on:\n  push:\n    branches: [main]\n  pull_request:\n  schedule:\n", text)
-        self.assertIn("permissions:\n  contents: read\n  security-events: write\n", text)
-        self.assertIn("languages: python\n", text)
+        # Write access only on the job that uploads results, so no top-level write token.
+        self.assertIn("\npermissions:\n  contents: read\n\n", text)
+        self.assertIn("    permissions:\n      contents: read\n      security-events: write\n", text)
+        self.assertEqual(text.count("security-events: write"), 1)
+        self.assertIn("languages: python, actions\n", text)
 
 
 if __name__ == "__main__":

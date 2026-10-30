@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- OpenSSF Scorecard scans on `main`, weekly and on demand, with SARIF results in the Security tab and a README badge. The security policy lists the project's scans, and CodeQL now also scans GitHub Actions workflows.
+
 ### Changed
 
 - Worker image publishing now builds natively on amd64 and arm64, pushes untagged digests and pulls and starts those exact images before creating multi-architecture version tags. Build provenance and SBOMs remain attached, with release attestations on the combined index digests; digest handoff uses job outputs without Actions artifacts.
