@@ -550,15 +550,22 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         # Loading, embedding and reranking all consume the same call budget.
         deadline = time.monotonic() + seconds
         _check_texts([query], "query", 1)
+
+        def enter_index_step() -> None:
+            if not index_step.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                raise ToolError(f"loading the index used the whole {seconds:g} s budget")
+
         def facts() -> tuple[str, int, int]:
-            with index_step:
+            enter_index_step()
+            loaded = None
+            try:
                 loaded = _index_from(root, index_path, cache)
-                try:
-                    if time.monotonic() >= deadline:
-                        raise ToolError(f"loading the index used the whole {seconds:g} s budget")
-                    return loaded.model, loaded.dimensions, loaded.count
-                finally:
-                    del loaded
+                if time.monotonic() >= deadline:
+                    raise ToolError(f"loading the index used the whole {seconds:g} s budget")
+                return loaded.model, loaded.dimensions, loaded.count
+            finally:
+                del loaded
+                index_step.release()
 
         model, dimensions, count = await anyio.to_thread.run_sync(facts)
         assert root is not None  # _index_from refuses every path without one
@@ -573,28 +580,30 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
                             f"{model!r}. The worker changed since start-up; check bridge_health.")
 
         def select() -> tuple[str, int, list[_SearchCandidate]]:
-            with index_step:
+            enter_index_step()
+            loaded = None
+            try:
                 loaded = _index_from(root, index_path, cache)
-                try:
-                    if time.monotonic() >= deadline:
-                        raise ToolError(f"loading the index used the whole {seconds:g} s budget")
-                    if (result["model"], result["dimensions"]) != (loaded.model, loaded.dimensions):
-                        raise ToolError(f"The worker embedded the query with {result['model']!r}, but the index was built with "
-                                        f"{loaded.model!r}. The worker changed since start-up; check bridge_health.")
-                    wanted = min(loaded.count, max(CANDIDATE_FACTOR * top_k, MIN_CANDIDATES))
-                    candidates: list[_SearchCandidate] = []
-                    for number, similarity in index_files.search(loaded, query_vector, wanted):
-                        chunk = loaded.chunks[number]
-                        candidates.append({"chunk": number, "similarity": similarity, "text": chunk["text"],
-                                           "start": chunk["start"], "end": chunk["end"],
-                                           "source": _source(loaded, root, chunk["source"])})
-                    return loaded.model, loaded.count, candidates
-                except Exception as error:
-                    # Failed scoring frames must release their index before another step starts.
-                    traceback.clear_frames(error.__traceback__)
-                    raise
-                finally:
-                    del loaded
+                if time.monotonic() >= deadline:
+                    raise ToolError(f"loading the index used the whole {seconds:g} s budget")
+                if (result["model"], result["dimensions"]) != (loaded.model, loaded.dimensions):
+                    raise ToolError(f"The worker embedded the query with {result['model']!r}, but the index was built with "
+                                    f"{loaded.model!r}. The worker changed since start-up; check bridge_health.")
+                wanted = min(loaded.count, max(CANDIDATE_FACTOR * top_k, MIN_CANDIDATES))
+                candidates: list[_SearchCandidate] = []
+                for number, similarity in index_files.search(loaded, query_vector, wanted):
+                    chunk = loaded.chunks[number]
+                    candidates.append({"chunk": number, "similarity": similarity, "text": chunk["text"],
+                                       "start": chunk["start"], "end": chunk["end"],
+                                       "source": _source(loaded, root, chunk["source"])})
+                return loaded.model, loaded.count, candidates
+            except Exception as error:
+                # Failed scoring frames must release their index before another step starts.
+                traceback.clear_frames(error.__traceback__)
+                raise
+            finally:
+                del loaded
+                index_step.release()
 
         model, count, candidates = await anyio.to_thread.run_sync(select)
         rerank_model = None

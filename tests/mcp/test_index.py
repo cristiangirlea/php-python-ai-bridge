@@ -236,6 +236,77 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(sidecar.stat().st_size * 4, 2 * index.MAX_SIDECAR_BYTES)
         self.assertEqual(index.load_index(sidecar).model, "m\U0001f600")
 
+    def test_width_detection_at_exact_small_budgets(self):
+        for marker, decoded, width in ((b"\xc3\xa9", "\u00e9", 1), (b"\\u00e9", "\u00e9", 1),
+                                       (b"\\u00FF", "\u00ff", 1), (b"\xc4\x80", "\u0100", 2),
+                                       (b"\\u0100", "\u0100", 2), (b"\\u0FFF", "\u0fff", 2),
+                                       (b"\\\\u0100", "\\u0100", 2)):
+            with self.subTest(marker=marker):
+                sidecar = self.write([[1.0, 0.0, 0.0]], model="MARKER")
+                data = sidecar.read_bytes().replace(b"MARKER", marker)
+                sidecar.write_bytes(data)
+                with patch.object(index, "MAX_JSON_TEXT_BYTES", len(data) * width):
+                    self.assertEqual(index.load_index(sidecar).model, decoded)
+                with patch.object(index, "MAX_JSON_TEXT_BYTES", len(data) * width - 1):
+                    with self.assertRaisesRegex(index.InvalidIndex, "text"):
+                        index.load_index(sidecar)
+        sidecar = self.write([[1.0, 0.0, 0.0]], model="m\U0001f600")
+        with patch.object(index, "MAX_JSON_TEXT_BYTES", sidecar.stat().st_size * 2):
+            with self.assertRaisesRegex(index.InvalidIndex, "outside the Basic Multilingual Plane"):
+                index.load_index(sidecar)
+
+    def test_cache_drops_a_different_key_before_loading(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        cache = index.IndexCache()
+        reference = weakref.ref(cache.get(sidecar))
+        original = index.load_index
+
+        def load(*args):
+            self.assertFalse(cache._items, "evict before allocating the next index")
+            self.assertIsNone(reference(), "the old index must already be released")
+            return original(*args)
+
+        with patch.object(index, "load_index", load):
+            cache.get(sidecar, within=self.out)
+
+    def test_full_width_two_index_is_retained(self):
+        count, dimensions = 50000, 384
+        text = "\u0100" + "a" * 999
+        chunks = [{"source": 0, "start": 0, "end": 1000, "text": text}] * count
+        sidecar = self.write([[1.0, 0.0, 0.0]] * count, chunks=chunks)
+        row = array.array("f", [1.0] + [0.0] * (dimensions - 1))
+        digest = hashlib.sha256()
+        for _ in range(count):
+            digest.update(row)
+        data = sidecar.read_bytes().replace(b'"dimensions": 3,', b'"dimensions": 384,')
+        old_digest = hashlib.sha256((self.out / index.VECTORS).read_bytes()).hexdigest()
+        sidecar.write_bytes(data.replace(old_digest.encode(), digest.hexdigest().encode()))
+        del data
+        vector_stamp = (0, 1, 0, count * dimensions * 4)
+        opened, fstamp, stamp = index._open_regular, index._fstamp, index._stamp
+        vectors = MagicMock()
+        vectors.__enter__.return_value = vectors
+        vectors.read.return_value = b""
+
+        def readinto(view):
+            values = view.cast("f")
+            for number in range(count):
+                values[number * dimensions] = 1.0
+            return view.nbytes
+
+        # Supply vector bytes in memory so the full-size case fits the suite's 64m tmpfs.
+        vectors.readinto.side_effect = readinto
+        with patch.object(index, "_open_regular", lambda path: vectors if path.name == index.VECTORS else opened(path)), \
+             patch.object(index, "_fstamp", lambda handle: vector_stamp if handle is vectors else fstamp(handle)), \
+             patch.object(index, "_stamp", lambda path: vector_stamp if path.name == index.VECTORS else stamp(path)), \
+             patch.object(index, "load_index", wraps=index.load_index) as load:
+            cache = index.IndexCache()
+            first = cache.get(sidecar)
+            self.assertEqual((first.count, first.dimensions), (count, dimensions))
+            self.assertTrue(cache._items, "a valid full width-2 index must be retained")
+            self.assertIs(cache.get(sidecar), first)
+            self.assertEqual(load.call_count, 1)
+
     def test_writer_enforces_the_same_width_budget_without_replacing_files(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
         before = sidecar.read_bytes()
@@ -271,63 +342,6 @@ class FormatTests(unittest.TestCase):
                 index.IndexCache().get(sidecar)
         self.assertEqual(load.call_count, 1)
         pause.assert_not_called()
-
-    def test_cache_resident_budget_keeps_one_default_index(self):
-        self.assertEqual(index.CACHE_RESIDENT_BYTES, 192 * 1024**2)
-        self.assertEqual(index.CACHE_BYTES, 160 * 1024**2)
-
-    def test_cache_evicts_under_object_budget_with_two_real_entries(self):
-        sidecar = self.write([[1.0, 0.0, 0.0]])
-        other = Path(self.temp.name) / "other"
-        index.write_index(other, model="m", backend="lexical", dimensions=3, chunking={},
-                          sources=["a.txt"], chunks=[{"source": 0, "start": 0, "end": 1, "text": "t"}],
-                          rows=[[1.0, 0.0, 0.0]])
-        first = index.load_index(sidecar)
-        second = index.load_index(other / index.SIDECAR)
-        self.assertLess(first.size + second.size, index.CACHE_BYTES)
-        with patch.object(index, "CACHE_RESIDENT_BYTES", max(first.resident_bytes, second.resident_bytes)):
-            cache = index.IndexCache()
-            cache.get(sidecar)
-            self.assertEqual(len(cache._items), 1)
-            cache.get(other / index.SIDECAR)
-            self.assertEqual(list(cache._items), [(other.joinpath(index.SIDECAR).resolve(), None)])
-
-    def test_cache_hit_proceeds_while_another_key_loads(self):
-        sidecar = self.write([[1.0, 0.0, 0.0]])
-        cache = index.IndexCache()
-        first = cache.get(sidecar)
-        entered, release, hit = threading.Event(), threading.Event(), threading.Event()
-        errors = []
-
-        def load(*args):
-            entered.set()
-            if not release.wait(3):
-                raise AssertionError("blocked loader was not released")
-            return first
-
-        def get(path, is_hit=False):
-            try:
-                self.assertIs(cache.get(path), first)
-                if is_hit:
-                    hit.set()
-            except Exception as error:
-                errors.append(error)
-
-        with patch.object(index, "load_index", load):
-            loading = threading.Thread(target=get, args=(self.out / "other.json",))
-            hitting = threading.Thread(target=get, args=(sidecar, True))
-            loading.start()
-            try:
-                self.assertTrue(entered.wait(1))
-                hitting.start()
-                self.assertTrue(hit.wait(1), "a cached key must not wait for another load")
-            finally:
-                release.set()
-                loading.join(4)
-                if hitting.ident is not None:
-                    hitting.join(4)
-        self.assertFalse(loading.is_alive() or hitting.is_alive())
-        self.assertEqual(errors, [])
 
     def test_writer_refuses_an_oversized_sidecar_without_replacing_files(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
@@ -402,7 +416,6 @@ class FormatTests(unittest.TestCase):
     def test_full_chunk_count_loads_and_stays_cached(self):
         count = 50000
         self.assertEqual(index.MAX_VECTOR_BYTES, count * 384 * 4)
-        self.assertGreaterEqual(index.CACHE_BYTES, index.MAX_SIDECAR_BYTES + index.MAX_VECTOR_BYTES)
         text = ('A searchable passage with "quoted" words and a backslash \\.\n' * 20)[:1000]
         chunks = [{"source": number // 20000, "start": (number % 20000) * 800,
                    "end": (number % 20000) * 800 + 1000, "text": text} for number in range(count)]
@@ -415,20 +428,13 @@ class FormatTests(unittest.TestCase):
             self.assertIs(cache.get(sidecar), first)
             self.assertEqual(load.call_count, 1)
 
-    def test_cache_accounts_for_parsed_objects_as_well_as_file_bytes(self):
+    def test_cache_replaces_a_stale_key_after_a_larger_rebuild(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
-        with patch.object(index, "CACHE_RESIDENT_BYTES", 1, create=True):
-            cache = index.IndexCache()
-            cache.get(sidecar)
-            self.assertFalse(cache._items)
-
-    def test_cache_drops_a_stale_key_after_an_over_budget_rebuild(self):
-        sidecar = self.write([[1.0, 0.0, 0.0]])
-        cache = index.IndexCache(limit_bytes=sidecar.stat().st_size + 12)
+        cache = index.IndexCache()
         cache.get(sidecar)
         self.write([[1.0, 0.0, 0.0]] * 2)
         cache.get(sidecar)
-        self.assertNotIn((sidecar.resolve(), None), cache._items)
+        self.assertEqual(cache._items[(sidecar.resolve(), None)].count, 2)
 
     def test_cache_serializes_concurrent_loads(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
@@ -586,7 +592,7 @@ class FormatTests(unittest.TestCase):
 
     def test_the_cache_reloads_on_change_and_evicts_the_oldest(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
-        cache = index.IndexCache(limit_bytes=sidecar.stat().st_size + (self.out / index.VECTORS).stat().st_size)
+        cache = index.IndexCache()
         with patch.object(index, "load_index", wraps=index.load_index) as load:
             first = cache.get(sidecar)
             self.assertIs(cache.get(sidecar), first)
@@ -601,16 +607,7 @@ class FormatTests(unittest.TestCase):
                               rows=[[0.0, 1.0, 0.0]])
             cache.get(other / index.SIDECAR)
             cache.get(sidecar)
-            self.assertEqual(load.call_count, 4, "the budget fits only one index")
-
-    def test_the_cache_does_not_keep_an_over_budget_index(self):
-        sidecar = self.write([[1.0, 0.0, 0.0]])
-        cache = index.IndexCache(limit_bytes=1)
-        with patch.object(index, "load_index", wraps=index.load_index) as load:
-            first = cache.get(sidecar)
-            self.assertEqual(list(first.vectors), [1.0, 0.0, 0.0])
-            self.assertIsNot(cache.get(sidecar), first)
-            self.assertEqual(load.call_count, 2, "an oversized index can be used but must not be retained")
+            self.assertEqual(load.call_count, 4, "only the latest index is retained")
 
     def test_the_cache_notices_a_rebuild_with_the_same_size_and_time(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])

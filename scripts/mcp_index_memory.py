@@ -19,32 +19,36 @@ from bridge_mcp import index, tools
 from bridge_mcp.protocol import Bridge
 
 
-def fixture(directory: Path, non_bmp: bool = False) -> None:
-    chars, overlap, dimensions = 1000, 200, 384
-    text = ('A searchable passage with "quoted" words and a backslash \\.\n' * 20)[:chars]
+def fixture(directory: Path, non_bmp: bool = False, wide: bool = False) -> None:
+    chars, overlap, dimensions = 4000 if wide else 1000, 200, 384
+    text = ('A searchable passage with "quoted" words and a backslash \\.\n' * 80)[:chars]
     if non_bmp:
         text = "\U0001f600" + text[1:]
+    elif wide:
+        text = "\u0100" + text[1:]
     encoded = len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
-    target = index.MAX_JSON_TEXT_BYTES // 4
-    count = min(index.MAX_INDEX_CHUNKS, target // (encoded + 64)) if non_bmp else index.MAX_INDEX_CHUNKS
-    chunks = [{"source": number // 20000, "start": (number % 20000) * (chars - overlap),
-               "end": (number % 20000) * (chars - overlap) + chars, "text": text} for number in range(count)]
+    target = min(index.MAX_SIDECAR_BYTES, index.MAX_JSON_TEXT_BYTES // (4 if non_bmp else 2 if wide else 1))
+    count = min(index.MAX_INDEX_CHUNKS, (target - 1024) // (encoded + 80)) if non_bmp or wide else index.MAX_INDEX_CHUNKS
+    per_source = (index.MAX_SOURCE_BYTES - chars) // (chars - overlap) + 1
+    chunks = [{"source": number // per_source, "start": (number % per_source) * (chars - overlap),
+               "end": (number % per_source) * (chars - overlap) + chars, "text": text} for number in range(count)]
     row = [1.0] + [0.0] * (dimensions - 1)
     chunking: dict[str, int | str] = {"chars": chars, "overlap": overlap}
 
     def write() -> None:
         index.write_index(directory, model="hashing-bow-not-a-model", backend="lexical", dimensions=dimensions,
-                          chunking=chunking, sources=["a.txt", "b.txt", "c.txt"], chunks=chunks,
+                          chunking=chunking, sources=[f"{number}.txt" for number in range((count - 1) // per_source + 1)], chunks=chunks,
                           rows=(row for _ in range(count)))
 
     write()
-    if non_bmp:
+    if non_bmp or wide:
         gap = target - (directory / index.SIDECAR).stat().st_size
         chunking["padding"] = "a" * (gap - len(', "padding": ""'))
         write()
         assert (directory / index.SIDECAR).stat().st_size == target
     print(json.dumps({"fixture": directory.name, "chunks": count, "dimensions": dimensions,
                       "non_bmp_in_every_chunk": non_bmp, "text_characters_per_chunk": chars,
+                      "width_two_in_every_chunk": wide,
                       "escaped_text_bytes_per_chunk": encoded,
                       "sidecar_bytes": (directory / index.SIDECAR).stat().st_size,
                       "vector_bytes": (directory / index.VECTORS).stat().st_size}), flush=True)
@@ -102,7 +106,7 @@ async def concurrent_searches(directory: Path, cgroup: Path) -> None:
     def load(*args, **kwargs):
         loaded = original_load(*args, **kwargs)
         references.append(weakref.ref(loaded))
-        assert sum(reference() is not None for reference in references) <= 2
+        assert sum(reference() is not None for reference in references) == 1
         return loaded
 
     def run(task, payload, *args):
@@ -138,7 +142,7 @@ async def concurrent_searches(directory: Path, cgroup: Path) -> None:
                 print(json.dumps({"scenario": "search-triple", "waiting_on": task, "jobs_in_flight": counts[task],
                                   "live_indexes": alive, "memory_peak_bytes": peak,
                                   "memory_peak_mib": peak / 1024**2}), flush=True)
-                assert alive <= 2
+                assert alive == 1
                 assert peak <= 440 * 1024**2, peak
                 release[task].set()
         finally:
@@ -159,13 +163,16 @@ def main() -> None:
         guard_cost()
         return
     scenario = sys.argv[2]
-    assert scenario in ("ascii", "ascii-pair", "unicode-pair", "search-triple"), scenario
+    assert scenario in ("ascii", "ascii-pair", "unicode-pair", "ascii-unicode-pair", "unicode-wide-pair", "search-triple"), scenario
     names = (("first", "second", "third") if scenario == "search-triple"
              else ("first",) if scenario == "ascii" else ("first", "second"))
     with tempfile.TemporaryDirectory(prefix="index-memory-", dir=sys.argv[1]) as temporary:
         directory = Path(temporary)
         for name in names:
-            fixture(directory / name, non_bmp=scenario == "unicode-pair" and name == "first")
+            fixture(directory / name,
+                    non_bmp=(scenario in ("unicode-pair", "unicode-wide-pair") and name == "first")
+                    or (scenario == "ascii-unicode-pair" and name == "second"),
+                    wide=scenario == "unicode-wide-pair" and name == "second")
         gc.collect()
         if scenario == "search-triple":
             asyncio.run(concurrent_searches(directory, cgroup))
@@ -177,7 +184,6 @@ def main() -> None:
             sidecar = directory / name / index.SIDECAR
             assert len(cache._items) == (0 if number == 1 else 1)
             loaded = cache.get(sidecar)
-            resident_bytes = loaded.resident_bytes
             assert cache.get(sidecar) is loaded
             assert len(cache._items) == 1
             del loaded
@@ -185,9 +191,7 @@ def main() -> None:
             peak = int((cgroup / "memory.peak").read_text())
             print(json.dumps({"scenario": scenario, "loads": number, "memory_peak_bytes": peak,
                               "memory_peak_mib": peak / 1024**2, "cached_indexes": len(cache._items),
-                              "loaded_object_bytes": resident_bytes,
-                              "cached_file_bytes": sum(item.size for item in cache._items.values()),
-                              "cached_object_bytes": sum(item.resident_bytes for item in cache._items.values())}),
+                              "cached_file_bytes": sum(item.size for item in cache._items.values())}),
                   flush=True)
             assert peak <= 440 * 1024**2, (peak, limit)
         del server, cache

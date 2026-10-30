@@ -24,7 +24,6 @@ import stat
 import sys
 import threading
 import time
-from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from io import BufferedReader
@@ -44,9 +43,6 @@ MAX_SOURCE_BYTES = 16 * 1024 * 1024
 # Default fixture: 50000 * (1000 text + 66 JSON escapes + 63 framing) + 512 header = 56450512; 64 MiB leaves headroom.
 MAX_SIDECAR_BYTES = 64 * 1024 * 1024
 MAX_JSON_TEXT_BYTES = 2 * MAX_SIDECAR_BYTES
-CACHE_BYTES = 160 * 1024 * 1024
-# File bytes alone undercount Python objects, particularly for many tiny cached indexes.
-CACHE_RESIDENT_BYTES = 192 * 1024 * 1024
 MAX_JSON_CONTAINERS = MAX_INDEX_CHUNKS + 8
 MAX_JSON_TOKENS = MAX_INDEX_CHUNKS * 12 + 128
 MAX_JSON_DEPTH = 64
@@ -87,7 +83,6 @@ class LoadedIndex:
     vectors_path: Path = field(repr=False)
     # (device, inode, mtime, size) of the sidecar and vectors files exactly as read.
     stamps: tuple[tuple[int, int, int, int], ...] = field(repr=False, default=())
-    resident_bytes: int = field(repr=False, default=0)
 
     @property
     def size(self) -> int:
@@ -203,16 +198,6 @@ def _guard_json(data: bytes) -> None:
             tokens += 1
         _check(containers <= MAX_JSON_CONTAINERS and tokens <= MAX_JSON_TOKENS and depth <= MAX_JSON_DEPTH,
                f"{SIDECAR} exceeds the JSON complexity limit")
-
-
-def _json_size(value: Any) -> int:
-    # Counting shared keys again is conservative and avoids allocating an identity set during a load.
-    size = sys.getsizeof(value)
-    if isinstance(value, dict):
-        size += sum(_json_size(key) + _json_size(item) for key, item in value.items())
-    elif isinstance(value, list):
-        size += sum(_json_size(item) for item in value)
-    return size
 
 
 def _open_regular(path: Path) -> BufferedReader:
@@ -339,8 +324,7 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
                and abs(math.sqrt(math.sumprod(values, values)) - 1.0) <= UNIT_TOLERANCE,
                f"vector {row} is not a finite unit vector")
     return LoadedIndex(model, backend, dimensions, count, chunking, sources, chunks, vectors,
-                       sidecar.parent, vectors_path, (sidecar_stamp, vectors_stamp),
-                       _json_size(meta) + sys.getsizeof(vectors) + 1024)
+                       sidecar.parent, vectors_path, (sidecar_stamp, vectors_stamp))
 
 
 def search(loaded: LoadedIndex, query_vector: Iterable[float], n: int) -> list[tuple[int, float]]:
@@ -366,27 +350,21 @@ def _stamp(path: Path) -> tuple[int, int, int, int]:
 
 
 class IndexCache:
-    """Indexes bounded by file bytes and parsed objects, reloaded when either file changes.
-    Loads run one at a time under a separate lock, allowing cache hits during another key's load."""
+    """Retain one valid index, dropping it before loading a different or changed index."""
 
-    def __init__(self, limit_bytes: int = CACHE_BYTES):
-        self.limit_bytes = limit_bytes
-        self._items: OrderedDict[tuple[Path, Path | None], LoadedIndex] = OrderedDict()
+    def __init__(self) -> None:
+        self._items: dict[tuple[Path, Path | None], LoadedIndex] = {}
         self._lock = threading.Lock()
-        self._load_lock = threading.Lock()
 
     def get(self, sidecar: Path, within: Path | None = None) -> LoadedIndex:
         sidecar = Path(sidecar).resolve()
         key = (sidecar, within)
-        loaded = self._cached(key)
-        if loaded is not None:
-            return loaded
-        with self._load_lock:
+        with self._lock:
             loaded = self._cached(key)
             if loaded is not None:
                 return loaded
-            with self._lock:
-                self._items.pop(key, None)
+            # Release the old parsed objects before the next load allocates its transient buffers.
+            self._items.clear()
             try:
                 loaded = load_index(sidecar, within)
             except OSError:
@@ -395,26 +373,15 @@ class IndexCache:
                 # Only retry I/O failures, outside except so its traceback releases the failed buffer.
                 _pause(0.2)
                 loaded = load_index(sidecar, within)
-            if loaded.size > self.limit_bytes or loaded.resident_bytes > CACHE_RESIDENT_BYTES:
-                return loaded
-            with self._lock:
-                self._items[key] = loaded
-                self._items.move_to_end(key)
-                while (sum(item.size for item in self._items.values()) > self.limit_bytes
-                       or sum(item.resident_bytes for item in self._items.values()) > CACHE_RESIDENT_BYTES):
-                    self._items.popitem(last=False)
+            self._items[key] = loaded
             return loaded
 
     def _cached(self, key: tuple[Path, Path | None]) -> LoadedIndex | None:
         sidecar, _ = key
-        with self._lock:
-            loaded = self._items.get(key)
+        loaded = self._items.get(key)
         if loaded is not None:
             try:
                 if loaded.stamps == (_stamp(sidecar), _stamp(loaded.vectors_path)):
-                    with self._lock:
-                        if key in self._items:
-                            self._items.move_to_end(key)
                     return loaded
             except OSError:
                 pass

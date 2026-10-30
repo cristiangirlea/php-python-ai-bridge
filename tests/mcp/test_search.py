@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 import weakref
 from pathlib import Path
@@ -240,11 +241,46 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(budgets, [], "an expired load must not submit an embed job")
         self.assertIn("loading the index used the whole 0.1 s budget", result.content[0].text)
 
+    async def test_lock_wait_uses_the_search_deadline_without_loading_or_jobs(self):
+        original_lock = threading.Lock
+        step = original_lock()
+        with patch.object(tools.threading, "Lock", side_effect=original_lock) as locks:
+            locks.side_effect = [original_lock(), step]
+            server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=100)
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with step:
+                held.set()
+                release.wait(2)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        self.assertTrue(held.wait(1))
+        try:
+            with patch.object(index, "load_index", wraps=index.load_index) as load, \
+                 patch.object(self.bridge, "run", wraps=self.bridge.run) as run:
+                started = time.monotonic()
+                result = await self.call({"query": "needle", "index_path": "index"}, server=server)
+                elapsed = time.monotonic() - started
+            self.assertTrue(result.is_error)
+            self.assertIn("loading the index used the whole 0.1 s budget", result.content[0].text)
+            load.assert_not_called()
+            run.assert_not_called()
+            self.assertLess(elapsed, 1.0, "the lock must stop waiting at the call deadline")
+        finally:
+            release.set()
+            holder.join(3)
+
+    async def test_facts_and_select_use_one_real_load(self):
+        server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=10000)
+        with patch.object(index, "load_index", wraps=index.load_index) as load:
+            result = await self.call({"query": "needle", "index_path": "index"}, server=server)
+        self.assertFalse(result.is_error, result.content)
+        self.assertEqual(load.call_count, 1)
+
     async def test_parallel_searches_release_indexes_while_worker_jobs_wait(self):
         paths = [self.copy_index(f"parallel_{number}") for number in range(3)]
-        sample = index.load_index(paths[0] / index.SIDECAR)
-        budget = sample.resident_bytes
-        del sample
         original_load, original_run = index.load_index, self.bridge.run
         references, observed = [], []
         entered = {task: threading.Event() for task in ("embed", "rerank")}
@@ -270,8 +306,7 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
             while not entered[task].is_set():
                 await asyncio.sleep(0.01)
 
-        with patch.object(index, "CACHE_RESIDENT_BYTES", budget), \
-             patch.object(index, "load_index", load), patch.object(self.bridge, "run", run):
+        with patch.object(index, "load_index", load), patch.object(self.bridge, "run", run):
             server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=30000)
             calls = [asyncio.create_task(self.call({"query": "needle", "index_path": path.name}, server=server))
                      for path in paths]
@@ -285,7 +320,7 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
                     event.set()
                 results = await asyncio.gather(*calls)
         for task, alive in observed:
-            self.assertLessEqual(alive, 2, f"{task} waits must not retain evicted indexes")
+            self.assertEqual(alive, 1, f"{task} waits must not retain evicted indexes")
         for result in results:
             self.assertFalse(result.is_error, result.content)
 
@@ -343,10 +378,11 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
             errors.append(error)
             raise error
 
-        with patch.object(index, "CACHE_RESIDENT_BYTES", 1), patch.object(index, "load_index", load):
+        with patch.object(index, "load_index", load):
             server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=10000)
             with patch.object(index, "search", search):
                 result = await self.call({"query": "needle", "index_path": "index"}, server=server)
         self.assertTrue(result.is_error)
         self.assertEqual(len(errors), 1)
-        self.assertTrue(all(reference() is None for reference in references), "saved errors must not pin indexes")
+        await self.call({"query": "needle", "index_path": "small"}, server=server)
+        self.assertIsNone(references[0](), "saved errors must not pin evicted indexes")
