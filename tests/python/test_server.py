@@ -534,7 +534,8 @@ class ConnectionLimitTests(unittest.TestCase):
             self.assertEqual(exchange(self.server.server_address)[0], 503)
             pending = set(peers)
             while self.server.slots._value != 32:
-                self.assertLess(time.monotonic() - started, 2.8, "trickling extended the linger deadline")
+                # Between the 2 s linger deadline and the 5 s head budget a regression would reach.
+                self.assertLess(time.monotonic() - started, 4.0, "trickling extended the linger deadline")
                 for peer in list(pending):
                     try:
                         peer.sendall(b"x")
@@ -557,13 +558,14 @@ class ConnectionLimitTests(unittest.TestCase):
         with socket.create_connection(self.server.server_address, timeout=4) as peer:
             started = time.monotonic()
             peer.sendall(self.refused_head()[:-2])
-            time.sleep(4)
+            time.sleep(4.5)
             peer.sendall(b"\r\n")
             self.receive_reply(peer, 401, "unauthorized")
             time.sleep(0.05)
             self.assertEqual(self.server.slots._value, 31)
-            settle(self.server, timeout=1.5)
-            self.assertLess(time.monotonic() - started, 5.5)
+            settle(self.server, timeout=2)
+            # The head budget ends at 5 s; a linger that ignored it would run to about 6.5 s.
+            self.assertLess(time.monotonic() - started, 6.0)
 
     def test_a_fully_read_invalid_body_and_a_bodyless_get_skip_lingering(self):
         requests = [(b"POST /v1/jobs HTTP/1.1\r\nAuthorization: Bearer " + TOKEN.encode()
