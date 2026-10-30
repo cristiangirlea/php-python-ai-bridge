@@ -534,6 +534,8 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         top_k: Annotated[int, Field(description="How many chunks to return.", ge=1, le=MAX_SEARCH_TOP_K)] = 5,
         rerank: Annotated[bool, Field(description="Rerank the candidates with the worker's rerank task.")] = True,
     ) -> Search:
+        # Loading, embedding and reranking all consume the same call budget.
+        deadline = time.monotonic() + seconds
         _check_texts([query], "query", 1)
         loaded = await anyio.to_thread.run_sync(lambda: _index_from(root, index_path, cache))
         assert root is not None  # _index_from refuses every path without one
@@ -541,8 +543,6 @@ def build_server(bridge: Bridge, backend: str, root: Path | None, timeout_ms: in
         if loaded.model != names["embed"]:
             raise ToolError(f"The index at {index_path!r} was built with {loaded.model!r}; this worker embeds with "
                             f"{names['embed']!r} (bridge_health reports it). Rebuild the index against this worker.")
-        # One budget for the whole call: the embed job and the rerank job share the deadline.
-        deadline = time.monotonic() + seconds
         result = await run("embed", {"texts": [query]}, ctx, deadline)
         query_vector = _vectors(result, 1)[0]
         if (result["model"], result["dimensions"]) != (loaded.model, loaded.dimensions):

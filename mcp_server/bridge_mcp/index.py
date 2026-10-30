@@ -35,6 +35,10 @@ FORMAT = "bridge-index/1"
 SIDECAR = "index.json"
 VECTORS = "vectors.f32"
 MAX_INDEX_CHUNKS = 50000
+# Both current backends embed at 384 dimensions; 4096 leaves room for larger models.
+MAX_DIMENSIONS = 4096
+# A 32 MiB read plus its array copy and the 128 MiB cache leave room in the 512 MiB container.
+MAX_VECTOR_BYTES = 32 * 1024 * 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 # Parsing a sidecar costs several times its size in memory, and the mcp container has 512 MiB.
 MAX_SIDECAR_BYTES = 64 * 1024 * 1024
@@ -146,10 +150,23 @@ def _check(condition: bool, message: str) -> None:
         raise InvalidIndex(message)
 
 
+def _vector_bytes(dimensions: int, count: int) -> int:
+    _check(type(dimensions) is int and 1 <= dimensions <= MAX_DIMENSIONS,
+           f"dimensions must be an integer from 1 to {MAX_DIMENSIONS}")
+    _check(type(count) is int and 1 <= count <= MAX_INDEX_CHUNKS, f"an index holds 1-{MAX_INDEX_CHUNKS} chunks")
+    expected = count * dimensions * 4
+    _check(expected <= MAX_VECTOR_BYTES, f"vector bytes exceed the {MAX_VECTOR_BYTES // (1024 * 1024)} MiB limit")
+    return expected
+
+
 def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunking: dict[str, Any], sources: list[str],
                 chunks: list[dict[str, Any]], rows: Iterable[Iterable[float]]) -> dict[str, Any]:
     """Stream `rows` into vectors.f32, then write index.json. Nothing is replaced unless both were written; the
     two renames are separate, so a reader between them sees a checksum mismatch and must retry."""
+    try:
+        _vector_bytes(dimensions, len(chunks))
+    except InvalidIndex as error:
+        raise BuildError(str(error)) from None
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     vectors_tmp, sidecar_tmp = out / (VECTORS + ".tmp"), out / (SIDECAR + ".tmp")
@@ -157,6 +174,8 @@ def write_index(out: Path, *, model: str, backend: str, dimensions: int, chunkin
     try:
         with vectors_tmp.open("wb") as output:
             for row in rows:
+                if count >= len(chunks):
+                    raise BuildError(f"more vectors than the {len(chunks)} chunks")
                 values = array.array("f", row)
                 if len(values) != dimensions:
                     raise BuildError(f"a vector has {len(values)} components, expected {dimensions}")
@@ -198,8 +217,7 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
     model, backend, dimensions, count = meta.get("model"), meta.get("backend"), meta.get("dimensions"), meta.get("count")
     _check(isinstance(model, str) and model != "", "the index names no model")
     _check(isinstance(backend, str) and backend != "", "the index names no backend")
-    _check(type(dimensions) is int and dimensions >= 1, "dimensions must be a positive integer")
-    _check(type(count) is int and 1 <= count <= MAX_INDEX_CHUNKS, f"an index holds 1-{MAX_INDEX_CHUNKS} chunks")
+    expected = _vector_bytes(dimensions, count)
     sources, chunks, chunking = meta.get("sources"), meta.get("chunks"), meta.get("chunking")
     _check(isinstance(chunking, dict), "chunking must be an object")
     _check(isinstance(sources, list) and all(isinstance(item, str) and item for item in sources),
@@ -219,12 +237,11 @@ def load_index(sidecar: Path, within: Path | None = None) -> LoadedIndex:
     vectors_path = (sidecar.parent / name).resolve()
     if within is not None:
         _check(vectors_path.is_relative_to(Path(within).resolve()), "the vectors file is outside the allowed directory")
-    expected = count * dimensions * 4
     try:
         with vectors_path.open("rb") as handle:
             vectors_stamp = _fstamp(handle)
             _check(vectors_stamp[3] == expected, f"{name} does not hold {count} x {dimensions} float32 values")
-            data = handle.read()
+            data = handle.read(expected + 1)
     except OSError as error:
         raise InvalidIndex(f"{name} cannot be read ({type(error).__name__})") from None
     _check(len(data) == expected, f"{name} changed while it was read")
@@ -295,10 +312,12 @@ class IndexCache:
             # checksum mismatch. One retry after a pause separates that from a genuinely broken index.
             _pause(0.2)
             loaded = load_index(sidecar, within)
+        if loaded.size > self.limit_bytes:
+            return loaded
         with self._lock:
             self._items[key] = loaded
             self._items.move_to_end(key)
-            while len(self._items) > 1 and sum(item.size for item in self._items.values()) > self.limit_bytes:
+            while sum(item.size for item in self._items.values()) > self.limit_bytes:
                 self._items.popitem(last=False)
         return loaded
 

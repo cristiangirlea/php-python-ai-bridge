@@ -13,8 +13,8 @@ from mcp import Client
 
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
-from bridge_mcp import index
-from bridge_mcp.protocol import Bridge
+from bridge_mcp import index, tools
+from bridge_mcp.protocol import Bridge, BridgeError
 from bridge_mcp.tools import build_server
 
 TOKEN = "test-only-bridge-token-never-use-in-production"
@@ -214,3 +214,26 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.is_error, result.content)
         self.assertTrue(any(message.startswith("embed ") for message in messages), messages)
         self.assertTrue(any(message.startswith("rerank ") for message in messages), messages)
+
+    async def test_loading_uses_the_search_deadline(self):
+        server = build_server(self.bridge, backend="lexical", root=self.root, timeout_ms=100)
+        load = index.load_index
+        budgets = []
+
+        with patch.object(tools, "time") as clock:
+            clock.monotonic.return_value = 100.0
+
+            def slow_load(*args, **kwargs):
+                loaded = load(*args, **kwargs)
+                clock.monotonic.return_value = 101.0
+                return loaded
+
+            def run(task, payload, timeout_s, *args):
+                budgets.append(timeout_s)
+                raise BridgeError("deadline expired", "timeout")
+
+            with patch.object(index, "load_index", side_effect=slow_load), patch.object(self.bridge, "run", run):
+                result = await self.call({"query": "needle", "index_path": "index"}, server=server)
+        self.assertTrue(result.is_error)
+        self.assertEqual(len(budgets), 1)
+        self.assertLessEqual(budgets[0], 0, "loading must consume the call's budget before the embed job")

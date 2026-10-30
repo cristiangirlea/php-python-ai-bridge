@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP indexes reject dimensions above 4096 and vector data above 32 MiB before opening the vectors file, bound reads if the file grows, and never retain an index above the cache budget. The builder enforces the same limits, and search loading consumes the call's deadline.
+
 ### Changed
 
 - Worker image publishing now builds natively on amd64 and arm64, pushes untagged digests and pulls and starts those exact images before creating multi-architecture version tags. Build provenance and SBOMs remain attached, with release attestations on the combined index digests; digest handoff uses job outputs without Actions artifacts.

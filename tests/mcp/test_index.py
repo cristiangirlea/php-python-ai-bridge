@@ -10,7 +10,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from ai_bridge.jobs import Settings
 from ai_bridge.server import BridgeServer
@@ -137,6 +137,98 @@ class FormatTests(unittest.TestCase):
         with self.assertRaises(index.InvalidIndex):
             index.load_index(sidecar)
 
+    def test_oversized_dimensions_are_refused_before_opening_vectors(self):
+        for dimensions in (4097, 2147483648):
+            with self.subTest(dimensions=dimensions):
+                sidecar = self.write([[1.0, 0.0, 0.0]])
+                self.edit(sidecar, dimensions=dimensions)
+                (self.out / index.VECTORS).unlink()
+                with self.assertRaisesRegex(index.InvalidIndex, "dimensions"):
+                    index.load_index(sidecar)
+
+    def test_oversized_vector_bytes_are_refused_before_opening_vectors(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        chunk = {"source": 0, "start": 0, "end": 1, "text": "t"}
+        self.edit(sidecar, dimensions=4096, count=2049, chunks=[chunk] * 2049)
+        (self.out / index.VECTORS).unlink()
+        with self.assertRaisesRegex(index.InvalidIndex, "vector bytes"):
+            index.load_index(sidecar)
+
+    def test_a_growing_vectors_file_is_read_with_a_bound_and_refused(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        original_open = Path.open
+        reads = []
+
+        def open_file(path, *args, **kwargs):
+            handle = original_open(path, *args, **kwargs)
+            if path.name != index.VECTORS:
+                return handle
+            wrapped = MagicMock(wraps=handle)
+            wrapped.__enter__.return_value = wrapped
+            wrapped.__exit__.side_effect = lambda *_: handle.close()
+
+            def read(size=-1):
+                reads.append(size)
+                with original_open(path, "ab") as growing:
+                    growing.write(b"x" * 1024)
+                return handle.read(size)
+
+            wrapped.read.side_effect = read
+            return wrapped
+
+        with patch.object(Path, "open", open_file), self.assertRaisesRegex(index.InvalidIndex, "changed"):
+            index.load_index(sidecar)
+        self.assertEqual(reads, [13], "read only the declared 12 bytes plus one growth sentinel")
+
+    def test_an_index_at_both_limits_loads(self):
+        dimensions, vector_bytes = 4096, 32 * 1024 * 1024
+        count = vector_bytes // (dimensions * 4)
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        vector_path = self.out / index.VECTORS
+        # Holes represent zero components without allocating a large fixture on disk or in memory.
+        with vector_path.open("wb") as handle:
+            for row in range(count):
+                handle.seek(row * dimensions * 4)
+                handle.write(b"\x00\x00\x80\x3f")
+            handle.truncate(vector_bytes)
+        digest = hashlib.sha256()
+        with vector_path.open("rb") as handle:
+            while block := handle.read(1024 * 1024):
+                digest.update(block)
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        meta.update(dimensions=dimensions, count=count, chunks=meta["chunks"] * count)
+        meta["vectors"]["sha256"] = digest.hexdigest()
+        sidecar.write_text(json.dumps(meta), encoding="utf-8")
+        loaded = index.load_index(sidecar)
+        self.assertEqual((loaded.dimensions, loaded.count, len(loaded.vectors) * 4),
+                         (dimensions, count, vector_bytes))
+
+    def test_writer_refuses_loader_limits_before_opening_files(self):
+        chunk = {"source": 0, "start": 0, "end": 1, "text": "t"}
+        for dimensions, count, message in ((4097, 1, "dimensions"), (4096, 2049, "vector bytes"),
+                                           (3, index.MAX_INDEX_CHUNKS + 1, "chunks")):
+            with self.subTest(dimensions=dimensions, count=count), patch.object(Path, "open") as opened:
+                with self.assertRaisesRegex(index.BuildError, message):
+                    index.write_index(self.out, model="m", backend="lexical", dimensions=dimensions,
+                                      chunking={}, sources=["a.txt"], chunks=[chunk] * count, rows=[])
+                opened.assert_not_called()
+
+    def test_writer_stops_before_consuming_an_extra_row(self):
+        with self.assertRaisesRegex(index.BuildError, "more vectors"):
+            self.write([[1.0, 0.0, 0.0], None],
+                       chunks=[{"source": 0, "start": 0, "end": 1, "text": "t"}])
+        self.assertFalse(list(self.out.iterdir()), "a refused build leaves no files behind")
+
+    def test_writer_accepts_the_byte_limit_and_preserves_it_on_refusal(self):
+        with patch.object(index, "MAX_VECTOR_BYTES", 24):
+            sidecar = self.write([[1.0, 0.0, 0.0]] * 2)
+            before = sidecar.read_bytes()
+            self.assertEqual(index.load_index(sidecar).count, 2)
+            with self.assertRaisesRegex(index.BuildError, "vector bytes"):
+                self.write([[1.0, 0.0, 0.0]] * 3)
+            self.assertEqual(sidecar.read_bytes(), before)
+            self.assertEqual(index.load_index(sidecar).count, 2)
+
     def test_a_vectors_file_that_escapes_the_allowed_directory_is_refused(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
         outside = Path(self.temp.name) / "outside.f32"
@@ -154,7 +246,7 @@ class FormatTests(unittest.TestCase):
 
     def test_the_cache_reloads_on_change_and_evicts_the_oldest(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
-        cache = index.IndexCache(limit_bytes=1)
+        cache = index.IndexCache(limit_bytes=sidecar.stat().st_size + (self.out / index.VECTORS).stat().st_size)
         with patch.object(index, "load_index", wraps=index.load_index) as load:
             first = cache.get(sidecar)
             self.assertIs(cache.get(sidecar), first)
@@ -169,7 +261,16 @@ class FormatTests(unittest.TestCase):
                               rows=[[0.0, 1.0, 0.0]])
             cache.get(other / index.SIDECAR)
             cache.get(sidecar)
-            self.assertEqual(load.call_count, 4, "a one-byte budget keeps only the latest index")
+            self.assertEqual(load.call_count, 4, "the budget fits only one index")
+
+    def test_the_cache_does_not_keep_an_over_budget_index(self):
+        sidecar = self.write([[1.0, 0.0, 0.0]])
+        cache = index.IndexCache(limit_bytes=1)
+        with patch.object(index, "load_index", wraps=index.load_index) as load:
+            first = cache.get(sidecar)
+            self.assertEqual(list(first.vectors), [1.0, 0.0, 0.0])
+            self.assertIsNot(cache.get(sidecar), first)
+            self.assertEqual(load.call_count, 2, "an oversized index can be used but must not be retained")
 
     def test_the_cache_notices_a_rebuild_with_the_same_size_and_time(self):
         sidecar = self.write([[1.0, 0.0, 0.0]])
