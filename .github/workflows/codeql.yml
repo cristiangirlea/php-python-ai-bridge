@@ -12,8 +12,7 @@ permissions:
   contents: read
   security-events: write
 
-# GitHub's hosted runners, as in tests.yml: the repository is public. GitHub's CodeQL does not support PHP, so
-# Python only; the PHP client is covered by PHPStan at level max and the hostile-peer tests in tests.yml.
+# CodeQL does not support PHP; PHPStan and hostile-peer tests cover the client in tests.yml.
 jobs:
   analyze:
     runs-on: ubuntu-latest
@@ -24,6 +23,6 @@ jobs:
           persist-credentials: false
       - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
-          languages: python
+          languages: python, actions
           build-mode: none
       - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1

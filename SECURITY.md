@@ -21,6 +21,17 @@ attacker gains. Do not include real personal data or credentials in the report.
 - A fix, or a statement of why no fix will be made, within 90 days of the report.
 - Credit in the advisory, if you want it, once a fix or statement is published.
 
+## What scans the project
+
+- CodeQL scans Python and GitHub Actions on every pull request and push to `main`, and weekly.
+- Dependabot alerts have automatic security updates enabled; version updates for Actions, pip and Composer run weekly.
+- `pip-audit` and `composer audit` check the dependency locks in the weekly `audit` job of `model-smoke.yml`.
+- Secret scanning with push protection checks for supported secrets.
+- OpenSSF Scorecard runs weekly and on pushes to `main`, as well as on branch-protection changes and manual dispatch.
+
+Code-scanning, dependency and secret-scanning results appear under the repository's **Security** tab;
+the dependency audit's output is in the workflow logs under **Actions**. These tools do not replace an outside review.
+
 ## Scope
 
 In scope:

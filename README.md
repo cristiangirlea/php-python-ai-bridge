@@ -1,5 +1,7 @@
 # PHP–Python AI Bridge
 
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/cristiangirlea/php-python-ai-bridge/badge)](https://scorecard.dev/viewer/?uri=github.com/cristiangirlea/php-python-ai-bridge)
+
 A framework-independent PHP client and a small Python task service. Submit document reranking from PHP, poll progress, receive typed results, and cancel work without keeping the original HTTP request open.
 
 Includes a FrankenPHP worker-mode example, deterministic fault tests, and an optional real ONNX reranker. No hosted AI account is required.
