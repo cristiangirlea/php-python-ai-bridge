@@ -447,6 +447,104 @@ class DrainHttpTests(unittest.TestCase):
         self.assertEqual(self.server.jobs.get(job["id"])["status"], "cancelled")
 
 
+class BusyDrainTests(unittest.TestCase):
+    def setUp(self):
+        with patch.object(server, "BUSY_DRAIN_CAP", 2, create=True):
+            self.server = BridgeServer(("127.0.0.1", 0), TOKEN, Settings(capacity=1))
+        for _ in range(32):
+            self.server.slots.acquire()
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        self.thread.start()
+        self.peers = contextlib.ExitStack()
+
+    def tearDown(self):
+        self.peers.close()
+        self.server.shutdown()
+        self.thread.join(2)
+        for _ in range(32):
+            self.server.slots.release()
+        self.server.server_close()
+
+    def busy_peer(self):
+        peer = self.peers.enter_context(socket.create_connection(self.server.server_address, timeout=2))
+        # Small buffers expose a reset during the upload after the response's FIN.
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        peer.sendall(b"POST /v1/jobs HTTP/1.1\r\nHost: x\r\nContent-Length: 262144\r\n\r\n")
+        received = bytearray()
+        while len(received) < len(server.BUSY):
+            part = peer.recv(len(server.BUSY) - len(received))
+            self.assertTrue(part, "the busy response was truncated")
+            received.extend(part)
+        self.assertEqual(bytes(received), server.BUSY)
+        self.assertEqual(peer.recv(1), b"")
+        return peer
+
+    def test_busy_503_survives_a_late_upload_while_another_peer_is_idle(self):
+        self.busy_peer()
+        peer = self.busy_peer()
+        started = time.monotonic()
+        peer.sendall(b"x" * 262144)
+        peer.shutdown(socket.SHUT_WR)
+        self.assertLess(time.monotonic() - started, 0.8, "an idle peer delayed another drain")
+        self.assertEqual(peer.recv(1), b"")
+        self.assertEqual(self.server.slots._value, 0)
+
+    def test_full_busy_drain_queue_closes_extras_without_holding_accept(self):
+        for _ in range(2):
+            self.busy_peer().sendall(b"x" * 65536)
+        started = time.monotonic()
+        for _ in range(4):
+            peer = self.busy_peer()
+            with self.assertRaises((BrokenPipeError, ConnectionResetError)):
+                peer.sendall(b"x" * 262144)
+        self.assertLess(time.monotonic() - started, 0.8, "the full drain queue held the accept loop")
+
+    def test_server_close_closes_queued_busy_sockets_and_joins_the_thread(self):
+        with patch.object(self.server._busy_drain, "add", wraps=self.server._busy_drain.add) as added:
+            for _ in range(2):
+                self.busy_peer().sendall(b"x" * 65536)
+        drainer = self.server._busy_drain._thread
+        self.assertTrue(drainer.is_alive())
+        started = time.monotonic()
+        self.server.server_close()
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertFalse(drainer.is_alive())
+        self.assertEqual(len(added.call_args_list), 2)
+        self.assertEqual(self.server._busy_drain._slots._value, 2)
+        self.assertTrue(all(call.args[0].fileno() == -1 for call in added.call_args_list))
+
+    def test_trickling_busy_peer_cannot_extend_the_one_second_deadline(self):
+        peer = self.busy_peer()
+        started = time.monotonic()
+        while True:
+            try:
+                peer.sendall(b"x")
+            except (BrokenPipeError, ConnectionResetError):
+                break
+            self.assertLess(time.monotonic() - started, 1.8)
+            time.sleep(0.02)
+        self.assertGreater(time.monotonic() - started, 0.7)
+
+    def test_busy_drain_byte_cap_closes_without_eof(self):
+        peer = self.busy_peer()
+        started = time.monotonic()
+        # The cap includes the head, since a busy connection has no request parser.
+        head = b"POST /v1/jobs HTTP/1.1\r\nHost: x\r\nContent-Length: 262144\r\n\r\n"
+        peer.sendall(b"x" * (server.LINGER_BYTES - len(head)))
+        while self.server._busy_drain._slots._value != 2:
+            self.assertLess(time.monotonic() - started, 0.8, "the byte cap waited for the deadline")
+            time.sleep(0.01)
+
+    def test_a_reset_busy_peer_does_not_stop_the_drain_thread(self):
+        peer = self.busy_peer()
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        peer.close()
+        peer = self.busy_peer()
+        peer.sendall(b"x" * 262144)
+        peer.shutdown(socket.SHUT_WR)
+        self.assertTrue(self.server._busy_drain._thread.is_alive())
+
+
 class ConnectionLimitTests(unittest.TestCase):
     """What the server answers before a handler runs: a full connection budget, and a head over its limits."""
 
@@ -1798,7 +1896,8 @@ class LoggingHttpTests(unittest.TestCase):
                 refused = MagicMock()
                 refused.send.side_effect = sent if isinstance(sent, OSError) else None
                 refused.send.return_value = sent
-                with patch.object(self.server, "shutdown_request") as shut:
+                with patch.object(self.server, "shutdown_request") as shut, \
+                        patch.object(self.server._busy_drain, "add", return_value=False):
                     self.server.process_request(refused, ("127.0.0.1", 1))
                 shut.assert_called_once_with(refused)
         finally:

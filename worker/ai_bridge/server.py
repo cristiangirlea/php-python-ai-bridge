@@ -6,7 +6,9 @@ import io
 import ipaddress
 import json
 import os
+import queue
 import re
+import select
 import signal
 import socket
 import sqlite3
@@ -30,6 +32,8 @@ MAX_HEADER_BLOCK = 16384
 READ_SECONDS = 5
 LINGER_SECONDS = 2
 LINGER_BYTES = MAX_BODY + 65536
+BUSY_DRAIN_CAP = 64
+BUSY_DRAIN_SECONDS = 1
 # How long a stop waits for a held drain thread's line: past it, the stop goes ahead without one.
 DRAIN_LINE_WAIT = 5
 # What a request line names as the route: the template a path matches, never the path itself.
@@ -217,6 +221,83 @@ def resolve_tokens() -> dict[str, str]:
         raise SystemExit(str(error)) from None
 
 
+class _BusyDrain:
+    def __init__(self) -> None:
+        self._queue: queue.Queue[tuple[socket.socket, float]] = queue.Queue(BUSY_DRAIN_CAP)
+        # Count queued and active sockets together so moving one cannot admit unbounded work.
+        self._slots = threading.BoundedSemaphore(BUSY_DRAIN_CAP)
+        self._stopped = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, name="bridge-busy-drain", daemon=True)
+        self._thread.start()
+
+    def add(self, connection: socket.socket) -> bool:
+        with self._lock:
+            if self._stopped.is_set() or not self._slots.acquire(blocking=False):
+                return False
+            self._queue.put_nowait((connection, time.monotonic() + BUSY_DRAIN_SECONDS))
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._stopped.set()
+        self._thread.join(1)
+
+    def _close(self, connection: socket.socket) -> None:
+        try:
+            connection.close()
+        except OSError:
+            pass
+        finally:
+            self._slots.release()
+
+    def _run(self) -> None:
+        pending: dict[socket.socket, tuple[float, int]] = {}
+        try:
+            while not self._stopped.is_set():
+                while True:
+                    try:
+                        connection, deadline = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    pending[connection] = (deadline, LINGER_BYTES)
+                for connection, (deadline, _) in list(pending.items()):
+                    if time.monotonic() >= deadline:
+                        del pending[connection]
+                        self._close(connection)
+                if not pending:
+                    self._stopped.wait(0.02)
+                    continue
+                timeout = min(0.02, max(0, min(deadline for deadline, _ in pending.values()) - time.monotonic()))
+                try:
+                    ready, _, _ = select.select(list(pending), [], [], timeout)
+                except OSError:
+                    continue
+                for connection in ready:
+                    deadline, left = pending[connection]
+                    try:
+                        part = connection.recv(min(left, 65536)) if time.monotonic() < deadline else b""
+                    except BlockingIOError:
+                        continue
+                    except OSError:
+                        part = b""
+                    left -= len(part)
+                    if not part or not left:
+                        del pending[connection]
+                        self._close(connection)
+                    else:
+                        pending[connection] = (deadline, left)
+        finally:
+            for connection in pending:
+                self._close(connection)
+            while True:
+                try:
+                    connection, _ = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._close(connection)
+
+
 class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
@@ -246,7 +327,9 @@ class BridgeServer(ThreadingHTTPServer):
         self.jobs = JobStore(replace(settings or Settings(), owners=tuple(tokens)))
         try:
             super().__init__(address, Handler)
+            self._busy_drain = _BusyDrain()
         except Exception:
+            super().server_close()
             self.jobs.close()
             raise
 
@@ -258,7 +341,15 @@ class BridgeServer(ThreadingHTTPServer):
                 sent = request.send(BUSY) == len(BUSY)
             except OSError:
                 sent = False
-            self.shutdown_request(request)
+            queued = False
+            if sent:
+                try:
+                    request.shutdown(socket.SHUT_WR)
+                    queued = self._busy_drain.add(request)
+                except OSError:
+                    pass
+            if not queued:
+                self.shutdown_request(request)
             # A reply that did not go out is no reply, as for a connection that ends before one.
             if sent:
                 log.event("request", warning=True, method=None, route="other", status=503, duration_ms=0, owner=None)
@@ -281,11 +372,17 @@ class BridgeServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         super().server_close()
+        if hasattr(self, "_busy_drain"):
+            self._busy_drain.close()
         if self._drainer is not None:
             # A second signal can stop serving while the drain thread is still held; its line still goes before stop's.
             self._drained.wait(DRAIN_LINE_WAIT)
             self._write_drain(last=True)
         self.cancelled = self.jobs.close()
+
+    def shutdown(self) -> None:
+        super().shutdown()
+        self._busy_drain.close()
 
     def stop(self) -> None:
         """A signal's handler: the first starts the drain, a second ends it at once."""
