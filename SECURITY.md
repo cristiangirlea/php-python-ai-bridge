@@ -31,7 +31,8 @@ attacker gains. Do not include real personal data or credentials in the report.
 - OpenSSF Scorecard runs weekly, on pushes to `main` and on manual dispatch; ruleset changes are picked up by the weekly run.
 
 Code-scanning, dependency and secret-scanning results appear under the repository's **Security** tab;
-the dependency audit's output is in the workflow logs under **Actions**. These tools do not replace an outside review.
+the dependency audit's output is in the workflow logs under **Actions**. These tools do not replace an outside review;
+[docs/security-review.md](docs/security-review.md) is the brief for one.
 
 ## Scope
 

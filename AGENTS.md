@@ -5,7 +5,8 @@ pool of warm child processes, one job per child at a time, with a FrankenPHP wor
 same HTTP protocol. Since 0.4.0 it is supported as an internal service for applications that own their host and network
 (one or more instances, each answering its own jobs, behind the operator's TLS and the application's own authentication;
 the job table survives a restart with `BRIDGE_STATE_DIR`), not for public exposure; see `docs/operations.md`.
-README has the overview; `docs/protocol.md`, `docs/integration.md`, `docs/mcp.md`, `docs/operations.md`, `docs/security.md`
+README has the overview; `docs/protocol.md`, `docs/integration.md`, `docs/mcp.md`, `docs/operations.md`, `docs/pilot.md`,
+`docs/security.md`, `docs/security-review.md`
 and `docs/testing.md` are the guides. Everything builds, tests and downloads inside `docker/compose.yaml`.
 
 ## Layout
