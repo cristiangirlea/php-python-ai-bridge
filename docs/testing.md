@@ -266,6 +266,23 @@ LOAD_TARGET=http://bridge-load-worker:8090 LOAD_CONCURRENCY=1,4 LOAD_SECONDS=600
 docker rm -f bridge-load-lexical bridge-load-worker
 ```
 
+**Overnight soak** (`scripts/soak.sh`, 14 hours from 2026-11-02 15:43Z, compose defaults, one desktop): the ONNX worker under the mix at four threads in 84 windows of up to 600 s (the last 582 s), with one `docker restart` halfway. `scripts/soak.py` writes one JSON line per window with the window's jobs, percentiles, 429s and errors and the worker's `/metrics` counters. The shell script samples `docker stats` each minute and records the end state.
+
+| Measure | Result |
+| --- | --- |
+| Succeeded jobs | 64,639 (32,456 before the restart, 32,183 after), 0 errors, 0 failed or timed out |
+| Jobs/s | 1.29 and 1.28 in the two halves: the result limit (384 for 300 s) admits about 1.28, and 26,811 requests got a 429 |
+| p95 per window | 1.54 to 2.93 s, median 1.95 s before the restart and 1.94 s after; worst single job 7.65 s |
+| Worker memory after warm-up | hourly medians 949 to 978 MiB, peak 998 MiB of 1.5 GiB, no upward trend over about 64 child replacements |
+| Restart | 4 s; the next window had 774 jobs and no error |
+| End state | `restarts=0 oom_killed=false` |
+
+It needs the models and wheels in `.cache` (the `fetcher` service), uses its own project `bridge-soak`, and takes it down with `-v` on exit:
+
+```sh
+SOAK_SECONDS=50400 sh scripts/soak.sh /path/to/results   # SOAK_CONCURRENCY (4) and SOAK_WINDOW_SECONDS (600) optional
+```
+
 ## Measured NER precision and recall (informational)
 
 `scripts/ner_measure.py` runs every sentence of `tests/fixtures/ner-sample.json` through the ONNX worker's redact task with PER, ORG and LOC, at the task's default threshold and a lower one, each its own job, and compares the models' spans with the sample's labels; rule spans are not counted. The model workflow prints a fresh table to its job summary on every run, and fails only if a job fails, never on a score. The table below was measured locally with this script over `main` at `dd2cd9d`, the commit its header names; a label's Masked counts that label's entities hidden under any label, so it can exceed the label's overlapping recall. The sample is invented and small, so these figures describe these pinned models on these three registers, not a quality guarantee.
