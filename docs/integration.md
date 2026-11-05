@@ -1,6 +1,6 @@
 # Integrating the bridge
 
-This guide covers the framework-independent client and the two optional integrations shipped in the same package: a Laravel service provider and a Symfony bundle, each of which builds `PhpAiBridge\Client` from a URL and a token. Neither framework is a dependency of the library; install the bridge into an application that already has one. The manual recipes kept below each integration are configuration examples that no test runs, and nothing here is a promise of production readiness.
+This guide covers the framework-independent client and the two optional integrations shipped in the same package: a Laravel service provider and a Symfony bundle, each of which builds `PhpAiBridge\Client` from a URL and a token. Neither framework is a dependency of the library; install the bridge into an application that already has one. The manual Laravel recipe is a configuration example that no test runs; `symfony-tests` compiles the manual Symfony one, and nothing here is a promise of production readiness.
 
 ## What runs where
 
@@ -166,7 +166,7 @@ $factory = new HttpFactory();
 $client = new Client($url, $token, 2000, new Psr18Transport($http, $factory, $factory));
 ```
 
-The repository's tests drive `Psr18Transport` through small in-repo fakes of the PSR interfaces (see [testing](testing.md)); neither Symfony HttpClient nor Guzzle is installed or run by them, so treat these two snippets as configuration recipes.
+The repository's tests drive `Psr18Transport` through small in-repo fakes of the PSR interfaces (see [testing](testing.md)); neither Symfony HttpClient nor Guzzle is installed or run by them, so treat these two snippets as configuration recipes. Both were run by hand against v0.5.0 from Packagist and the published worker image on 2026-11-05 (Symfony HttpClient with `nyholm/psr7`, and Guzzle 7): a rerank, a 404 and a 401 each came back as documented.
 
 ## Symfony: the bundle
 
@@ -188,15 +188,18 @@ php_ai_bridge:
     request_timeout_ms: '%env(int:BRIDGE_REQUEST_TIMEOUT_MS)%'
 ```
 
-The bundle registers `PhpAiBridge\Client` as a shared service under its class name, so constructor-inject it into a service or controller by type. Environment values are read when the client is first resolved: an unset or empty URL or token, a URL that is not a bare HTTP(S) origin, a token under 32 characters or a timeout outside 1 to 300000 fail with an `InvalidArgumentException` naming the `php_ai_bridge` setting. An empty URL or an out-of-range timeout written in the configuration fails the container build. No message quotes the token. Keep the token out of committed YAML; use deployment environment variables or Symfony's secret management.
+The bundle registers `PhpAiBridge\Client` as a shared service under its class name, so constructor-inject it into a service or controller by type. Environment values are read when the client is first resolved: an unset or empty URL or token, a URL that is not a bare HTTP(S) origin, a token under 32 characters or a timeout outside 1 to 300000 fail with an `InvalidArgumentException` naming the `php_ai_bridge` setting. An empty URL, or a timeout written in the configuration that is not a whole number from 1 to 300000, fails the container build. No message quotes the token. Keep the token out of committed YAML; use deployment environment variables or Symfony's secret management.
 
-`symfony-tests` (see [testing](testing.md)) boots a bare `Kernel` with only this bundle, no FrameworkBundle, with debug off: it compiles and dumps the container, resolves the client and a service autowired with it, reranks against the real worker, loads the dumped container in a second kernel and resolves the client again, and checks every invalid case above. It runs Symfony 8.0 on PHP 8.5 only. It is not a full Symfony application: no FrameworkBundle, Flex, Messenger, Symfony Runtime or FrankenPHP worker mode is tested, and no older Symfony version, though the bundle uses only `AbstractBundle`, which Symfony has had since 6.1.
+`symfony-tests` (see [testing](testing.md)) boots a bare `Kernel` with only this bundle, no FrameworkBundle, with debug off: it compiles and dumps the container, resolves the client and a service autowired with it, reranks against the real worker, loads the dumped container in a second kernel and resolves the client again, compiles the configuration above (given as a PHP array) with the timeout set, unset and 0, compiles the manual service below without the bundle, and checks every invalid case above. It runs Symfony 8.0 on PHP 8.5 only. It is not a full Symfony application: no FrameworkBundle, Flex, Messenger, Symfony Runtime or FrankenPHP worker mode is tested, and no older Symfony version, though the bundle uses only `AbstractBundle`, which Symfony has had since 6.1.
 
 ### Without the bundle: manual service registration
 
-Add this service to your existing `config/services.yaml`:
+Add this service to your existing `config/services.yaml`. The `env()` parameter gives the timeout the same 2000 ms default as the bundle; without it, an unset `BRIDGE_REQUEST_TIMEOUT_MS` fails every resolution with "Environment variable not found":
 
 ```yaml
+parameters:
+    env(BRIDGE_REQUEST_TIMEOUT_MS): '2000'
+
 services:
     PhpAiBridge\Client:
         arguments:
