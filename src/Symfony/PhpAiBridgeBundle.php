@@ -30,12 +30,8 @@ final class PhpAiBridgeBundle extends AbstractBundle
         $definition->rootNode()->children()
             ->scalarNode('url')->defaultValue('%env(default::BRIDGE_URL)%')->cannotBeEmpty()->end()
             ->scalarNode('token')->defaultValue('%env(default::BRIDGE_TOKEN)%')->cannotBeEmpty()->end()
-            ->scalarNode('request_timeout_ms')->defaultValue('%env(int:BRIDGE_REQUEST_TIMEOUT_MS)%')
-                ->validate()
-                    ->ifTrue(static fn (mixed $value): bool => is_int($value) && ($value < 1 || $value > 300000))
-                    ->thenInvalid('php_ai_bridge.request_timeout_ms must be between 1 and 300000, got %s')
-                ->end()
-            ->end()
+            // min() and max() skip env placeholders, which Symfony checks against a dummy 0 at build time.
+            ->integerNode('request_timeout_ms')->defaultValue('%env(int:BRIDGE_REQUEST_TIMEOUT_MS)%')->min(1)->max(300000)->end()
         ->end();
     }
 

@@ -18,6 +18,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
+- The Symfony bundle accepts the documented `config/packages/php_ai_bridge.yaml`: `request_timeout_ms: '%env(int:BRIDGE_REQUEST_TIMEOUT_MS)%'` no longer fails the container build with `got 0`, because Symfony checks an env placeholder against a dummy `0` at build time. The timeout is now an integer setting whose range check skips env values, which the bundle checks when the client is first resolved. A literal value written in the configuration must be an integer from 1 to 300000, or the build fails; a quoted number (`'5000'`) or an env value without `int:` now fails the build too, where before it failed every resolution of the client.
 - Idle children take queued jobs in turn across tokens, the oldest job of the token served longest ago first, instead of strictly in submission order; one token's queue can no longer hold every child while another token's job waits past its deadline.
 - Card-number redaction finds its candidate ranges once per digit run, so its cost grows linearly with the text; a long run of separated digit groups took seconds at the 8192-character limit.
 - Worker children drop `BRIDGE_TOKENS_FILE` from their environment, like the token variables.
