@@ -18,6 +18,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
+- Idle children take queued jobs in turn across tokens, the oldest job of the token served longest ago first, instead of strictly in submission order; one token's queue can no longer hold every child while another token's job waits past its deadline.
 - Card-number redaction finds its candidate ranges once per digit run, so its cost grows linearly with the text; a long run of separated digit groups took seconds at the 8192-character limit.
 - Busy 503 responses drain unread uploads on one bounded background thread, preserving the response and `Retry-After: 1` behind a proxy without holding the accept loop; at most 64 sockets drain for 1 second and 327,680 bytes each, with immediate close on overflow and bounded shutdown.
 - Early worker refusals linger within bounded byte and time limits after sending the response, so an uploading client behind a TLS proxy receives the worker's error instead of a reset-induced 502.

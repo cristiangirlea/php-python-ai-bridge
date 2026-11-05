@@ -1829,6 +1829,20 @@ class OwnerTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_idle_children_take_queued_jobs_in_turn_across_owners(self):
+        # One child: the app's three jobs and the other owner's one all wait for it. The other owner's job runs
+        # after the app's first, not after all three.
+        store = JobStore(self.settings(capacity=8))
+        try:
+            app = [store.submit("test.delay", {"seconds": 0.5}, owner="app") for _ in range(3)]
+            other = store.submit("test.delay", {"seconds": 0}, owner="other")
+            self.assertEqual(self.wait(store, other["id"], "other", timeout=15)["status"], "succeeded")
+            self.assertEqual(store.get(app[2]["id"], "app")["status"], "queued")
+            for job in app:
+                self.assertEqual(self.wait(store, job["id"], "app", timeout=15)["status"], "succeeded")
+        finally:
+            store.close()
+
     def test_keys_are_per_owner(self):
         store = JobStore(self.settings())
         try:
