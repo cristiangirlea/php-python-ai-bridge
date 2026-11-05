@@ -536,7 +536,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, body: bytes, content_type: str, headers: Iterable[tuple[str, str]] = ()) -> None:
         self.connection.settimeout(READ_SECONDS)
-        self._replying = True
+        # Set before anything is written: a write that times out leaves a partial reply, so the connection must close.
+        self._replying = self.close_connection = True
         self.send_response(status)
         for name, header in headers:
             self.send_header(name, header)
@@ -545,7 +546,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
-        self.close_connection = True
         self.wfile.write(body)
         # Only now sent: a peer gone mid-reply raises above and gets no request line.
         self._status = status

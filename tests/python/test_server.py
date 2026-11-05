@@ -2333,7 +2333,7 @@ class ReplyTimeoutTests(unittest.TestCase):
         handler.connection = MagicMock()
         handler.request_version, handler.requestline = "HTTP/1.1", "POST /v1/jobs HTTP/1.1"
         handler.command, handler.path, handler.client_address = "POST", "/v1/jobs", ("127.0.0.1", 1)
-        handler.close_connection, handler._status, handler._replying = True, None, False
+        handler.close_connection, handler._status, handler._replying = False, None, False
         handler.server = MagicMock()
         handler.server.jobs.draining = False
         handler.server.jobs.submit.return_value = {"id": "a" * 32, "status": "queued"}
@@ -2343,3 +2343,4 @@ class ReplyTimeoutTests(unittest.TestCase):
         self.assertEqual(len(written), 1)
         self.assertIn(b" 202 ", written[0].split(b"\r\n")[0])
         self.assertIsNone(handler._status)
+        self.assertTrue(handler.close_connection)
