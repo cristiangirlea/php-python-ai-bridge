@@ -2313,3 +2313,33 @@ class LoggingStartTests(unittest.TestCase):
                 self.assertIn("BRIDGE_LOG", str(raised.exception.code))
                 self.assertNotIn(SENTINEL, str(raised.exception.code))
                 bridge.assert_not_called()
+
+
+class ReplyTimeoutTests(unittest.TestCase):
+    def test_a_reply_that_times_out_while_written_gets_no_second_response(self):
+        # A 202 whose write times out has begun on the wire; answering 408 after it would corrupt the stream.
+        written = []
+
+        class StalledStream:
+            def write(self, data):
+                written.append(bytes(data))
+                raise TimeoutError
+
+            def flush(self):
+                pass
+
+        handler = server.Handler.__new__(server.Handler)
+        handler.wfile = StalledStream()
+        handler.connection = MagicMock()
+        handler.request_version, handler.requestline = "HTTP/1.1", "POST /v1/jobs HTTP/1.1"
+        handler.command, handler.path, handler.client_address = "POST", "/v1/jobs", ("127.0.0.1", 1)
+        handler.close_connection, handler._status, handler._replying = True, None, False
+        handler.server = MagicMock()
+        handler.server.jobs.draining = False
+        handler.server.jobs.submit.return_value = {"id": "a" * 32, "status": "queued"}
+        with patch.object(handler, "_authorized", return_value="default"), \
+                patch.object(handler, "_body", return_value={"task": "rerank", "input": {}}):
+            handler.do_POST()
+        self.assertEqual(len(written), 1)
+        self.assertIn(b" 202 ", written[0].split(b"\r\n")[0])
+        self.assertIsNone(handler._status)
