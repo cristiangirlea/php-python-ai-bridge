@@ -94,6 +94,7 @@ def _serve(connection: Connection, backend: str, model_dir: str) -> None:
     # in the child's environment block; this second pop covers a store built by something that did not.
     os.environ.pop("BRIDGE_TOKEN", None)
     os.environ.pop("BRIDGE_TOKENS", None)
+    os.environ.pop("BRIDGE_TOKENS_FILE", None)
     # Ready only after the warm-up, so no job waits in a pipe nobody reads; a failed load still reports ready.
     try:
         for name, max_length, stride in WARM_UP.get(backend, ()):

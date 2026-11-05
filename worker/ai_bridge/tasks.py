@@ -241,6 +241,7 @@ def _inspect(parts: list[str]) -> dict[str, Any]:
     except OSError:
         in_block = needle_in_block = None  # no procfs here
     return {"pid": os.getpid(), "token_in_environment": "BRIDGE_TOKEN" in os.environ or "BRIDGE_TOKENS" in os.environ,
+            "token_file_in_environment": "BRIDGE_TOKENS_FILE" in os.environ,
             "token_in_environment_block": in_block, "held": held,
             "needle_in_environment": bool(needle) and any(needle in value for value in os.environ.values()),
             "needle_in_environment_block": needle_in_block}

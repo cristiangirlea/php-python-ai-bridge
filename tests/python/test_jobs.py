@@ -1540,6 +1540,7 @@ class WarmPoolTests(unittest.TestCase):
                         service.main()
                     report, = reports
                     self.assertFalse(report["token_in_environment"])
+                    self.assertFalse(report["token_file_in_environment"])
                     self.assertFalse(report["needle_in_environment"])
                     self.assertEqual(report["held"], 0)
                     if os.path.exists("/proc/self/environ"):
