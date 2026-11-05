@@ -312,7 +312,8 @@ class RedactRulesTests(unittest.TestCase):
     def test_the_rules_stay_fast_on_hostile_input_of_the_largest_size(self):
         # Each pattern starts only where its run starts, so no input makes it backtrack quadratically.
         hostile = ["a@" + "b" * 8190, "a@" + "b." * 4094 + "1", "a@" + "b-" * 4094 + "!", "1:" * 4096,
-                   "ab:" * 2730, "gb12 " + "a " * 4093, "x@y" * 2730, "." * 8000 + "@"]
+                   "ab:" * 2730, "gb12 " + "a " * 4093, "x@y" * 2730, "." * 8000 + "@", "0 " * 4096,
+                   "4111 " * 1638]
         for text in hostile:
             with self.subTest(text=text[:12]):
                 started = time.monotonic()
