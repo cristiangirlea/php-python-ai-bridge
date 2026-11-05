@@ -57,27 +57,27 @@ No host ports are published. Example/test clients connect over a Docker-internal
 
 ### Run the published image
 
-Every release tag publishes the worker as an image, so a deployment needs no checkout: `ghcr.io/cristiangirlea/php-python-ai-bridge-worker` (the demo backends, standard library only) and `ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx` (the hash-locked model wheels, no models), each tagged with the version, for linux/amd64 and linux/arm64. A stable release (`v1.2.0`) also moves `latest`; a prerelease (`v1.2.0-rc.1`) gets its version tag only. Both run as UID 65532 and listen on port 8090. Pin the version, not `latest`, and attach your application to the same private network:
+Every release tag publishes the worker as an image, so a deployment needs no checkout: `ghcr.io/cristiangirlea/php-python-ai-bridge-worker` (the demo backends, standard library only) and `ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx` (the hash-locked model wheels, no models), each tagged with the version without its `v` (`0.5.0` for the `v0.5.0` release), for linux/amd64 and linux/arm64. A stable release (`v1.2.0`) also moves `latest`; a prerelease (`v1.2.0-rc.1`) gets its version tag only. Both run as UID 65532 and listen on port 8090. Pin the version, not `latest`, and attach your application to the same private network:
 
 ```sh
-docker pull ghcr.io/cristiangirlea/php-python-ai-bridge-worker:latest
+docker pull ghcr.io/cristiangirlea/php-python-ai-bridge-worker:0.5.0
 docker network create --internal bridge-private
 docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -e BRIDGE_STATE_DIR=/state \
   --read-only --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 512m \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532 \
   --tmpfs /state:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700 \
-  ghcr.io/cristiangirlea/php-python-ai-bridge-worker:latest
+  ghcr.io/cristiangirlea/php-python-ai-bridge-worker:0.5.0
 ```
 
 `-e BRIDGE_TOKEN` passes the token from your shell without writing it on the command line. The ONNX image never holds models: `fetch` downloads the pinned, hash-checked files into a volume once, and the worker reads them from there without network:
 
 ```sh
 docker volume create bridge-models
-docker run --rm -v bridge-models:/cache ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:latest fetch
+docker run --rm -v bridge-models:/cache ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:0.5.0 fetch
 docker run -d --name worker --network bridge-private -e BRIDGE_TOKEN -v bridge-models:/cache:ro \
   --read-only --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 1536m \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532 \
-  ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:latest
+  ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx:0.5.0
 ```
 
 Compose's `release` profile runs the same images under the limits above: `BRIDGE_IMAGE_TAG=<version> docker compose -f docker/compose.yaml --profile release up -d worker-image` (or `model-worker-image`, which reads `.cache/models` from the `fetcher`). Each image carries build provenance and an SBOM; `gh attestation verify oci://ghcr.io/cristiangirlea/php-python-ai-bridge-worker:<version> --owner cristiangirlea` checks it. Publishing builds both images natively on amd64 and arm64, pulls and starts each by its pushed digest without models, then tags those tested images.
