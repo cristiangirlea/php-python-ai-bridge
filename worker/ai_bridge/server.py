@@ -443,6 +443,7 @@ class Handler(BaseHTTPRequestHandler):
     server: BridgeServer
     _owner: str | None
     _status: int | None
+    _replying: bool
 
     def setup(self) -> None:
         super().setup()
@@ -469,6 +470,7 @@ class Handler(BaseHTTPRequestHandler):
         started = time.monotonic() if logged else 0.0
         # The standard library types command and path as str; they are None until a request line parses.
         self.command = self.path = self._owner = self._status = None  # type: ignore[assignment]
+        self._replying = False
         try:
             super().handle_one_request()
         except HeadTooLarge:
@@ -534,6 +536,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, body: bytes, content_type: str, headers: Iterable[tuple[str, str]] = ()) -> None:
         self.connection.settimeout(READ_SECONDS)
+        # Set before anything is written: a write that times out leaves a partial reply, so the connection must close.
+        self._replying = self.close_connection = True
         self.send_response(status)
         for name, header in headers:
             self.send_header(name, header)
@@ -542,7 +546,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
-        self.close_connection = True
         self.wfile.write(body)
         # Only now sent: a peer gone mid-reply raises above and gets no request line.
         self._status = status
@@ -657,7 +660,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeError, RecursionError):
             self._error(400, "invalid_request", "Request does not match the task contract")
         except (TimeoutError, socket.timeout):
-            self._error(408, "request_timeout", "Request body was not received in time")
+            # A reply that timed out while being written already began; a second response would corrupt it.
+            if not self._replying:
+                self._error(408, "request_timeout", "Request body was not received in time")
 
 
 def _number[T](name: str, default: str, kind: Callable[[str], T]) -> T:

@@ -241,6 +241,7 @@ def _inspect(parts: list[str]) -> dict[str, Any]:
     except OSError:
         in_block = needle_in_block = None  # no procfs here
     return {"pid": os.getpid(), "token_in_environment": "BRIDGE_TOKEN" in os.environ or "BRIDGE_TOKENS" in os.environ,
+            "token_file_in_environment": "BRIDGE_TOKENS_FILE" in os.environ,
             "token_in_environment_block": in_block, "held": held,
             "needle_in_environment": bool(needle) and any(needle in value for value in os.environ.values()),
             "needle_in_environment_block": needle_in_block}
@@ -382,20 +383,18 @@ def _luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
-def _card_range(text: str, groups: list[tuple[int, int]], start: int) -> tuple[int, int] | None:
-    # Longest range first, then leftmost, so the most conservative valid mask wins.
-    ranges = []
-    for first in range(start, len(groups)):
+def _card_ranges(text: str, groups: list[tuple[int, int]]) -> dict[int, list[tuple[int, int]]]:
+    """Every whole-group range of 13 to 19 digits that passes Luhn, by digit count, each list in start order."""
+    found: dict[int, list[tuple[int, int]]] = {}
+    for first in range(len(groups)):
+        digits = ""
         for last in range(first, len(groups)):
-            digits = "".join(text[begin:end] for begin, end in groups[first:last + 1])
+            digits += text[groups[last][0]:groups[last][1]]
             if len(digits) > 19:
                 break
-            if len(digits) >= 13:
-                ranges.append((-len(digits), first, last, digits))
-    for _, first, last, digits in sorted(ranges):
-        if _luhn(digits):
-            return first, last
-    return None
+            if len(digits) >= 13 and _luhn(digits):
+                found.setdefault(len(digits), []).append((first, last))
+    return found
 
 
 def _cards(text: str) -> Iterator[tuple[int, int]]:
@@ -403,9 +402,22 @@ def _cards(text: str) -> Iterator[tuple[int, int]]:
     # an expiry is still found, while a random digit run gains no Luhn-valid sub-window.
     for run in re.finditer(r"(?<!\d)\d(?:[ -]?\d){12,}(?!\d)", text):
         groups = [(run.start() + group.start(), run.start() + group.end()) for group in re.finditer(r"\d+", run.group())]
+        # Ranges are found once per run and each list is walked forward once, so a long run stays linear.
+        ranges = _card_ranges(text, groups)
+        lengths = sorted(ranges, reverse=True)
+        positions = dict.fromkeys(lengths, 0)
         cursor = 0
         while cursor < len(groups):
-            found = _card_range(text, groups, cursor)
+            # Longest range first, then leftmost, so the most conservative valid mask wins.
+            found = None
+            for length in lengths:
+                candidates, index = ranges[length], positions[length]
+                while index < len(candidates) and candidates[index][0] < cursor:
+                    index += 1
+                positions[length] = index
+                if index < len(candidates):
+                    found = candidates[index]
+                    break
             if found is None:
                 break
             first, last = found

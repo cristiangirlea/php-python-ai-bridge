@@ -94,6 +94,7 @@ def _serve(connection: Connection, backend: str, model_dir: str) -> None:
     # in the child's environment block; this second pop covers a store built by something that did not.
     os.environ.pop("BRIDGE_TOKEN", None)
     os.environ.pop("BRIDGE_TOKENS", None)
+    os.environ.pop("BRIDGE_TOKENS_FILE", None)
     # Ready only after the warm-up, so no job waits in a pipe nobody reads; a failed load still reports ready.
     try:
         for name, max_length, stride in WARM_UP.get(backend, ()):
@@ -202,6 +203,8 @@ class JobStore:
         self._jobs: dict[str, Job] = {}
         self._keys: dict[tuple[str, str | None], str] = {}  # (owner, idempotency key) -> job id, for retained jobs only
         self._active: dict[str, _Worker] = {}  # job id -> the worker it was sent to
+        self._served: dict[str, int] = {}  # owner -> the dispatch count when it last got a child
+        self._dispatched = 0
         self._pool: list[_Worker] = []  # children that may take a job, idle or running one
         self._retiring: list[_Worker] = []  # children that never serve again, until they are gone
         self._backoff_until = 0.0  # no child is started before this time
@@ -581,6 +584,26 @@ class JobStore:
         if attached is not None:
             self._send(*attached)
 
+    def _dispatch(self, waiting: list[Job]) -> list[tuple[_Worker, tuple[str, str, Any]]]:
+        """Under the lock: give idle children the oldest queued job of the owner served longest ago, so one owner's
+        queue cannot take every child ahead of another owner's job; a running job keeps its child until it ends."""
+        queues: dict[str, deque[Job]] = {}
+        for job in waiting:
+            queues.setdefault(job["_owner"], deque()).append(job)
+        sends = []
+        while queues:
+            owner = min(queues, key=lambda name: self._served.get(name, -1))
+            attached = self._attach(queues[owner][0])
+            if attached is None:
+                break
+            sends.append(attached)
+            queues[owner].popleft()
+            if not queues[owner]:
+                del queues[owner]
+            self._dispatched += 1
+            self._served[owner] = self._dispatched
+        return sends
+
     def _attach(self, job: Job) -> tuple[_Worker, tuple[str, str, Any]] | None:
         """Under the lock: give a queued job to an idle ready child; returns (worker, message) to send, or None."""
         worker = next((candidate for candidate in self._pool if candidate.ready and candidate.job_id is None), None)
@@ -624,6 +647,7 @@ class JobStore:
                         self._retire(worker, died=True)
                     elif not worker.ready and now - worker.started_at >= READY_SECONDS:
                         self._retire(worker)
+                waiting: list[Job] = []
                 for job in list(self._jobs.values()):
                     if job["status"] in TERMINAL:
                         continue
@@ -633,9 +657,8 @@ class JobStore:
                         # Back in the queue after its child died before starting it, so no child will.
                         self._abort(job, "failed", code="service_restarted")
                     elif job["status"] == "queued" and job["id"] not in self._active:
-                        attached = self._attach(job)
-                        if attached is not None:
-                            sends.append(attached)
+                        waiting.append(job)
+                sends.extend(self._dispatch(waiting))
                 retiring = list(self._retiring)
             # Nothing that can wait on a process happens under the lock: a GET never waits for a child to start
             # or to die.

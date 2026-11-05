@@ -312,12 +312,18 @@ class RedactRulesTests(unittest.TestCase):
     def test_the_rules_stay_fast_on_hostile_input_of_the_largest_size(self):
         # Each pattern starts only where its run starts, so no input makes it backtrack quadratically.
         hostile = ["a@" + "b" * 8190, "a@" + "b." * 4094 + "1", "a@" + "b-" * 4094 + "!", "1:" * 4096,
-                   "ab:" * 2730, "gb12 " + "a " * 4093, "x@y" * 2730, "." * 8000 + "@"]
+                   "ab:" * 2730, "gb12 " + "a " * 4093, "x@y" * 2730, "." * 8000 + "@", "0 " * 4096,
+                   "4111 " * 1638]
         for text in hostile:
             with self.subTest(text=text[:12]):
                 started = time.monotonic()
                 self.redact(text[:8192])
                 self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_the_longest_card_range_wins_over_a_shorter_one_further_left(self):
+        # Groups 0-3 hold a valid 15-digit range and groups 1-6 a valid 16-digit one: the longer is masked.
+        text = "33134 33422 9 0420 5 2611 1 1440"
+        self.assertEqual(list(tasks._cards(text)), [(6, 27)])
 
     def test_overlapping_candidates_are_merged_not_dropped(self):
         merged = _merge([
@@ -1539,6 +1545,7 @@ class WarmPoolTests(unittest.TestCase):
                         service.main()
                     report, = reports
                     self.assertFalse(report["token_in_environment"])
+                    self.assertFalse(report["token_file_in_environment"])
                     self.assertFalse(report["needle_in_environment"])
                     self.assertEqual(report["held"], 0)
                     if os.path.exists("/proc/self/environ"):
@@ -1825,6 +1832,44 @@ class OwnerTests(unittest.TestCase):
             self.assertNotEqual(store.get(job["id"], "app")["status"], "cancelled")
             self.assertEqual(store.cancel(job["id"], "app")["status"], "cancelled")
             self.assertNotIn("owner", job)
+        finally:
+            store.close()
+
+    def test_idle_children_take_queued_jobs_in_turn_across_owners(self):
+        # One child: the app's three jobs and the other owner's one all wait for it. The other owner's job runs
+        # after the app's first, not after all three.
+        store = JobStore(self.settings(capacity=8))
+        try:
+            app = [store.submit("test.delay", {"seconds": 0.5}, owner="app") for _ in range(3)]
+            other = store.submit("test.delay", {"seconds": 0}, owner="other")
+            self.assertEqual(self.wait(store, other["id"], "other", timeout=15)["status"], "succeeded")
+            self.assertEqual(store.get(app[2]["id"], "app")["status"], "queued")
+            for job in app:
+                self.assertEqual(self.wait(store, job["id"], "app", timeout=15)["status"], "succeeded")
+        finally:
+            store.close()
+
+    def test_owners_not_yet_served_go_in_the_order_of_their_oldest_job(self):
+        # Both are queued before the child is ready: the other owner's job is older, so it runs first, although
+        # "app" sorts ahead of "other".
+        store = JobStore(self.settings(capacity=8))
+        try:
+            other = store.submit("test.delay", {"seconds": 0.5}, owner="other")
+            app = store.submit("test.delay", {"seconds": 0.5}, owner="app")
+            self.assertEqual(store.get(other["id"], "other")["status"], "queued")
+            self.assertEqual(self.wait(store, other["id"], "other", timeout=15)["status"], "succeeded")
+            self.assertNotIn(store.get(app["id"], "app")["status"], TERMINAL)
+            self.assertEqual(self.wait(store, app["id"], "app", timeout=15)["status"], "succeeded")
+        finally:
+            store.close()
+
+    def test_one_owner_s_jobs_start_in_submission_order(self):
+        store = JobStore(self.settings(capacity=8))
+        try:
+            jobs = [store.submit("test.delay", {"seconds": 0.2, "value": index}, owner="app") for index in range(4)]
+            for index, job in enumerate(jobs):
+                self.wait(store, job["id"], "app", timeout=15)
+                self.assertTrue(all(store.get(later["id"], "app")["status"] not in TERMINAL for later in jobs[index + 1:]))
         finally:
             store.close()
 
