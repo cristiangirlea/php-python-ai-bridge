@@ -168,8 +168,9 @@ $top = RerankResult::fromJob($client->wait($job->id), count($hits), topK: 10);
 
 Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 [SECURITY.md](SECURITY.md). If you want help putting the bridge into your application, sizing it or
-reviewing a redaction setup, open an issue describing the context, or sponsor the project through the
-Sponsor button.
+reviewing a redaction setup, open an
+[integration help issue](https://github.com/cristiangirlea/php-python-ai-bridge/issues/new?template=integration-help.yml)
+describing the context, or sponsor the project through the Sponsor button.
 
 ## Test layers
 

@@ -1,0 +1,68 @@
+name: Integration help
+description: Help putting the bridge into your application, sizing it, or reviewing a redaction setup.
+title: "help: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe your context so the answer fits your stack. This issue is public: leave out
+        tokens, hostnames, internal addresses, customer data and anything else you would not post openly.
+  - type: dropdown
+    id: need
+    attributes:
+      label: What do you need?
+      options:
+        - Putting the bridge into an application
+        - Sizing (instances, limits, throughput)
+        - Reviewing a redaction setup
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: framework
+    attributes:
+      label: Framework
+      options:
+        - Plain PHP
+        - Laravel
+        - Symfony
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: php
+    attributes:
+      label: PHP version
+      placeholder: "8.4"
+  - type: checkboxes
+    id: jobs
+    attributes:
+      label: Which jobs?
+      options:
+        - label: Rerank
+        - label: Embed
+        - label: Redact
+  - type: textarea
+    id: deployment
+    attributes:
+      label: Deployment
+      description: Where the worker would run (container, VM, host), which backend (demo or ONNX), CPU and memory, and how the application reaches it.
+  - type: input
+    id: volume
+    attributes:
+      label: Expected volume
+      placeholder: "about 2 jobs/s at peak, documents of 1-5 kB"
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What the feature does for your users, what you tried, and where you are stuck. For examples, use made-up sample text, never real documents.
+    validations:
+      required: true
+  - type: checkboxes
+    id: public
+    attributes:
+      label: Public issue
+      options:
+        - label: This issue contains no secrets, internal addresses or personal data.
+          required: true
