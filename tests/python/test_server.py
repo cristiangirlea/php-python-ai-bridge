@@ -504,6 +504,11 @@ class BusyDrainTests(unittest.TestCase):
                 patch.object(self.server._busy_drain, "add", wraps=self.server._busy_drain.add) as added:
             for _ in range(2):
                 self.busy_peer().sendall(b"x" * 65536)
+            # Each peer sees EOF before the server queues its socket.
+            deadline = time.monotonic() + 5
+            while added.call_count < 2:
+                self.assertLess(time.monotonic(), deadline, "the busy sockets were not queued")
+                time.sleep(0.01)
         drainer = self.server._busy_drain._thread
         self.assertTrue(drainer.is_alive())
         started = time.monotonic()
@@ -520,6 +525,11 @@ class BusyDrainTests(unittest.TestCase):
                 patch.object(self.server._busy_drain, "add", wraps=self.server._busy_drain.add) as added:
             for _ in range(2):
                 self.busy_peer().sendall(b"x" * 65536)
+            # Each peer sees EOF before the server queues its socket.
+            deadline = time.monotonic() + 5
+            while added.call_count < 2:
+                self.assertLess(time.monotonic(), deadline, "the busy sockets were not queued")
+                time.sleep(0.01)
         self.server.shutdown()
         self.assertFalse(self.server._busy_drain._thread.is_alive())
         self.assertEqual(len(added.call_args_list), 2)
@@ -1985,6 +1995,11 @@ class LoggingHttpTests(unittest.TestCase):
             with patch.object(self.server._busy_drain, "add", wraps=self.server._busy_drain.add) as added, \
                     patch.object(self.server, "shutdown_request", wraps=self.server.shutdown_request) as shut:
                 self.assertEqual(exchange(self.server.server_address, b"GET /" + SENTINEL.encode())[0], 503)
+                # The client sees EOF before the server queues the socket; its log line comes after that.
+                deadline = time.monotonic() + 5
+                while '"status":503' not in self.stream.getvalue():
+                    self.assertLess(time.monotonic(), deadline, "the busy reply was not logged")
+                    time.sleep(0.01)
             added.assert_called_once()
             shut.assert_not_called()
         finally:
