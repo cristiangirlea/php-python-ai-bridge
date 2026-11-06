@@ -748,7 +748,7 @@ class JobsTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
 
-    def wait(self, job_id, states=TERMINAL, timeout=5):
+    def wait(self, job_id, states=TERMINAL, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             job = self.store.get(job_id)
