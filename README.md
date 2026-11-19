@@ -172,6 +172,10 @@ reviewing a redaction setup, open an
 [integration help issue](https://github.com/cristiangirlea/php-python-ai-bridge/issues/new?template=integration-help.yml)
 describing the context, or sponsor the project through the Sponsor button.
 
+Paid help (an integration, a sizing run on your hardware, a review of your redaction setup) is
+paid through [GitHub Sponsors](https://github.com/sponsors/cristiangirlea). Open the integration
+help issue first, so the scope is agreed before anything is paid.
+
 ## Test layers
 
 ```sh
