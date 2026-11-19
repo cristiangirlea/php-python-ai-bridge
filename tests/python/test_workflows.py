@@ -796,7 +796,7 @@ jobs:  # the jobs
         for forbidden in ("uses:", "container:", "services:", "env:", "secrets.", "github.token"):
             self.assertNotIn(forbidden, job)
         self.assertIn("timeout-minutes: 10", job)
-        self.assertIn("composer require cristiangirlea/php-python-ai-bridge:^0.4 --no-scripts --no-plugins", job)
+        self.assertIn("composer require cristiangirlea/php-python-ai-bridge:^0.5 --no-scripts --no-plugins", job)
         self.assertIn("class_exists(PhpAiBridge\\Client::class)", job)
         self.assertIn("PhpAiBridge\\Client::MAX_DOCUMENTS === 512", job)
         self.assertIn("docker run --rm --network bridge composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac sh -ec '", job)

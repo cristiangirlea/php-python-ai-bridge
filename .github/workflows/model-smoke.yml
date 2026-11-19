@@ -71,13 +71,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # Checks the newest ^0.4 release on Packagist, not necessarily this tag; move the constraint with each minor.
+      # Checks the newest ^0.5 release on Packagist, not necessarily this tag; move the constraint with each minor.
       - name: Install and check the published package
         run: |
           docker run --rm --network bridge composer:2@sha256:af98f42dfff7c68ba8d53c2164fd9fde1087b7d449514baa38c418b1f6bc4bac sh -ec '
             mkdir /tmp/packagist-check
             cd /tmp/packagist-check
-            composer require cristiangirlea/php-python-ai-bridge:^0.4 --no-scripts --no-plugins
+            composer require cristiangirlea/php-python-ai-bridge:^0.5 --no-scripts --no-plugins
             php -r '\''require "vendor/autoload.php"; exit(class_exists(PhpAiBridge\Client::class) && PhpAiBridge\Client::MAX_DOCUMENTS === 512 ? 0 : 1);'\''
           '
 
