@@ -14,12 +14,13 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
-- The static analysis moves to mypy 2.4.1 and ruff 0.17.3 in `requirements-dev.txt` and `requirements-dev.lock`, which brings `mypy-extensions` 1.2.0; the findings are unchanged.
+- The static analysis moves to mypy 2.4.1 and ruff 0.17.4 in `requirements-dev.txt` and `requirements-dev.lock`, which brings `mypy-extensions` 1.2.0; the findings are unchanged.
 - The model wheels move to `onnxruntime` 1.31.1 in `requirements-model.txt` and `requirements-model.lock`, with hash-pinned CPython 3.12 wheels for Linux x86_64 and aarch64; the other model dependencies stay at their current versions.
 - Worker image publishing now builds natively on amd64 and arm64, pushes untagged digests and pulls and starts those exact images before creating multi-architecture version tags. Build provenance and SBOMs remain attached, with release attestations on the combined index digests; digest handoff uses job outputs without Actions artifacts.
 
 ### Fixed
 
+- `opentelemetry-api` 1.45.2 in `requirements-mcp.lock`, past CVE-2026-126360, which the weekly audit reported in 1.45.1; its requirements are unchanged.
 - The Symfony bundle accepts the documented `config/packages/php_ai_bridge.yaml`: `request_timeout_ms: '%env(int:BRIDGE_REQUEST_TIMEOUT_MS)%'` no longer fails the container build with `got 0`, because Symfony checks an env placeholder against a dummy `0` at build time. The timeout is now an integer setting whose range check skips env values, which the bundle checks when the client is first resolved. A literal value written in the configuration must be an integer from 1 to 300000, or the build fails; a quoted number (`'5000'`) or an env value without `int:` now fails the build too, where before it failed every resolution of the client.
 - Idle children take queued jobs in turn across tokens, the oldest job of the token served longest ago first, instead of strictly in submission order; one token's queue can no longer hold every child while another token's job waits past its deadline.
 - Card-number redaction finds its candidate ranges once per digit run, so its cost grows linearly with the text; a long run of separated digit groups took seconds at the 8192-character limit.
