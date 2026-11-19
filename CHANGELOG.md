@@ -20,6 +20,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
+- The framework test project locks Laravel 13.43.0 and Symfony 8.1.11 (platform PHP 8.4.1), past the Laravel process-output advisory and nine Symfony advisories in the 8.0 line; the library's own requirements are unchanged.
 - `opentelemetry-api` 1.45.2 in `requirements-mcp.lock`, past CVE-2026-126360, which the weekly audit reported in 1.45.1; its requirements are unchanged.
 - The Symfony bundle accepts the documented `config/packages/php_ai_bridge.yaml`: `request_timeout_ms: '%env(int:BRIDGE_REQUEST_TIMEOUT_MS)%'` no longer fails the container build with `got 0`, because Symfony checks an env placeholder against a dummy `0` at build time. The timeout is now an integer setting whose range check skips env values, which the bundle checks when the client is first resolved. A literal value written in the configuration must be an integer from 1 to 300000, or the build fails; a quoted number (`'5000'`) or an env value without `int:` now fails the build too, where before it failed every resolution of the client.
 - Idle children take queued jobs in turn across tokens, the oldest job of the token served longest ago first, instead of strictly in submission order; one token's queue can no longer hold every child while another token's job waits past its deadline.
