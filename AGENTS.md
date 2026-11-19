@@ -68,7 +68,7 @@ docker compose -f docker/compose.yaml --profile mcp --profile mcp-fetch --profil
 CI runs the PHP steps on each of PHP 8.2, 8.3, 8.4 and 8.5 with `BRIDGE_PHP_IMAGE` set to the matrix's
 pinned image, after first checking that the image really is `EXPECTED_PHP`; the stable `deterministic`
 check requires every matrix job, the image builds, the no-model drills and promtool job, and the MCP job, which runs the Laravel and Symfony tests and the TLS example once, on PHP 8.5
-(their locked majors need 8.3 and 8.4 or later). That required MCP job also runs `scripts/ha_check.sh` in the
+(their locked majors need 8.3 and 8.4.1 or later). That required MCP job also runs `scripts/ha_check.sh` in the
 isolated `bridge-instances` project: `ha-check` roundtrip, prepare a running keyed job on worker-a through
 the proxy, `kill -s SIGKILL worker-a`, `start worker-a`, then `ha-check` recover. Its separate named tmpfs
 state volumes stay mounted by the networkless `ha-state` keeper across kill/start; the driver removes them
