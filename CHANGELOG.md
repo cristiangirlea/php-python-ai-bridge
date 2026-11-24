@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-24
+
 ### Added
 
 - An "Integration help" issue form that asks for the framework, PHP version, jobs, deployment and expected volume, and reminds that the issue is public; the README's Support section links to it and says paid help is agreed there and paid through GitHub Sponsors.
@@ -135,7 +137,8 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 
-[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.2.0...v0.3.0
