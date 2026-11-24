@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Fixed
+
+- The release quality gate downloads only SQuAD, the dataset it measures on, instead of every pinned dataset; an unreachable host of a dataset the gate never reads can no longer stop the image publish. `scripts/public_data.py` takes dataset names as arguments and fetches all of them when given none.
+
 ## [0.6.0] - 2026-11-24
 
 ### Added

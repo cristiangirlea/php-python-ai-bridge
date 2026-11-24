@@ -280,6 +280,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("RELEVANCE_DATASET: squad", gate)
         self.assertIn('RELEVANCE_GATE: "1"', gate)
         self.assertIn("python scripts/relevance_measure.py", gate)
+        # The gate fetches its own dataset only, so another dataset's host cannot stop a release.
+        fetches = [line for line in found["quality"] if "quality-fetcher" in line]
+        self.assertEqual(fetches, ['docker compose -f docker/compose.yaml run --rm --no-deps quality-fetcher '
+                                   'python scripts/public_data.py "$RELEVANCE_DATASET"'])
         self.assertNotIn("if:", "\n".join(found["publish"]))
         for name, lines in found.items():
             if name.startswith("build-"):
@@ -701,7 +705,8 @@ jobs:  # the jobs
     def test_the_quality_job_runs_on_demand_and_for_release_tags(self):
         lines = jobs((REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8"))["quality"]
         self.assertEqual(lines[0], "if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'")
-        self.assertTrue(any("run --rm --no-deps quality-fetcher" in line for line in lines))
+        # Every dataset: this job prints the ArguAna and WNUT-17 tables as well as running the gate.
+        self.assertIn("docker compose -f docker/compose.yaml run --rm --no-deps quality-fetcher", lines)
         self.assertTrue(any("run --rm --no-deps -T model-quality" in line for line in lines))
         text = (REPO / ".github" / "workflows" / "model-smoke.yml").read_text(encoding="utf-8")
         self.assertIn("  push:\n    tags: ['v*']\n", text)

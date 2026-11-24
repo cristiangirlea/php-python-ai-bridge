@@ -533,7 +533,10 @@ With `RELEVANCE_GATE=1`, `scripts/relevance_measure.py` requires its `GATE_DATAS
 (`squad`) and fails when the default's NDCG@10 is below BM25; equality passes the release
 floor. The gate runs on tags in the model workflow and, independently, as a read-only
 job in `publish.yml`. The publishing job depends on it, so failure prevents both images
-and the GitHub release. No hosted publishing run was started for this local check.
+and the GitHub release. That job fetches SQuAD alone
+(`quality-fetcher python scripts/public_data.py squad`), so the host of a dataset the gate
+does not read cannot stop a release; the model workflow's `quality` job fetches all three.
+No hosted publishing run was started for this local check.
 
 MiniLM-L6 and BGE-base are the pinned Xenova **int8 conversions**, rather than the
 original fp32 models. [The fp32 fixture and regeneration command](../tests/fixtures/rerank-fp32.md)

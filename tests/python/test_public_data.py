@@ -102,5 +102,42 @@ class ReadTests(unittest.TestCase):
                 public_data.read("sample", self.directory)
 
 
+class SelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp())
+
+    def run_main(self, argv: list) -> list:
+        fetched = []
+
+        def fetch(name, directory):
+            fetched.append(name)
+            return directory / public_data.DATASETS[name]["file"]
+
+        with (mock.patch.object(public_data, "fetch", side_effect=fetch),
+              mock.patch.dict(public_data.os.environ, {"QUALITY_DATA_DIR": str(self.directory)}),
+              mock.patch.object(public_data.sys, "stderr", io.StringIO())):
+            public_data.main(argv)
+        return fetched
+
+    def test_no_argument_fetches_every_dataset(self):
+        self.assertEqual(self.run_main([]), ["squad", "arguana", "wnut17"])
+
+    def test_named_datasets_are_the_only_ones_fetched(self):
+        self.assertEqual(self.run_main(["squad"]), ["squad"])
+        self.assertEqual(self.run_main(["wnut17", "squad", "wnut17"]), ["wnut17", "squad"])
+
+    def test_an_unknown_name_is_refused_before_any_download(self):
+        with self.assertRaisesRegex(SystemExit, "unknown dataset nope: choose from arguana, squad, wnut17"):
+            self.run_main(["squad", "nope"])
+        with mock.patch.object(public_data, "fetch") as fetch:
+            with self.assertRaises(SystemExit):
+                public_data.main(["squad", "nope"])
+            fetch.assert_not_called()
+
+    def test_an_empty_name_is_refused_rather_than_read_as_every_dataset(self):
+        with self.assertRaisesRegex(SystemExit, "unknown dataset"):
+            self.run_main([""])
+
+
 if __name__ == "__main__":
     unittest.main()
