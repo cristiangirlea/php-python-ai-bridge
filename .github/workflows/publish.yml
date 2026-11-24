@@ -353,10 +353,11 @@ jobs:
           persist-credentials: false
       - name: Prepare disposable cache
         run: mkdir -p .cache && chmod 777 .cache
-      - name: Acquire pinned models and datasets
+      # Only the gate's dataset: the hosts of the datasets it never reads must not be able to stop a release.
+      - name: Acquire pinned models and the gate's dataset
         run: |
           docker compose -f docker/compose.yaml run --rm --no-deps fetcher
-          docker compose -f docker/compose.yaml run --rm --no-deps quality-fetcher
+          docker compose -f docker/compose.yaml run --rm --no-deps quality-fetcher python scripts/public_data.py "$RELEVANCE_DATASET"
       - name: Require default reranker NDCG at least BM25
         shell: bash
         run: |

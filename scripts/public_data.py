@@ -3,6 +3,9 @@
 `python scripts/public_data.py` is compose's quality-fetcher, the only quality step with network: it downloads each
 dataset into QUALITY_DATA_DIR (default .cache/datasets) and refuses bytes that differ from the pin. The measurements
 read the files offline and check them again, so a cache that changed is refused rather than measured.
+
+Dataset names as arguments (`python scripts/public_data.py squad`) fetch only those, so a step that reads one dataset
+does not depend on the hosts of the others.
 """
 
 import hashlib
@@ -88,12 +91,21 @@ def read(name: str, directory: Path) -> bytes:
     return data
 
 
-def main() -> None:
+def selected(names: list) -> list:
+    unknown = sorted(set(names) - set(DATASETS))
+    if unknown:
+        raise SystemExit(f"unknown dataset {', '.join(unknown)}: choose from {', '.join(sorted(DATASETS))}")
+    return list(dict.fromkeys(names)) or list(DATASETS)
+
+
+def main(argv: list) -> None:
+    names = selected(argv)
     directory = data_dir(os.environ)
-    for name, entry in DATASETS.items():
+    for name in names:
+        entry = DATASETS[name]
         path = fetch(name, directory)
         print(f"{name}: {path.name}, {entry['bytes']} bytes, SHA-256 verified, {entry['licence']}", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
