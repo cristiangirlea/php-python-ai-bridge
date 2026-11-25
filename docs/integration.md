@@ -18,7 +18,7 @@ Three normal tasks are implemented. Reranking: given a query and up to 512 candi
 
 ## Install through Composer
 
-The latest tagged release is `v0.6.1`; see [the changelog](../CHANGELOG.md). The package is on Packagist; run this inside your application's dependency-acquisition container:
+The latest tagged release is `v0.6.2`; see [the changelog](../CHANGELOG.md). The package is on Packagist; run this inside your application's dependency-acquisition container:
 
 ```sh
 composer require cristiangirlea/php-python-ai-bridge:^0.6 --no-scripts --no-plugins
