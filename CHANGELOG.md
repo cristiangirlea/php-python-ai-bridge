@@ -14,6 +14,10 @@ All notable changes to this project are documented in this file. The format foll
 
 - The model wheels move to `onnxruntime` 1.32.0 and `numpy` 2.5.5 (Linux x86_64 and aarch64), and the static analysis to ruff 0.17.5 (x86_64), in both the `requirements-*.txt` manifests and their hash locks; the other locked wheels stay at their versions. PHPStan moves to 2.3.6 in `composer.json` and `composer.lock`.
 
+## [0.6.1] - 2026-11-25
+
+The `v0.6.0` tag published no images and no GitHub release: its quality gate could not download a dataset it does not measure on. 0.6.1 carries everything listed under 0.6.0 and is the first release with images for it.
+
 ### Fixed
 
 - The release quality gate downloads only SQuAD, the dataset it measures on, instead of every pinned dataset; an unreachable host of a dataset the gate never reads can no longer stop the image publish. `scripts/public_data.py` takes dataset names as arguments and fetches all of them when given none.
@@ -149,7 +153,8 @@ First release: a typed PHP client for bounded Python AI tasks (rerank, embed, re
 - Trusted services only: one bearer token authorizes every job, so the application must authenticate users and own the mapping from job IDs to their owners.
 - Private HTTP transport: deploy behind an authenticated TLS boundary; the example routes have no end-user authentication and publish no ports.
 
-[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cristiangirlea/php-python-ai-bridge/compare/v0.3.0...v0.4.0
