@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- A test requires every `requirements-*.txt` pin to be the version its `.lock` installs, so a manifest bumped without its lock fails CI instead of passing on the old wheels.
+
+### Changed
+
+- The model wheels move to `onnxruntime` 1.32.0 and `numpy` 2.5.5 (Linux x86_64 and aarch64), and the static analysis to ruff 0.17.5 (x86_64), in both the `requirements-*.txt` manifests and their hash locks; the other locked wheels stay at their versions. PHPStan moves to 2.3.6 in `composer.json` and `composer.lock`.
+
 ## [0.6.1] - 2026-11-25
 
 The `v0.6.0` tag published no images and no GitHub release: its quality gate could not download a dataset it does not measure on. 0.6.1 carries everything listed under 0.6.0 and is the first release with images for it.
