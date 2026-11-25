@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- A test requires every `requirements-*.txt` pin to be the version its `.lock` installs, so a manifest bumped without its lock fails CI instead of passing on the old wheels.
+
+### Changed
+
+- The model wheels move to `onnxruntime` 1.32.0 and `numpy` 2.5.5 (Linux x86_64 and aarch64), and the static analysis to ruff 0.17.5 (x86_64), in both the `requirements-*.txt` manifests and their hash locks; the other locked wheels stay at their versions. PHPStan moves to 2.3.6 in `composer.json` and `composer.lock`.
+
 ### Fixed
 
 - The release quality gate downloads only SQuAD, the dataset it measures on, instead of every pinned dataset; an unreachable host of a dataset the gate never reads can no longer stop the image publish. `scripts/public_data.py` takes dataset names as arguments and fetches all of them when given none.
