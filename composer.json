@@ -1,8 +1,8 @@
 {
   "name": "cristiangirlea/php-python-ai-bridge",
-  "description": "A typed PHP client for bounded Python AI tasks, with a FrankenPHP example",
+  "description": "Local PII redaction, reranking and embeddings for PHP: a typed client and a Python worker with optional ONNX models",
   "type": "library",
-  "keywords": ["ai", "python", "onnx", "rerank", "embeddings", "redaction", "ner", "laravel", "symfony", "frankenphp"],
+  "keywords": ["ai", "python", "onnx", "rerank", "embeddings", "redaction", "pii", "privacy", "llm", "ner", "laravel", "symfony", "frankenphp"],
   "homepage": "https://github.com/cristiangirlea/php-python-ai-bridge",
   "license": "MIT",
   "require": {"php": ">=8.2 <8.6", "ext-curl": "*", "ext-json": "*"},
