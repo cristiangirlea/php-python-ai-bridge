@@ -2,11 +2,42 @@
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/cristiangirlea/php-python-ai-bridge/badge)](https://scorecard.dev/viewer/?uri=github.com/cristiangirlea/php-python-ai-bridge)
 
-A framework-independent PHP client and a small Python task service. Submit document reranking from PHP, poll progress, receive typed results, and cancel work without keeping the original HTTP request open.
+Scrub personal data from text before it reaches a hosted LLM, rerank the results of the search you already have, and embed text for an index you own: from PHP, on your own CPU, with no hosted AI account. A typed PHP client, with a Laravel service provider and a Symfony bundle, sends each job to a small Python worker in a locked-down container. Its ONNX image runs pinned models; the plain image runs the redaction rules and test backends only.
 
-Includes a FrankenPHP worker-mode example, deterministic fault tests, and an optional real ONNX reranker. No hosted AI account is required.
+## Two things people use it for
 
-Since 0.4.0 it is supported as an internal service for applications that own their host and network: one or more worker instances, each answering only the jobs it took, on a private network behind the operator's TLS and the application's own authentication, with the job table kept across a restart by `BRIDGE_STATE_DIR`. It is not for exposing the worker publicly, nor for throughput beyond the measured figures (one ONNX child on one CPU served about 1.3 jobs/s of the rerank, embed and redact mix at the default limits, and an instance's sustained admission is `BRIDGE_RESULT_CAPACITY` / `BRIDGE_RETENTION_SECONDS`, 384 / 300 s ≈ 1.28 jobs/s by default) without more instances; [the operations guide](docs/operations.md) has the topologies and the sizing.
+**Scrub text before it leaves your systems.** A support ticket or a document is redacted locally,
+then only the masked text goes to a hosted model, and the spans tell you what was hidden and by
+which rule or model. Names, organisations and places are masked by the ONNX image's models; the plain
+image masks only what the rules find (card numbers, IBANs, emails, IP addresses, phone numbers).
+
+```php
+$job = $client->submitRedact($ticket, ['PER', 'ORG', 'LOC']);
+$result = RedactResult::fromJob($client->wait($job->id), $ticket);
+$answer = $yourLlmClient->ask($result->text);   // the masked text, never the original
+```
+
+Redaction is a pre-filter, not a compliance control: on public social-media text it hides about
+half of the named entities at the default threshold, and nearly all card numbers, IBANs, emails and
+IP addresses ([measured](docs/testing.md#measured-ner-quality-on-wnut-17-informational)).
+
+**Reorder search results.** Keep the search you have (a database query or a search engine), take its top
+results, and let the cross-encoder order them for the query. Measure on your own data: reranking can
+help or hurt depending on the corpus ([measured](docs/testing.md#measured-reranking-quality-on-arguana-informational)).
+
+```php
+$hits = $search->query($q, limit: 100);            // your existing search
+$job = $client->submitRerank($q, array_column($hits, 'text'), topK: 10);
+$top = RerankResult::fromJob($client->wait($job->id), count($hits), topK: 10);
+```
+
+To start: `composer require cristiangirlea/php-python-ai-bridge:^0.6`, run the worker from the [published ONNX image](#run-the-published-image) (`ghcr.io/cristiangirlea/php-python-ai-bridge-worker-onnx`, after its one-time model `fetch`), and set `BRIDGE_URL` and `BRIDGE_TOKEN`. The [integration guide](docs/integration.md) covers Laravel, Symfony and plain PHP.
+
+## How it works
+
+The client is framework-independent: submit a job, poll its progress, receive a typed result, and cancel work without keeping the original HTTP request open. The repository includes a FrankenPHP worker-mode example and deterministic fault tests.
+
+Since 0.4.0 the worker is supported as an internal service for applications that own their host and network: one or more worker instances, each answering only the jobs it took, on a private network behind the operator's TLS and the application's own authentication, with the job table kept across a restart by `BRIDGE_STATE_DIR`. It is not for exposing the worker publicly, nor for throughput beyond the measured figures (one ONNX child on one CPU served about 1.3 jobs/s of the rerank, embed and redact mix at the default limits, and an instance's sustained admission is `BRIDGE_RESULT_CAPACITY` / `BRIDGE_RETENTION_SECONDS`, 384 / 300 s ≈ 1.28 jobs/s by default) without more instances; [the operations guide](docs/operations.md) has the topologies and the sizing.
 
 ## What is implemented
 
@@ -137,32 +168,6 @@ echo $documents[$result->rankings[0]['index']];
 ```
 
 `submitEmbed($texts)` works the same way and `EmbedResult::fromJob($job, count($texts))` yields one unit-length vector per text; the service stores nothing, so persist vectors in an index your application owns. `submitRedact($text)` returns a job whose `RedactResult::fromJob($job, $text)` holds the masked text and the spans found, each tagged with the rule or model that found it. `wait()` returns terminal jobs, including failures; `RerankResult::fromJob()` refuses anything except a successful rerank result. Use `cancel($id)` explicitly to stop remote work. A local wait timeout does **not** cancel the job.
-
-## Two things people use it for
-
-**Scrub text before it leaves your systems.** A support ticket or a document is redacted locally,
-then the masked text goes to a hosted model. Nothing personal leaves the network, and the spans
-tell you what was hidden and by which rule or model.
-
-```php
-$job = $client->submitRedact($ticket, ['PER', 'ORG', 'LOC']);
-$result = RedactResult::fromJob($client->wait($job->id), $ticket);
-$answer = $yourLlmClient->ask($result->text);   // the masked text, never the original
-```
-
-Redaction is a pre-filter, not a compliance control: on public social-media text it hides about
-half of the named entities at the default threshold, and nearly all card numbers, IBANs, emails and
-IP addresses ([measured](docs/testing.md#measured-ner-quality-on-wnut-17-informational)).
-
-**Reorder search results.** Keep the search you have (a database, Meilisearch, Elastic), take its top
-results, and let the cross-encoder order them for the query. Measure on your own data: reranking can
-help or hurt depending on the corpus ([measured](docs/testing.md#measured-reranking-quality-on-arguana-informational)).
-
-```php
-$hits = $search->query($q, limit: 100);            // your existing search
-$job = $client->submitRerank($q, array_column($hits, 'text'), topK: 10);
-$top = RerankResult::fromJob($client->wait($job->id), count($hits), topK: 10);
-```
 
 ## Support
 
